@@ -64,6 +64,7 @@ static class EngineTests
         Run("Packet-loss concealment", TestConcealer);
         Run("Calibration cross-correlation", TestCalibration);
         Run("Host v3.1: PIN, sync, clock, remote, talk, source, EQ", TestHostV31);
+        Run("mDNS / DNS-SD messages", TestDiscovery);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -1355,12 +1356,70 @@ static class EngineTests
 
             // wrong PINs count toward the lockout
             link.Pin = "123456";
-            for (int i = 0; i < 10; i++) using (var b = WsClient.Open(port, "k=ABCD2345&p=" + (100000 + i))) { }
+            for (int i = 0; i < 10; i++) { try { using (var b = WsClient.Open(port, "k=ABCD2345&p=" + (100000 + i))) { } } catch (IOException) { } catch (SocketException) { } }
             bool blocked;
             try { using (var b = WsClient.Open(port, "k=ABCD2345&p=123456")) blocked = !b.Handshake.StartsWith("HTTP/1.1 101"); }
             catch { blocked = true; }
             Check(blocked, "10 wrong PINs -> locked out, even with the right one");
         }
         finally { link.Stop(); }
+    }
+
+    static void TestDiscovery()
+    {
+        var txt = DnsSd.HostTxt("Qasim's Laptop", "windows", false, "ABCD2345");
+        Check(txt.Contains("v=3") && txt.Contains("pin=0") && txt.Contains("k=ABCD2345") && txt.Contains("host=windows"), "TXT per protocol");
+        Check(!DnsSd.HostTxt("x", "windows", true, null).Exists(t => t.StartsWith("k=")), "no k when not allowed");
+        Check(DnsSd.SafeLabel("a.b.c") == "abc" && Encoding.UTF8.GetByteCount(DnsSd.SafeLabel(new string('é', 50))) <= 63, "labels: no dots, max 63 bytes");
+        Check(DnsSd.HostLabel("LAPTOP_Q 7") == "LAPTOP-Q-7", "host label");
+
+        byte[] resp = DnsSd.BuildResponse("Qasim's Laptop", "LAPTOP-Q", 8790, txt, IPAddress.Parse("192.168.1.16"), 120);
+        var m = DnsSd.Parse(resp, resp.Length);
+        Check(m.IsResponse && m.Records.Count == 4, "response: PTR, SRV, TXT, A");
+        var hosts = DiscoveryParse.Hosts(m, IPAddress.Parse("10.0.0.9"));
+        Check(hosts.Count == 1, "one host found");
+        if (hosts.Count == 1)
+        {
+            var h = hosts[0];
+            Check(h.Name == "Qasim's Laptop" && h.Address == "192.168.1.16" && h.Port == 8790 && h.Key == "ABCD2345" && !h.Pin, "host details from SRV/TXT/A");
+            Check(h.Link == "http://192.168.1.16:8790/?k=ABCD2345", "link built from the advert");
+        }
+        byte[] nk = DnsSd.BuildResponse("Pc", "PC", 9000, DnsSd.HostTxt("Pc", "android", true, null), null, 120);
+        var noKey = DiscoveryParse.Hosts(DnsSd.Parse(nk, nk.Length), IPAddress.Parse("10.0.0.9"));
+        Check(noKey.Count == 1 && noKey[0].Key == null && noKey[0].Link == null && noKey[0].Pin && noKey[0].HostKind == "android" && noKey[0].Address == "10.0.0.9", "without k: asks for the link; address from the sender");
+        byte[] bb = DnsSd.BuildResponse("Pc", "PC", 9000, txt, null, 0);
+        var bye = DnsSd.Parse(bb, bb.Length);
+        Check(DiscoveryParse.Hosts(bye, IPAddress.Loopback).Count == 0 && DiscoveryParse.Goodbyes(bye).Contains("Pc"), "goodbye (TTL 0) removes the host");
+
+        byte[] q = DnsSd.BuildQuery(DnsSd.ServiceType, true);
+        var qm = DnsSd.Parse(q, q.Length);
+        Check(!qm.IsResponse && qm.Questions.Count == 1 && qm.Questions[0] == "_dualearbuds._tcp.local" && DnsSd.AsksFor(qm, DnsSd.ServiceType), "query round trip");
+
+        // name compression (as real responders send it): PTR rdata points back at the question name
+        var c = new List<byte> { 0, 0, 0x84, 0, 0, 1, 0, 1, 0, 0, 0, 0 };
+        foreach (var part in "_dualearbuds._tcp.local".Split('.')) { c.Add((byte)part.Length); c.AddRange(Encoding.ASCII.GetBytes(part)); }
+        c.Add(0); c.Add(0); c.Add(12); c.Add(0); c.Add(1);
+        c.Add(0xC0); c.Add(12);                                 // answer name -> offset 12
+        c.AddRange(new byte[] { 0, 12, 0, 1, 0, 0, 0, 120, 0, 5, 2, (byte)'P', (byte)'C', 0xC0, 12 });
+        var cm = DnsSd.Parse(c.ToArray(), c.Count);
+        Check(cm.Records.Count == 1 && cm.Records[0].Target == "PC._dualearbuds._tcp.local", "compressed names");
+        var loop = new byte[] { 0, 0, 0x84, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0xC0, 12, 0, 12, 0, 1, 0, 0, 0, 1, 0, 0 };
+        bool threw = false;
+        try { DnsSd.Parse(loop, loop.Length); } catch (FormatException) { threw = true; }
+        Check(threw, "pointer loop rejected");
+        threw = false;
+        try { DnsSd.Parse(resp, 30); } catch (FormatException) { threw = true; }
+        Check(threw, "truncated packet rejected");
+        var rnd = new Random(1);
+        int crashes = 0;
+        for (int i = 0; i < 2000; i++)
+        {
+            var junk = (byte[])resp.Clone();
+            for (int j = 0; j < 4; j++) junk[rnd.Next(junk.Length)] = (byte)rnd.Next(256);
+            try { var jm = DnsSd.Parse(junk, junk.Length); DiscoveryParse.Hosts(jm, IPAddress.Loopback); }
+            catch (FormatException) { }
+            catch (Exception) { crashes++; }
+        }
+        Check(crashes == 0, "fuzzed packets never crash the parser");
     }
 }
