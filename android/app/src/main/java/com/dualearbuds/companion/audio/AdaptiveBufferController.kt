@@ -26,23 +26,23 @@ class AdaptiveBufferController(
     val cleanMs: Long = 20_000,
     val decayStepMs: Int = 5,
     val decayEveryMs: Long = 5_000
-) {
+) : BufferController {
     /** Current adaptive buffer in ms (without the manual delay). */
-    var currentMs: Int = startMs
+    override var currentMs: Int = startMs
         private set
 
     private var holdUntil = Long.MIN_VALUE
     private var nextDecayAt = Long.MAX_VALUE
 
     /** Back to the starting value; the clean period starts at [now]. Call when playback starts. */
-    fun reset(now: Long) {
+    override fun reset(now: Long) {
         currentMs = startMs
         holdUntil = Long.MIN_VALUE
         nextDecayAt = now + cleanMs
     }
 
     /** Playback ran dry. Returns the new value. */
-    fun onUnderrun(now: Long): Int {
+    override fun onUnderrun(now: Long): Int {
         // Any underrun restarts the 20 s clean period.
         nextDecayAt = now + cleanMs
         if (now < holdUntil) return currentMs
@@ -52,7 +52,7 @@ class AdaptiveBufferController(
     }
 
     /** Applies the slow decrease. Call regularly (any rate); skipped time is caught up. Returns the value. */
-    fun tick(now: Long): Int {
+    override fun tick(now: Long): Int {
         if (nextDecayAt == Long.MAX_VALUE) {
             // Never reset: start the clean period now.
             nextDecayAt = now + cleanMs

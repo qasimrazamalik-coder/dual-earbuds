@@ -75,7 +75,7 @@ class JitterBufferTest {
         jb.push(packet(), 70)
         assertEquals(1, jb.underruns)
         assertEquals(50, jb.targetMs())
-        assertEquals(60, jb.adaptiveMs)
+        assertEquals(50, jb.adaptiveMs) // the active (manual) value; the automatic ones are untouched
     }
 
     @Test
