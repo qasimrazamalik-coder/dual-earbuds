@@ -232,7 +232,8 @@ namespace DualEarbuds
             Engine.Talk.Tick();
             UpdateAppPreset();
             if (browser != null) FoundHosts = browser.Hosts;
-            if (Listen != null) { Listen.Buffer.Mode = BufferModeSetting; Listen.Buffer.ManualMs = Settings.BufferMs; Raise(ListenChanged); }
+            if (Listen != null) { Listen.Buffer.Mode = BufferModeSetting; Listen.Buffer.ManualMs = Settings.BufferMs; }
+            if (Listen != null || browser != null) Raise(ListenChanged);
             MaybeAutoCheckUpdates();
             UpdateStates();
             if (dirty) { Settings.Save(); dirty = false; }
@@ -809,7 +810,7 @@ namespace DualEarbuds
                 UpdateStates();
                 return;
             }
-            if (!Engine.Running) { Talking = false; TalkError = "Start sharing first - talk-over mixes your voice into the shared sound."; UpdateStates(); return; }
+            if (!Engine.Running) { Talking = false; TalkError = "Start mirroring first - talk-over mixes your voice into the shared sound."; UpdateStates(); return; }
             Engine.Talk.Noise = NoiseSetting;
             int rate = Engine.Rate;
             RunAsync(() => Engine.Talk.Begin(rate), ok =>

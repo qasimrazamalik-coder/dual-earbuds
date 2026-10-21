@@ -92,6 +92,7 @@ namespace DualEarbuds
             var items = new StackPanel();
             AddNav(items, "home", "Home", Icons.Home, false);
             AddNav(items, "phones", "Phones", Icons.Phone, false);
+            AddNav(items, "listen", "Listen", Icons.Listen, true);
             AddNav(items, "settings", "Settings", Icons.Tune, false);
             AddNav(items, "diagnostics", "Diagnostics", Icons.Pulse, true);
             AddNav(items, "about", "About", Icons.Info, false);
@@ -162,6 +163,7 @@ namespace DualEarbuds
             switch (key)
             {
                 case "phones": p = new PhonesPage(Ctl); break;
+                case "listen": p = new ListenPage(Ctl); break;
                 case "settings":
                     p = new SettingsPage(Ctl,
                         m => { var h = ThemeRequested; if (h != null) h(m); },
@@ -180,13 +182,42 @@ namespace DualEarbuds
         public void Navigate(string key)
         {
             if (current == key) return;
+            IPage was;
+            if (current != null && pages.TryGetValue(current, out was) && was is ListenPage) ((ListenPage)was).Hidden();
             current = key;
             RadioButton rb;
             if (navButtons.TryGetValue(key, out rb) && rb.IsChecked != true) rb.IsChecked = true;
             var p = Page(key);
             p.Refresh();
+            if (p is ListenPage) ((ListenPage)p).Shown();
             host.Content = p.Root;
             scroller.ScrollToTop();
+        }
+
+        // Screenshots: scroll so that the element tagged with this name is at the top.
+        public void ScrollTo(string anchor)
+        {
+            IPage p;
+            if (current == null || !pages.TryGetValue(current, out p)) return;
+            var target = Find(p.Root, anchor);
+            if (target == null) return;
+            UpdateLayout();
+            try
+            {
+                var pt = target.TransformToAncestor(host).Transform(new Point(0, 0));
+                scroller.ScrollToVerticalOffset(Math.Max(0, pt.Y - 8));
+                scroller.UpdateLayout();
+            }
+            catch (InvalidOperationException) { }
+        }
+
+        static FrameworkElement Find(DependencyObject d, string anchor)
+        {
+            var fe = d as FrameworkElement;
+            if (fe != null && fe.Name == anchor) return fe;
+            int n = VisualTreeHelper.GetChildrenCount(d);
+            for (int i = 0; i < n; i++) { var r = Find(VisualTreeHelper.GetChild(d, i), anchor); if (r != null) return r; }
+            return null;
         }
 
         public void RefreshAll()
@@ -194,7 +225,14 @@ namespace DualEarbuds
             IPage p;
             if (current != null && pages.TryGetValue(current, out p)) p.Refresh();
             bool on = Ctl.Running;
-            footText.Text = on ? (Ctl.StatusKind == StateKind.Problem ? "Mirroring · check outputs" : "Mirroring") : (Ctl.WantRunning ? "Waiting for sound" : "Stopped");
+            if (Ctl.Listening)
+            {
+                bool ok = Ctl.ListenStateNow == ListenState.Playing;
+                footText.Text = ok ? "Listening" : "Listening · " + (Ctl.ListenStateNow == ListenState.HostPaused ? "host paused" : "connecting");
+                footDot.SetResourceReference(Shape.FillProperty, ok ? "Good" : "Warn");
+                return;
+            }
+            footText.Text = on ? (Ctl.StatusKind == StateKind.Problem ? "Mirroring · check outputs" : Ctl.Talking ? "Mirroring · talking" : "Mirroring") : (Ctl.WantRunning ? "Waiting for sound" : "Stopped");
             footDot.SetResourceReference(Shape.FillProperty, on ? (Ctl.StatusKind == StateKind.Problem ? "Warn" : "Good") : (Ctl.WantRunning ? "Warn" : "Muted"));
         }
 
@@ -267,6 +305,7 @@ namespace DualEarbuds
             View.MaxButton.Click += (s, e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
             View.CloseButton.Click += (s, e) => Close();
             View.ThemeRequested += m => Theme.Apply(Application.Current.Resources, m);
+            Theme.StartFollowingSystem(Application.Current.Resources);   // "System" follows Windows live
             View.HotkeyChanged += UpdateHotkey;
             View.ResetRequested += ResetAll;
             View.ExitRequested += ExitApp;
@@ -396,6 +435,7 @@ namespace DualEarbuds
             fast.Stop();
             slow.Stop();
             if (hotkeyRegistered && hwndSource != null) UnregisterHotKey(hwndSource.Handle, HotkeyId);
+            Theme.StopFollowingSystem();
             ctl.Shutdown();
             if (tray != null) { tray.Visible = false; tray.Dispose(); }
             base.OnClosed(e);
@@ -423,6 +463,20 @@ namespace DualEarbuds
             ctl.Settings.Hotkey = true;
             ctl.Settings.Party = false;
             ctl.Settings.CheckUpdates = true;
+            ctl.Settings.PinOn = false;
+            ctl.Settings.RemoteControl = false;
+            ctl.Settings.ShowOnNetwork = false;
+            ctl.Settings.SuggestEq = "";
+            ctl.Settings.SourceMode = "all";
+            ctl.Settings.SourceApp = "";
+            ctl.Settings.TalkMode = "hold";
+            ctl.Settings.Noise = "strong";
+            ctl.Settings.SmartEq = "off";
+            ctl.Settings.Dialogue = "off";
+            ctl.Settings.Buffer = "smart";
+            ctl.Settings.BufferMs = 80;
+            ctl.Settings.ListenOutputs.Clear();
+            // calibrations, hearing profiles and recent hosts are kept: they describe hardware and people, not preferences
             // NetworkScope stays: it mirrors the firewall rule, which only changes with Windows' permission
             ctl.Settings.Outs.Clear();
             try { StartupReg.Set(false, ""); } catch { }

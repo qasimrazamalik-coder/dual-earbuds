@@ -26,6 +26,22 @@ $appRes = @("/resource:$player,web-player.html")
 
 New-Item -ItemType Directory -Force bin, dist | Out-Null
 
+# One version for everything: AppInfo.Version in src\Engine\Support.cs -> the exe's file/product version.
+$m = Select-String -Path src\Engine\Support.cs -Pattern 'public const string Version = "([0-9]+\.[0-9]+\.[0-9]+)"'
+if (-not $m) { throw 'AppInfo.Version not found in src\Engine\Support.cs' }
+$version = $m.Matches[0].Groups[1].Value
+$verFile = Join-Path $PSScriptRoot 'bin\AssemblyVersion.cs'
+Set-Content -Encoding UTF8 $verFile @"
+[assembly: System.Reflection.AssemblyVersion("$version.0")]
+[assembly: System.Reflection.AssemblyFileVersion("$version.0")]
+[assembly: System.Reflection.AssemblyInformationalVersion("$version")]
+[assembly: System.Reflection.AssemblyProduct("Dual Earbuds")]
+[assembly: System.Reflection.AssemblyTitle("Dual Earbuds")]
+[assembly: System.Reflection.AssemblyCompany("Qasim Raza Malik")]
+[assembly: System.Reflection.AssemblyCopyright("Copyright (c) 2026 Qasim Raza Malik (MIT)")]
+"@
+Write-Host "Version $version"
+
 function Compile($out, $sources, $extra) {
   $args = $common + $refs + @("/target:winexe", "/out:$out") + $extra + $sources
   & $csc @args
@@ -33,16 +49,16 @@ function Compile($out, $sources, $extra) {
 }
 
 Write-Host '1/4  App (without icon, to draw the icon)'
-Compile 'bin\DualEarbuds-noicon.exe' ($engine + $appSrc) $appRes
+Compile 'bin\DualEarbuds-noicon.exe' ($engine + $appSrc + @($verFile)) $appRes
 Write-Host '2/4  Icon'
 $p = Start-Process -FilePath 'bin\DualEarbuds-noicon.exe' -ArgumentList '--make-icon', "`"$PSScriptRoot\build\app.ico`"" -Wait -PassThru -WindowStyle Hidden
 if ($p.ExitCode -ne 0 -or -not (Test-Path build\app.ico)) { throw 'Icon generation failed' }
 Write-Host '3/4  App'
-Compile 'dist\DualEarbuds.exe' ($engine + $appSrc) ($appRes + @('/win32icon:build\app.ico'))
+Compile 'dist\DualEarbuds.exe' ($engine + $appSrc + @($verFile)) ($appRes + @('/win32icon:build\app.ico'))
 Write-Host '4/4  Installer'
 $setupSources = $setup + @((Resolve-Path src\App\Theme.cs).Path, (Resolve-Path src\App\Ui.cs).Path, (Resolve-Path src\App\IconFactory.cs).Path,
                            (Resolve-Path src\Engine\QrCode.cs).Path, (Resolve-Path src\Engine\Support.cs).Path,
-                           (Resolve-Path src\Engine\Firewall.cs).Path)
+                           (Resolve-Path src\Engine\Firewall.cs).Path, $verFile)
 Compile 'dist\DualEarbuds-Setup.exe' $setupSources @('/win32icon:build\app.ico', '/resource:dist\DualEarbuds.exe,DualEarbuds.exe', '/main:DualEarbuds.Setup.SetupProgram')
 Remove-Item bin\DualEarbuds-noicon.exe -ErrorAction SilentlyContinue
 

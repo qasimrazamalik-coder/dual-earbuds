@@ -95,9 +95,9 @@ namespace DualEarbuds.Setup
         // ------------------------------------------------------------------ install / repair
         public void Install(InstallOptions o, byte[] appBytes, string setupSourcePath)
         {
-            string folder = SafeInstallFolder(Path.GetFullPath(o.Folder));
-            o.Folder = folder;
             var prev = Installed();
+            string folder = SafeInstallFolder(Path.GetFullPath(o.Folder), prev);
+            o.Folder = folder;
             bool hadRule = prev != null && prev.Options.FirewallRule;
             Progress("Preparing...");
             CloseRunningApp(folder);
@@ -274,12 +274,16 @@ namespace DualEarbuds.Setup
 
         // The install folder must be empty, already ours, or new. Otherwise use a "Dual Earbuds" subfolder,
         // so uninstall can never touch files that were there before.
-        static string SafeInstallFolder(string folder)
+        // A non-empty folder that isn't ours gets a "Dual Earbuds" subfolder, so uninstalling never touches other
+        // files. The folder recorded in our uninstall key is ours by definition (repair after the exe was deleted
+        // must not nest), and so is any folder holding our exe or our setup copy.
+        static string SafeInstallFolder(string folder, InstalledInfo prev)
         {
             try
             {
+                if (prev != null && !string.IsNullOrEmpty(prev.Folder) && SameDir(prev.Folder, folder)) return folder;
                 if (Directory.Exists(folder) && Directory.EnumerateFileSystemEntries(folder).Any()
-                    && !File.Exists(Path.Combine(folder, AppExe)))
+                    && !File.Exists(Path.Combine(folder, AppExe)) && !File.Exists(Path.Combine(folder, SetupExe)))
                     return Path.Combine(folder, "Dual Earbuds");
             }
             catch { }

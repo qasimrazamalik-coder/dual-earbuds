@@ -395,7 +395,7 @@ namespace DualEarbuds
             var srcHead = new Grid { Margin = new Thickness(0, 0, 0, 8) };
             srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var srcLabel = Ui.Text("Share", 12.5, FontWeights.SemiBold, "Muted");
+            var srcLabel = Ui.Text("Sound comes from", 12.5, FontWeights.SemiBold, "Muted");
             srcLabel.VerticalAlignment = VerticalAlignment.Center;
             srcHead.Children.Add(srcLabel);
             var modeSeg = PageKit.Segmented("srcmode", new[] { "Whole laptop", "One app only" }, ctl.Settings.SourceMode == "app" && ctl.AppSupported ? 1 : 0, i =>
@@ -544,7 +544,7 @@ namespace DualEarbuds
             startBtn.Content = on ? "Stop mirroring" : "Start mirroring";
             startBtn.SetResourceReference(FrameworkElement.StyleProperty, on ? "Ghost" : "Primary");
             startBtn.FontSize = 16;
-            heroTitle.Text = ctl.Listening ? "Listening to " + ctl.ListenHostName : ctl.Running ? "Sharing " + (ctl.Settings.SourceMode == "app" && ctl.AppSupported && ctl.Settings.SourceApp != "" ? ctl.SourceDescription : "this laptop") : (ctl.WantRunning ? "Waiting for sound source" : "Stopped");
+            heroTitle.Text = ctl.Listening ? "Listening to " + ctl.ListenHostName : ctl.Running ? (ctl.Settings.SourceMode == "app" && ctl.AppSupported && ctl.Settings.SourceApp != "" ? "Mirroring " + ctl.SourceDescription : "Mirroring") : (ctl.WantRunning ? "Waiting for sound source" : "Stopped");
             bool appMode = ctl.Settings.SourceMode == "app" && ctl.AppSupported;
             suppress = true;
             modeButtons[appMode ? 1 : 0].IsChecked = true;
@@ -651,6 +651,7 @@ namespace DualEarbuds
             detail.Text = (p.Client == "android" ? "Android app" : p.Client == "windows" ? "Windows laptop" : "Browser") +
                           (string.IsNullOrEmpty(p.Earbuds) ? "" : " · " + p.Earbuds) +
                           (p.RttMs >= 0 ? " · " + p.RttMs + " ms" : "") +
+                          (p.Synced ? " · in step" : "") +
                           (p.BufferMs > 0 ? " · buffer " + p.BufferMs + " ms" : "") +
                           (p.Underruns > 0 ? " · " + p.Underruns + (p.Underruns == 1 ? " dropout" : " dropouts") : "") +
                           (party ? "" : " · volume " + p.Volume + "%");
@@ -672,10 +673,17 @@ namespace DualEarbuds
         readonly TextBox link;
         readonly TextBlock qrHint, linkState, listTitle, partyCount;
         readonly StackPanel partyHead;
-        readonly CheckBox enable, party;
-        readonly TextBox port;
+        readonly CheckBox enable, party, pinSwitch, remoteSw;
+        readonly TextBox port, pinBox;
+        readonly Grid pinRow;
+        readonly StackPanel pinShow;
+        readonly TextBlock pinBig, hotTitle, hotText, talkState, talkHint;
+        readonly Border hotspot, talkCard;
+        readonly Button talkBtn;
+        readonly ComboBox suggest;
+        bool talkHeld;
         readonly StackPanel phoneList;
-        readonly Border publicNote, emptyCard;
+        readonly Border emptyCard;
         readonly Dictionary<string, ListenerCard> cards = new Dictionary<string, ListenerCard>();
         string shownUrl = "\0";
         bool shownParty;
@@ -721,6 +729,20 @@ namespace DualEarbuds
             ps.TextAlignment = TextAlignment.Center;
             partyHead.Children.Add(ps);
             qrCol.Children.Add(partyHead);
+            pinShow = new StackPanel { Margin = new Thickness(0, 0, 0, 16), Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Center };
+            var pinCap = Ui.Text("ROOM PIN", 11.5, FontWeights.Bold, "Muted");
+            pinCap.HorizontalAlignment = HorizontalAlignment.Center;
+            pinShow.Children.Add(pinCap);
+            pinBig = Ui.Heading("", 46);
+            pinBig.HorizontalAlignment = HorizontalAlignment.Center;
+            pinBig.FontFamily = Theme.Mono;
+            pinBig.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
+            pinShow.Children.Add(pinBig);
+            var pinTell = Ui.Text("Tell guests this PIN out loud. It is not in the QR code or the link.", 12.5, FontWeights.Normal, "Muted");
+            pinTell.TextAlignment = TextAlignment.Center;
+            pinTell.MaxWidth = 300;
+            pinShow.Children.Add(pinTell);
+            qrCol.Children.Add(pinShow);
 
             qrHost = new Border { Width = QrNormal, Height = QrNormal, CornerRadius = new CornerRadius(16), HorizontalAlignment = HorizontalAlignment.Center, Padding = new Thickness(6) };
             qrHost.SetResourceReference(Border.BackgroundProperty, "QrBg");
@@ -750,29 +772,12 @@ namespace DualEarbuds
             // right column
             var right = new StackPanel();
 
-            // shown only on public networks (cafe / hotel / university Wi-Fi)
-            var noteBody = new StackPanel();
-            noteBody.Children.Add(Ui.Heading("You're on a public network", 15));
-            var nt1 = Ui.Text("Like cafe, hotel or university Wi-Fi. Phones can still connect with the link above.", 13, FontWeights.Normal, "Text");
-            nt1.Margin = new Thickness(0, 4, 0, 6);
-            noteBody.Children.Add(nt1);
-            noteBody.Children.Add(Ui.Text("If a phone can't open the link, this Wi-Fi blocks devices from reaching each other. Use a hotspot instead: " +
-                "turn on the phone's hotspot and connect the laptop to it, or turn on Mobile hotspot on the laptop and connect the phone. " +
-                "The sound goes straight between them and doesn't use mobile data.", 12.5, FontWeights.Normal, "Muted"));
-            var noteRow = new Grid();
-            noteRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            noteRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var wifi = Ui.Icon(Icons.Wifi, 22, "Warn", false);
-            wifi.Margin = new Thickness(0, 2, 14, 0);
-            wifi.VerticalAlignment = VerticalAlignment.Top;
-            noteRow.Children.Add(wifi);
-            Grid.SetColumn(noteBody, 1);
-            noteRow.Children.Add(noteBody);
-            publicNote = Ui.Card(noteRow);
-            publicNote.Margin = new Thickness(0, 0, 0, 14);
-            publicNote.SetResourceReference(Border.BorderBrushProperty, "Warn");
-            publicNote.Visibility = Visibility.Collapsed;
-            right.Children.Add(publicNote);
+            // hotspot help: on public networks, or when no phone joined within 60 s. The app changes no system setting.
+            var hotBtn = Ui.Button("Open Mobile hotspot settings", "Ghost", (s1, e1) => Controller.OpenHotspotSettings());
+            hotspot = PageKit.Note(Icons.Wifi, "Warn", "", "", hotBtn, out hotTitle, out hotText);
+            hotspot.Margin = new Thickness(0, 0, 0, 14);
+            hotspot.Visibility = Visibility.Collapsed;
+            right.Children.Add(hotspot);
 
             var settingsCard = new StackPanel();
             enable = Ui.Switch("", ctl.Settings.PhoneLink);
@@ -784,6 +789,23 @@ namespace DualEarbuds
             party.Checked += (s, e) => { if (!updating) { ctl.SetParty(true); Rebuild(); } };
             party.Unchecked += (s, e) => { if (!updating) { ctl.SetParty(false); Rebuild(); } };
             settingsCard.Children.Add(PageKit.Row("Party mode", "Up to 16 listeners instead of 8, with a big QR code to scan and a volume control for each phone.", party));
+            pinSwitch = Ui.Switch("", ctl.Settings.PinOn);
+            pinSwitch.Checked += (s1, e1) => { if (!updating) { ctl.SetPinOn(true); Refresh(); } };
+            pinSwitch.Unchecked += (s1, e1) => { if (!updating) { ctl.SetPinOn(false); Refresh(); } };
+            var pinCtl = new StackPanel { Orientation = Orientation.Horizontal };
+            pinBox = new TextBox { Width = 84, FontFamily = Theme.Mono, MaxLength = 6, Text = ctl.Settings.Pin, ToolTip = "4 to 6 digits" };
+            pinBox.KeyDown += (s1, e1) => { if (e1.Key == Key.Enter) ApplyPin(); };
+            var pinApply = Ui.Button("Set", "Ghost", (s1, e1) => ApplyPin());
+            pinApply.Margin = new Thickness(6, 0, 0, 0);
+            var pinNew = Ui.Button("New PIN", "Ghost", (s1, e1) => { ctl.NewPin(); pinBox.Text = ctl.Settings.Pin; Refresh(); });
+            pinNew.Margin = new Thickness(6, 0, 12, 0);
+            pinCtl.Children.Add(pinBox);
+            pinCtl.Children.Add(pinApply);
+            pinCtl.Children.Add(pinNew);
+            pinCtl.Children.Add(pinSwitch);
+            pinRow = PageKit.Row("Require PIN", "Guests also type a 4-6 digit PIN. Wrong guesses lock that device out for a while.", pinCtl);
+            pinRow.Margin = new Thickness(0, 10, 0, 6);
+            settingsCard.Children.Add(pinRow);
             settingsCard.Children.Add(PageKit.Divider());
             var portRow = new StackPanel { Orientation = Orientation.Horizontal };
             port = new TextBox { Width = 90, Text = ctl.Settings.PhonePort.ToString(), FontFamily = Theme.Mono };
@@ -797,6 +819,66 @@ namespace DualEarbuds
             linkState.Margin = new Thickness(0, 6, 0, 0);
             settingsCard.Children.Add(linkState);
             right.Children.Add(Ui.Card(settingsCard));
+
+            // talk-over
+            var talkBody = new StackPanel();
+            var talkTop = new Grid();
+            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var micIc = Ui.Icon(Icons.Mic, 22, "Accent", false);
+            micIc.Margin = new Thickness(0, 0, 14, 0);
+            talkTop.Children.Add(micIc);
+            var tt = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            tt.Children.Add(Ui.Heading("Talk to everyone", 15));
+            talkState = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            talkState.Margin = new Thickness(0, 3, 0, 0);
+            tt.Children.Add(talkState);
+            Grid.SetColumn(tt, 1);
+            talkTop.Children.Add(tt);
+            talkBtn = Ui.Button("Hold to talk", "Primary", null);
+            talkBtn.MinWidth = 150;
+            talkBtn.PreviewMouseLeftButtonDown += (s1, e1) => { if (ctl.Settings.TalkMode == "hold") { talkHeld = true; talkBtn.CaptureMouse(); ctl.SetTalking(true); e1.Handled = true; Refresh(); } };
+            talkBtn.PreviewMouseLeftButtonUp += (s1, e1) => { if (talkHeld) { talkHeld = false; talkBtn.ReleaseMouseCapture(); ctl.SetTalking(false); e1.Handled = true; Refresh(); } };
+            talkBtn.LostMouseCapture += (s1, e1) => { if (talkHeld) { talkHeld = false; ctl.SetTalking(false); Refresh(); } };
+            // mouse presses in hold mode are handled above; this is a tap in toggle mode, or the keyboard (Space/Enter) in either
+            talkBtn.Click += (s1, e1) => { ctl.SetTalking(!ctl.Talking); Refresh(); };
+            Grid.SetColumn(talkBtn, 2);
+            talkTop.Children.Add(talkBtn);
+            talkBody.Children.Add(talkTop);
+            var talkMode = PageKit.Segmented("talkmode", new[] { "Hold to talk", "Tap to start / stop" }, ctl.Settings.TalkMode == "toggle" ? 1 : 0, i =>
+            {
+                if (ctl.Talking) ctl.SetTalking(false);
+                ctl.Settings.TalkMode = i == 1 ? "toggle" : "hold";
+                ctl.MarkDirty();
+                Refresh();
+            });
+            var modeRow = PageKit.Row("Button", null, talkMode);
+            modeRow.Margin = new Thickness(36, 12, 0, 0);
+            talkBody.Children.Add(modeRow);
+            talkHint = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            talkHint.Margin = new Thickness(36, 6, 0, 0);
+            talkBody.Children.Add(talkHint);
+            talkCard = Ui.Card(talkBody);
+            talkCard.Margin = new Thickness(0, 14, 0, 0);
+            right.Children.Add(talkCard);
+
+            // what listeners may do / get
+            var lo = new StackPanel();
+            remoteSw = Ui.Switch("", ctl.Settings.RemoteControl);
+            remoteSw.Checked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(true); };
+            remoteSw.Unchecked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(false); };
+            lo.Children.Add(PageKit.Row("Let listeners control playback", "Play/pause, next, previous and volume from their phone or laptop press the media keys here. Off by default.", remoteSw));
+            lo.Children.Add(PageKit.Divider());
+            suggest = PageKit.Combo(150);
+            suggest.Items.Add(new ComboBoxItem { Content = "No suggestion", Tag = "" });
+            for (int i = 0; i < EqPresets.Names.Length; i++) suggest.Items.Add(new ComboBoxItem { Content = EqPresets.Labels[i], Tag = EqPresets.Names[i] });
+            PageKit.SelectTag(suggest, ctl.Settings.SuggestEq);
+            suggest.SelectionChanged += (s1, e1) => { if (!updating) ctl.SetSuggestEq(PageKit.Tag(suggest)); };
+            lo.Children.Add(PageKit.Row("Suggest an EQ", "Listeners see the suggestion and choose whether to use it - handy for a movie night.", suggest));
+            var loCard = Ui.Card(lo);
+            loCard.Margin = new Thickness(0, 14, 0, 0);
+            right.Children.Add(loCard);
 
             listTitle = PageKit.Section("Connected phones");
             right.Children.Add(listTitle);
@@ -833,6 +915,16 @@ namespace DualEarbuds
             grid.Children.Add(right);
             root.Children.Add(grid);
             Rebuild();
+        }
+
+        void ApplyPin()
+        {
+            if (!ctl.SetPin(pinBox.Text.Trim()))
+            {
+                MessageBox.Show("The PIN needs 4 to 6 digits.", "Dual Earbuds", MessageBoxButton.OK, MessageBoxImage.Warning);
+                pinBox.Text = ctl.Settings.Pin;
+            }
+            Refresh();
         }
 
         void ApplyPort()
@@ -888,7 +980,34 @@ namespace DualEarbuds
             enable.IsChecked = ctl.Settings.PhoneLink;
             party.IsChecked = ctl.Party;
             party.IsEnabled = ctl.Settings.PhoneLink;
+            pinSwitch.IsChecked = ctl.Settings.PinOn;
+            remoteSw.IsChecked = ctl.Settings.RemoteControl;
+            pinRow.Visibility = ctl.Party ? Visibility.Visible : Visibility.Collapsed;
+            if (!pinBox.IsKeyboardFocusWithin) pinBox.Text = ctl.Settings.Pin;
             updating = false;
+
+            bool pinOn = ctl.PinActive;
+            pinShow.Visibility = pinOn ? Visibility.Visible : Visibility.Collapsed;
+            pinBig.Text = pinOn ? ctl.Settings.Pin : "";
+
+            bool hold = ctl.Settings.TalkMode != "toggle";
+            talkBtn.Content = ctl.Talking ? (hold ? "Talking..." : "Stop talking") : (hold ? "Hold to talk" : "Talk");
+            talkBtn.SetResourceReference(FrameworkElement.StyleProperty, ctl.Talking ? "Ghost" : "Primary");
+            talkState.Text = ctl.TalkError ?? (ctl.Talking ? "Your microphone is mixed in; the music is 12 dB quieter." : ctl.Running ? "Mixes your microphone into what everyone hears." : "Start mirroring on Home first.");
+            talkState.SetResourceReference(TextBlock.ForegroundProperty, ctl.TalkError != null ? "Warn" : ctl.Talking ? "Good" : "Muted");
+            talkBtn.IsEnabled = ctl.Running || ctl.Talking;
+            talkHint.Text = "Mic noise cancelling: " + (ctl.Settings.Noise == "off" ? "off" : ctl.Settings.Noise) + " (Settings > Smart features).";
+
+            if (ctl.ShowHotspotHelp)
+            {
+                bool pub = ctl.NetworkCategory == "Public";
+                hotTitle.Text = pub ? "You're on a public network" : "No phone has joined yet?";
+                hotText.Text = (pub ? "Cafe, hotel and university Wi-Fi often stop devices from reaching each other. " : "If phones can't open the link, the Wi-Fi may keep devices apart. ") +
+                               "Use a hotspot instead: turn on Mobile hotspot on this laptop and connect the phone to it (the sound goes straight between them and uses no mobile data), " +
+                               "or turn on the phone's hotspot and connect the laptop. Dual Earbuds changes no Windows settings itself - the button only opens the page.";
+                hotspot.Visibility = Visibility.Visible;
+            }
+            else hotspot.Visibility = Visibility.Collapsed;
 
             bool partyOn = ctl.Party && ctl.Settings.PhoneLink;
             string url = ctl.Settings.PhoneLink ? ctl.LinkUrl : null;
@@ -920,7 +1039,6 @@ namespace DualEarbuds
             partyCount.Text = n + " of " + cap + " listening";
             listTitle.Text = (partyOn ? "Listeners · " + n + " of " + cap : "Connected phones" + (n > 0 ? " · " + n : "")).ToUpperInvariant();
 
-            publicNote.Visibility = ctl.Settings.PhoneLink && ctl.NetworkCategory == "Public" ? Visibility.Visible : Visibility.Collapsed;
             if (!ctl.Settings.PhoneLink) linkState.Text = "Off.";
             else if (ctl.Phone == null && !ctl.Demo) linkState.Text = "Not running - port " + ctl.Settings.PhonePort + " may be in use by another app (is the old Dual Earbuds still open?).";
             else
@@ -962,15 +1080,17 @@ namespace DualEarbuds
             root.Children.Add(PageKit.Header("Settings", "Make Dual Earbuds work the way you like."));
             var s = ctl.Settings;
 
-            root.Children.Add(PageKit.Section("Appearance"));
+            var apSec = PageKit.Section("Appearance");
+            apSec.Name = "anchor_appearance";
+            root.Children.Add(apSec);
             var ap = new StackPanel();
-            string[] modes = { "system", "dark", "light" };
+            string[] modes = { "system", "light", "dark" };
             int mi = Array.IndexOf(modes, s.Theme);
-            ap.Children.Add(PageKit.Row("Theme", "Follow Windows, or always dark or light.",
-                PageKit.Segmented("theme", new[] { "System", "Dark", "Light" }, mi < 0 ? 0 : mi, i => { s.Theme = modes[i]; ctl.MarkDirty(); onTheme(modes[i]); })));
+            ap.Children.Add(PageKit.Row("Theme", "System follows Windows' light or dark app mode, and switches when Windows does.",
+                PageKit.Segmented("theme", new[] { "System", "Light", "Dark" }, mi < 0 ? 0 : mi, i => { s.Theme = modes[i]; ctl.MarkDirty(); onTheme(modes[i]); })));
             root.Children.Add(Ui.Card(ap));
 
-            root.Children.Add(PageKit.Section("Window"));
+            root.Children.Add(PageKit.Section("General"));
             var win = new StackPanel();
             win.Children.Add(PageKit.Row("When I close the window", "Keep running near the clock so the sound keeps playing, or exit completely.",
                 PageKit.Segmented("close", new[] { "Keep running", "Exit" }, s.CloseToTray ? 0 : 1, i => { s.CloseToTray = i == 0; ctl.MarkDirty(); })));
@@ -979,10 +1099,8 @@ namespace DualEarbuds
             minSw.Checked += (o, e) => { s.StartMinimized = true; ctl.MarkDirty(); };
             minSw.Unchecked += (o, e) => { s.StartMinimized = false; ctl.MarkDirty(); };
             win.Children.Add(PageKit.Row("Start minimized", "Open straight to the tray icon.", minSw));
-            root.Children.Add(Ui.Card(win));
-
-            root.Children.Add(PageKit.Section("Startup"));
-            var st = new StackPanel();
+            win.Children.Add(PageKit.Divider());
+            var st = win;
             var boot = Ui.Switch("", StartupReg.Get());
             boot.Checked += (o, e) => SetBoot(true);
             boot.Unchecked += (o, e) => SetBoot(false);
@@ -992,13 +1110,18 @@ namespace DualEarbuds
             auto.Checked += (o, e) => { s.AutoStart = true; ctl.MarkDirty(); };
             auto.Unchecked += (o, e) => { s.AutoStart = false; ctl.MarkDirty(); };
             st.Children.Add(PageKit.Row("Start mirroring automatically", "Begin as soon as the app opens.", auto));
-            root.Children.Add(Ui.Card(st));
-
-            root.Children.Add(PageKit.Section("Shortcut"));
+            st.Children.Add(PageKit.Divider());
             var hk = Ui.Switch("", s.Hotkey);
             hk.Checked += (o, e) => { s.Hotkey = true; ctl.MarkDirty(); onHotkeyChanged(); };
             hk.Unchecked += (o, e) => { s.Hotkey = false; ctl.MarkDirty(); onHotkeyChanged(); };
-            root.Children.Add(Ui.Card(PageKit.Row("Ctrl + Alt + M", "Start or stop mirroring from anywhere.", hk)));
+            st.Children.Add(PageKit.Row("Shortcut Ctrl + Alt + M", "Start or stop mirroring from anywhere.", hk));
+            root.Children.Add(Ui.Card(win));
+
+            // ---- smart features
+            var smSec = PageKit.Section("Smart features");
+            smSec.Name = "anchor_smart";
+            root.Children.Add(smSec);
+            root.Children.Add(new SmartPanel(ctl).Root);
 
             // ---- which networks phones may connect on (Windows Firewall rule)
             root.Children.Add(PageKit.Section("Phone link network"));
@@ -1032,6 +1155,12 @@ namespace DualEarbuds
             netStatus.Margin = new Thickness(2, 10, 0, 0);
             netStatus.Visibility = Visibility.Collapsed;
             net.Children.Add(netStatus);
+            net.Children.Add(PageKit.Divider());
+            var showSw = Ui.Switch("", s.ShowOnNetwork);
+            showSw.Checked += (o, e) => ctl.SetShowOnNetwork(true);
+            showSw.Unchecked += (o, e) => ctl.SetShowOnNetwork(false);
+            net.Children.Add(PageKit.Row("Show on this network", "Other Dual Earbuds devices nearby list this laptop with its link, so they join with one click. " +
+                "On home (private) networks that happens anyway; turn this on to allow it on public networks too. Off: they see the name and ask for the link.", showSw));
             root.Children.Add(Ui.Card(net));
 
             // ---- updates
@@ -1105,8 +1234,22 @@ namespace DualEarbuds
             upd.Children.Add(PageKit.Row("Check automatically", "Once a day, in the background. Nothing is downloaded or installed until you press Install.", autoUpd));
             root.Children.Add(Ui.Card(upd));
 
-            root.Children.Add(PageKit.Section("Data"));
+            root.Children.Add(PageKit.Section("Help and data"));
             var data = new StackPanel();
+            var copyDiag = Ui.Button("Copy diagnostics", "Ghost", null);
+            copyDiag.Click += (o, e) =>
+            {
+                string text;
+                try { text = ctl.DiagnosticsText(); }
+                catch (Exception ex) { text = "Diagnostics failed: " + ex.Message; }
+                try { Clipboard.SetText(text); copyDiag.Content = "Copied"; }
+                catch { copyDiag.Content = "Couldn't copy"; }
+                var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+                t.Tick += (o2, e2) => { t.Stop(); copyDiag.Content = "Copy diagnostics"; };
+                t.Start();
+            };
+            data.Children.Add(PageKit.Row("Diagnostics", "Version, Windows build, network type, outputs, listeners and the last 200 log lines - to paste when asking for help. Never includes your link key or PIN.", copyDiag));
+            data.Children.Add(PageKit.Divider());
             var open = Ui.Button("Open folder", "Ghost", (o, e) => PageKit.OpenFolder(AppInfo.DataDir));
             data.Children.Add(PageKit.Row("Settings and logs", AppInfo.DataDir, open));
             data.Children.Add(PageKit.Divider());
