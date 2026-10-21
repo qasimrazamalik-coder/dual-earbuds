@@ -196,6 +196,7 @@ namespace DualEarbuds
         public void Initialize()
         {
             startedAt = DateTime.Now;
+            Engine.Talk.Noise = NoiseSetting;
             StartWorker();
             RefreshDevices(true);
             if (Settings.PhoneLink) StartPhone();
