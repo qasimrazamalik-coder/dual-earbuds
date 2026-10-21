@@ -130,7 +130,11 @@ fun HostScreen(onBack: () -> Unit) {
                 "Audio access",
                 "Android counts copying other apps' sound as recording; the mic stays off unless you use Talk-over."
             ) { ok ->
-                if (ok) askProjection() else info = "Without audio access this phone can't share other apps' sound."
+                if (ok) {
+                    askProjection()
+                } else {
+                    info = "Without audio access this phone can't share other apps' sound."
+                }
             }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -150,7 +154,11 @@ fun HostScreen(onBack: () -> Unit) {
             return
         }
         withPermission(Manifest.permission.RECORD_AUDIO, "Microphone", "So your voice can be mixed into what listeners hear.") { ok ->
-            if (ok) HostController.setTalking(true) else info = "Talk-over needs the microphone."
+            if (ok) {
+                HostController.setTalking(true)
+            } else {
+                info = "Talk-over needs the microphone."
+            }
         }
     }
 

@@ -4,6 +4,32 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/**
+ * Copies the one shared browser player page (repo-root shared/web-player.html, also served by the
+ * Windows host) into this module's generated assets. Never fork the page: edit the shared file.
+ */
+abstract class CopyWebPlayer : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val page: RegularFileProperty
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        out.mkdirs()
+        page.get().asFile.copyTo(out.resolve("web-player.html"), overwrite = true)
+    }
+}
+
+val copyWebPlayer = tasks.register<CopyWebPlayer>("copyWebPlayer") {
+    page.set(layout.projectDirectory.file("../../shared/web-player.html"))
+    outputDir.set(layout.buildDirectory.dir("generated/webPlayer/assets"))
+}
+
 android {
     namespace = "com.dualearbuds.host"
     compileSdk = 35
@@ -26,11 +52,14 @@ android {
         compose = true
     }
 
-    // The browser player page is shared with the Windows host: serve shared/web-player.html as an asset.
-    sourceSets["main"].assets.srcDir("../../shared")
-
     testOptions {
         unitTests.isReturnDefaultValues = true
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(copyWebPlayer, CopyWebPlayer::outputDir)
     }
 }
 

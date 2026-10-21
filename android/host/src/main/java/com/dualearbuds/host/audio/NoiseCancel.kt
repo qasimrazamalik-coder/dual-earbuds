@@ -1,6 +1,6 @@
 package com.dualearbuds.host.audio
 
-/** Smart feature #1: mic noise cancelling for talk-over. Default [STRONG]… see [DEFAULT]. */
+/** Smart feature #1: mic noise cancelling for talk-over (Off · Light · Strong; default on = [STRONG]). */
 enum class NoiseCancel(val label: String, val wet: Float) {
     OFF("Off", 0f),
     /** 50 % dry / 50 % denoised, as smart-features.md specifies. */
