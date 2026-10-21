@@ -264,7 +264,9 @@ class PlaybackService : Service() {
                 message = "Looking for ${target.display}…",
                 hostKind = HostKind.UNKNOWN,
                 party = false,
-                packets = 0, lost = 0, dropped = 0, underruns = 0, userMuted = false
+                packets = 0, lost = 0, dropped = 0, underruns = 0, userMuted = false,
+                remote = false, talking = false, source = "all", sourceApp = "", hostEq = null,
+                synced = false, concealed = 0, pinRequired = false
             )
         }
         sessionJob = scope.launch {

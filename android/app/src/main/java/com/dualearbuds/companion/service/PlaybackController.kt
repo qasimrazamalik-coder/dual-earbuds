@@ -69,7 +69,7 @@ data class PlayerState(
 
 /** Playback buffer settings: adaptive (AUTO) or fixed (MANUAL), plus a manual delay on top. */
 data class BufferSettings(
-    val mode: BufferMode = BufferMode.AUTO,
+    val mode: BufferMode = BufferMode.SMART,
     val manualMs: Int = Prefs.DEFAULT_MANUAL_BUFFER_MS,
     val delayMs: Int = 0
 )
