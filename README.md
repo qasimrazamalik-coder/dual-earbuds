@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/logo/mark-128.png" width="96" alt="Dual Earbuds logo">
+<img src="assets/logo/png/mark-128.png" width="96" alt="Dual Earbuds logo">
 
 # Dual Earbuds
 
