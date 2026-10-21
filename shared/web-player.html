@@ -28,6 +28,11 @@ input[type=range]{width:100%;accent-color:var(--accent)}
 details{font-size:14px;color:var(--muted)}
 details summary{cursor:pointer;color:var(--text);font-weight:600}
 details li{margin:6px 0;line-height:1.45}
+.pin{display:none}.pin.show{display:block}
+.pin h2{font-size:17px;margin:0 0 6px}.pin p{margin:0 0 12px;color:var(--muted);font-size:14px;line-height:1.45}
+.pin input{width:100%;font-size:28px;letter-spacing:12px;text-align:center;padding:12px;border-radius:14px;border:1px solid var(--line);background:#0E1729;color:var(--text);margin-bottom:12px}
+.pin input:focus{outline:none;border-color:var(--accent)}
+.pin .err{color:var(--warn);font-size:13px;min-height:18px;margin:0 0 8px}
 </style></head><body><div class='wrap'>
 <div class='brand'>
   <div class='logo'><svg viewBox='0 0 24 24' fill='none' stroke='#04201B' stroke-width='2.2' stroke-linecap='round'><path d='M7 14a3 3 0 1 1 0-6v8'/><path d='M17 10a3 3 0 1 1 0 6V8'/><path d='M10 12h4'/></svg></div>
@@ -35,6 +40,13 @@ details li{margin:6px 0;line-height:1.45}
 </div>
 <div class='card'>
   <div class='pc'><span><span id='dot' class='dot'></span><span id='pc'>Not connected</span></span><span id='rate'></span></div>
+</div>
+<div class='card pin' id='pinCard'>
+  <h2>Enter the room PIN</h2>
+  <p>The host asked for a PIN. It's shown on the laptop's Phones page.</p>
+  <input id='pin' type='tel' inputmode='numeric' pattern='[0-9]*' maxlength='6' autocomplete='off' aria-label='Room PIN'>
+  <div class='err' id='pinErr'></div>
+  <button id='pinGo' class='big'>Join</button>
 </div>
 <button id='go' class='big'>Start listening</button>
 <div class='card' style='margin-top:14px'>
@@ -56,6 +68,47 @@ details li{margin:6px 0;line-height:1.45}
 const $=id=>document.getElementById(id);
 const key=new URLSearchParams(location.search).get('k')||'';
 let ctx=null,gain=null,dest=null,ws=null,playhead=0,running=false,packets=0,lost=0,lastSeq=-1,statusTimer=null,uiTimer=null,pcName='',useElement=true;
+let pin='',pinNeeded=false,opened=false,kicked=false,hostVol=100;
+try{pin=sessionStorage.getItem('de_pin')||'';}catch(e){}
+// Packet-loss concealment (protocol v3.1): a gap is filled from the last 10 ms (one pitch period looped,
+// so it continues smoothly), fading to silence over at most 30 ms; the next real packet crossfades back in.
+const PLC={L:null,R:null,n:0,period:0,pos:0,g:1,gap:false};
+const FADE_MS=30,XFADE_MS=5,MAX_CONCEAL=6;
+function plcRemember(L,R,n){
+  if(!PLC.L||PLC.L.length!==n){PLC.L=new Float32Array(n);PLC.R=new Float32Array(n);}
+  PLC.L.set(L.subarray(0,n));PLC.R.set(R.subarray(0,n));PLC.n=n;PLC.gap=false;PLC.g=1;PLC.pos=0;
+}
+function plcPeriod(rate){
+  const n=PLC.n,minP=Math.max(2,Math.floor(rate/400)),m=Math.max(2,Math.floor(rate/800));
+  let best=1e30,bp=n;
+  for(let p=minP;p<=n-m;p++){
+    let err=0,en=0;
+    for(let j=1;j<=m;j++){const a=PLC.L[n-j]+PLC.R[n-j],b=PLC.L[n-p-j]+PLC.R[n-p-j],d=a-b;err+=d*d;en+=a*a;}
+    const sc=err/(en+1e-9)+p*1e-6;if(sc<best){best=sc;bp=p;}
+  }
+  return bp;
+}
+function plcTail(i,ch){const r=PLC.n-PLC.period+(i%PLC.period);return (ch?PLC.R:PLC.L)[r];}
+function plcConceal(L,R,frames,rate){
+  if(!PLC.n){L.fill(0);R.fill(0);PLC.gap=true;return;}
+  if(!PLC.gap){PLC.period=plcPeriod(rate);PLC.pos=0;}
+  PLC.gap=true;
+  const step=1/Math.max(1,Math.floor(rate*FADE_MS/1000));
+  for(let i=0;i<frames;i++){L[i]=plcTail(PLC.pos,0)*PLC.g;R[i]=plcTail(PLC.pos,1)*PLC.g;PLC.pos++;PLC.g=Math.max(0,PLC.g-step);}
+}
+function plcCrossfade(L,R,frames,rate){
+  if(!PLC.gap||!PLC.n)return;
+  const n=Math.min(frames,Math.max(1,Math.floor(rate*XFADE_MS/1000))),step=1/Math.max(1,Math.floor(rate*FADE_MS/1000));
+  let g=PLC.g;
+  for(let i=0;i<n;i++){const t=(i+1)/(n+1);L[i]=L[i]*t+plcTail(PLC.pos,0)*g*(1-t);R[i]=R[i]*t+plcTail(PLC.pos,1)*g*(1-t);PLC.pos++;g=Math.max(0,g-step);}
+}
+function schedule(b,frames,rate){
+  const now=ctx.currentTime;
+  if(playhead<now+0.02)playhead=now+target();
+  else if(playhead>now+target()+0.25)return false;
+  const s=ctx.createBufferSource();s.buffer=b;s.connect(gain);s.start(playhead);
+  playhead+=frames/rate;return true;
+}
 function load(k,d){try{const v=localStorage.getItem('de_'+k);return v===null?d:Number(v);}catch(e){return d;}}
 function save(k,v){try{localStorage.setItem('de_'+k,String(v));}catch(e){}}
 $('vol').value=load('vol',100);$('buf').value=load('buf',180);
@@ -67,7 +120,7 @@ $('buf').oninput=()=>{showVals();save('buf',$('buf').value);sendStatus();};
 function setDot(c){$('dot').className='dot'+(c?' '+c:'');}
 function sendStatus(){
   if(!ws||ws.readyState!==1)return;
-  ws.send(JSON.stringify({type:'status',device:'Phone browser',earbuds:'',battery:-1,volume:Number($('vol').value),bufferMs:Number($('buf').value),playing:running&&packets>0}));
+  ws.send(JSON.stringify({type:'status',device:'Phone browser',earbuds:'',battery:-1,volume:Number($('vol').value),bufferMs:Number($('buf').value),underruns:0,playing:running&&packets>0}));
 }
 function setupMedia(){
   if(!('mediaSession' in navigator))return;
@@ -85,40 +138,75 @@ function onAudio(buf){
   const rate=dv.getInt32(0,true),seq=dv.getUint32(4,true);
   const frames=(buf.byteLength-8)/4;
   if(rate<8000||frames<=0||frames!==Math.floor(frames))return;
-  if(lastSeq>=0){const gap=(seq-lastSeq-1)>>>0;if(gap>0&&gap<100000)lost+=gap;}
+  let gap=0;
+  if(lastSeq>=0){
+    const d=(seq-lastSeq)|0;               // signed difference handles the uint32 wrap
+    if(d<=0&&d>-1000)return;               // late or duplicate: already concealed
+    if(d>1&&d<1000){gap=d-1;lost+=gap;}
+  }
   lastSeq=seq;
+  if(PLC.n&&PLC.n!==frames)PLC.n=0;        // the rate changed: start fresh
+  for(let i=0;i<Math.min(gap,MAX_CONCEAL);i++){
+    const cb=ctx.createBuffer(2,frames,rate);
+    plcConceal(cb.getChannelData(0),cb.getChannelData(1),frames,rate);
+    schedule(cb,frames,rate);
+  }
   const pcm=new Int16Array(buf,8,frames*2);
   const b=ctx.createBuffer(2,frames,rate);
   const L=b.getChannelData(0),R=b.getChannelData(1);
   for(let i=0;i<frames;i++){L[i]=pcm[2*i]/32768;R[i]=pcm[2*i+1]/32768;}
-  const now=ctx.currentTime;
-  if(playhead<now+0.02)playhead=now+target();
-  else if(playhead>now+target()+0.25)return;
-  const s=ctx.createBufferSource();s.buffer=b;s.connect(gain);s.start(playhead);
-  playhead+=frames/rate;packets++;
+  plcCrossfade(L,R,frames,rate);
+  plcRemember(L,R,frames);
+  if(!schedule(b,frames,rate))return;
+  packets++;
 }
 function onText(t){
   let m;try{m=JSON.parse(t);}catch(e){return;}
   if(m.type==='hello'){pcName=m.pc||'';$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
   else if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',t:m.t}));}
   else if(m.type==='state'){$('rate').textContent=m.mirroring?(m.rate/1000)+' kHz':'';if(!m.mirroring)$('st').textContent='The laptop stopped mirroring.';}
+  else if(m.type==='control'&&typeof m.volume==='number'){const v=Math.max(0,Math.min(150,Math.round(m.volume)));$('vol').value=v;showVals();save('vol',v);if(gain)gain.gain.value=v/100;sendStatus();}
+  else if(m.type==='kick'){kicked=true;stop();$('st').textContent=(m.reason||'Removed by the host')+'. Open the link again to rejoin.';}
 }
 function connect(){
   const name=encodeURIComponent((navigator.userAgentData&&navigator.userAgentData.platform)||'Phone browser');
-  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?k='+encodeURIComponent(key)+'&client=web&name='+name);
+  opened=false;
+  ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?k='+encodeURIComponent(key)+'&client=web&name='+name+(pin?'&p='+encodeURIComponent(pin):''));
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{$('st').textContent='Connected. Play something on the laptop.';sendStatus();};
+  ws.onopen=()=>{opened=true;$('st').textContent='Connected. Play something on the laptop.';sendStatus();};
   ws.onmessage=e=>{if(typeof e.data==='string')onText(e.data);else onAudio(e.data);};
   ws.onclose=e=>{
     setDot('warn');
-    if(!running)return;
+    if(!running||kicked)return;
+    if(!opened&&pinNeeded){askPin('That PIN didn\'t work. Check it on the laptop and try again.');return;}
     $('pc').textContent='Reconnecting...';
     $('st').textContent=e.code===1006?'Laptop not reachable. Same Wi-Fi? App still running? On public Wi-Fi, use a phone hotspot instead.':'Disconnected. Reconnecting...';
     setTimeout(()=>{if(running)connect();},1500);
   };
 }
+function askPin(err){
+  stop();
+  $('pinCard').className='card pin show';$('go').style.display='none';
+  $('pinErr').textContent=err||'';$('st').textContent='Waiting for the PIN.';
+  setTimeout(()=>{try{$('pin').focus();}catch(e){}},50);
+}
+$('pinGo').onclick=()=>{
+  const v=$('pin').value.trim();
+  if(!/^[0-9]{4,6}$/.test(v)){$('pinErr').textContent='The PIN has 4 to 6 digits.';return;}
+  pin=v;try{sessionStorage.setItem('de_pin',v);}catch(e){}
+  $('pinCard').className='card pin';$('go').style.display='';
+  start();
+};
+$('pin').onkeydown=e=>{if(e.key==='Enter')$('pinGo').onclick();};
+async function needsPin(){
+  try{const r=await fetch('/info?k='+encodeURIComponent(key),{cache:'no-store'});if(!r.ok)return false;const j=await r.json();return !!j.pin;}
+  catch(e){return false;}
+}
 async function start(){
   try{
+    kicked=false;
+    pinNeeded=await needsPin();
+    if(pinNeeded&&!/^[0-9]{4,6}$/.test(pin)){askPin('');return;}
     ctx=ctx||new (window.AudioContext||window.webkitAudioContext)({latencyHint:'interactive'});
     await ctx.resume();
     if(!gain){
@@ -130,7 +218,7 @@ async function start(){
       }else gain.connect(ctx.destination);
     }else if(useElement){try{await $('out').play();}catch(e){}}
     gain.gain.value=Number($('vol').value)/100;
-    running=true;packets=0;lost=0;lastSeq=-1;playhead=0;
+    running=true;packets=0;lost=0;lastSeq=-1;playhead=0;PLC.n=0;PLC.gap=false;
     $('go').textContent='Stop';$('go').className='big stop';
     connect();
     statusTimer=setInterval(sendStatus,5000);
