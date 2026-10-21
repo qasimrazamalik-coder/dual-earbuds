@@ -1,0 +1,17 @@
+# Windows build
+windows/bin/
+windows/dist/
+windows/build/app.ico
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+*.iml
+*.keystore
+*.jks
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/

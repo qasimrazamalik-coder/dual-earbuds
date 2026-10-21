@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Adaptive icon foreground: two earbuds with a sound wave between them, teal on navy.
+     108dp canvas; artwork stays inside the 66dp safe zone (21..87). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- Left earbud: round head + stem -->
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M36,34 a10,10 0 1,1 -0.01,0 Z" />
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M31,46 L41,46 L40,72 Q36,76 32,72 Z" />
+    <!-- Right earbud -->
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M72,34 a10,10 0 1,1 -0.01,0 Z" />
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M67,46 L77,46 L76,72 Q72,76 68,72 Z" />
+    <!-- Sound wave bars in the middle -->
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M46,50 L49,50 L49,62 L46,62 Z" />
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M52.5,44 L55.5,44 L55.5,68 L52.5,68 Z" />
+    <path
+        android:fillColor="#14E0C2"
+        android:pathData="M59,50 L62,50 L62,62 L59,62 Z" />
+</vector>

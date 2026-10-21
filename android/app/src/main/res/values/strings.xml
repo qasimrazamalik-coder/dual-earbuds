@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Dual Earbuds</string>
+    <string name="channel_playback_name">Laptop sound playback</string>
+    <string name="channel_playback_desc">Shows while the phone is playing your laptop\'s sound.</string>
+</resources>
