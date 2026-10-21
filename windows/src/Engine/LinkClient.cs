@@ -463,7 +463,7 @@ namespace DualEarbuds
             string src = MiniJson.GetString(d, "source", null);
             if (src == null) return;
             source = src == "app" ? "app" : "all";
-            sourceApp = source == "app" ? MiniJson.GetString(d, "app", null) : null;
+            sourceApp = source == "app" ? (MiniJson.GetString(d, "sourceApp", null) ?? MiniJson.GetString(d, "app", null)) : null;
         }
 
         // Sends a playback command to the host (it must have "Let listeners control playback" on).

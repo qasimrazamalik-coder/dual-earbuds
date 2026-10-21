@@ -261,14 +261,15 @@ namespace DualEarbuds
 
         public static string TalkMessage(bool on) { return "{\"type\":\"talk\",\"on\":" + (on ? "true" : "false") + "}"; }
 
-        string SourceFields()
+        // In /info the app's name is "sourceApp" ("app" there already means "DualEarbuds"); in hello and state it is "app".
+        string SourceFields(bool forInfo)
         {
-            return ",\"source\":\"" + source + "\"" + (sourceApp != null ? ",\"app\":\"" + MiniJson.Escape(sourceApp) + "\"" : "");
+            return ",\"source\":\"" + source + "\"" + (sourceApp != null ? (forInfo ? ",\"sourceApp\":\"" : ",\"app\":\"") + MiniJson.Escape(sourceApp) + "\"" : "");
         }
 
         string StateJson()
         {
-            return string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"state\",\"mirroring\":{0},\"rate\":{1}", mirroring ? "true" : "false", mirroring ? rate : 0) + SourceFields() + "}";
+            return string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"state\",\"mirroring\":{0},\"rate\":{1}", mirroring ? "true" : "false", mirroring ? rate : 0) + SourceFields(false) + "}";
         }
 
         public static string PartyMessage(bool on) { return "{\"type\":\"party\",\"on\":" + (on ? "true" : "false") + "}"; }
@@ -297,7 +298,7 @@ namespace DualEarbuds
             return string.Format(CultureInfo.InvariantCulture,
                 "{{\"app\":\"DualEarbuds\",\"protocol\":{0},\"version\":\"{1}\",\"host\":\"{2}\",\"pc\":\"{3}\",\"rate\":{4},\"channels\":2,\"format\":\"s16le\",\"party\":{5},\"maxClients\":{6},\"pin\":{7},\"remote\":{8}",
                 AppInfo.Protocol, AppInfo.Version, AppInfo.Host, MiniJson.Escape(PcName), mirroring ? rate : 0, party ? "true" : "false", Capacity,
-                pin != null ? "true" : "false", remoteControl ? "true" : "false") + SourceFields() + "}";
+                pin != null ? "true" : "false", remoteControl ? "true" : "false") + SourceFields(true) + "}";
         }
 
         public string HelloJson()
@@ -305,7 +306,7 @@ namespace DualEarbuds
             return string.Format(CultureInfo.InvariantCulture,
                 "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7}",
                 AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, AppInfo.Host, mirroring ? rate : 0, party ? "true" : "false",
-                PlayoutMs, remoteControl ? "true" : "false") + SourceFields() + "}";
+                PlayoutMs, remoteControl ? "true" : "false") + SourceFields(false) + "}";
         }
 
         public static string SyncReply(double c, long h)

@@ -102,12 +102,44 @@ function plcCrossfade(L,R,frames,rate){
   let g=PLC.g;
   for(let i=0;i<n;i++){const t=(i+1)/(n+1);L[i]=L[i]*t+plcTail(PLC.pos,0)*g*(1-t);R[i]=R[i]*t+plcTail(PLC.pos,1)*g*(1-t);PLC.pos++;g=Math.max(0,g-step);}
 }
-function schedule(b,frames,rate){
+// Clock sync (protocol v3.1): offset = h - (c + now)/2 from the lowest-RTT of the last 8 sync replies;
+// packet seq is due at host time h(seq) + playoutMs. Small errors trim playbackRate by at most 0.5 %,
+// beyond 40 ms the playhead jumps. Without sync (old host) the Buffer slider rules as before.
+const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false};
+function syncSend(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'sync',c:performance.now()}));}
+function syncTick(){syncSend();SYNC.quick++;clearTimeout(SYNC.timer);if(running)SYNC.timer=setTimeout(syncTick,SYNC.quick<5?200:2000);}
+function onSync(m){
+  const now=performance.now(),rtt=now-m.c;
+  if(!(rtt>=0&&rtt<5000))return;
+  SYNC.samples.push({rtt:rtt,off:m.h-(m.c+now)/2});if(SYNC.samples.length>8)SYNC.samples.shift();
+  let b=SYNC.samples[0];for(const x of SYNC.samples)if(x.rtt<b.rtt)b=x;
+  SYNC.offset=b.off;SYNC.ok=true;
+}
+function dueCtxTime(seq){
+  if(!SYNC.ok||SYNC.seq0<0||!ctx)return -1;
+  const hostMs=SYNC.h0+((seq-SYNC.seq0)|0)*10+SYNC.playout;
+  const localMs=hostMs-SYNC.offset;
+  const outLat=(ctx.outputLatency||ctx.baseLatency||0);
+  return ctx.currentTime+(localMs-performance.now())/1000-outLat;
+}
+function schedule(b,frames,rate,seq){
   const now=ctx.currentTime;
-  if(playhead<now+0.02)playhead=now+target();
-  else if(playhead>now+target()+0.25)return false;
-  const s=ctx.createBufferSource();s.buffer=b;s.connect(gain);s.start(playhead);
-  playhead+=frames/rate;return true;
+  const due=dueCtxTime(seq);
+  let pr=1;
+  if(due>=now+0.03){
+    const err=playhead-due;               // > 0: we would play late
+    if(playhead<now+0.02||Math.abs(err)>0.04){playhead=due;SYNC.trimming=false;}
+    else{
+      if(!SYNC.trimming&&Math.abs(err)>0.005)SYNC.trimming=true;
+      else if(SYNC.trimming&&Math.abs(err)<0.002)SYNC.trimming=false;
+      if(SYNC.trimming)pr=1+Math.max(-0.005,Math.min(0.005,err/2));
+    }
+  }else{
+    if(playhead<now+0.02)playhead=now+target();
+    else if(playhead>now+target()+0.25)return false;
+  }
+  const s=ctx.createBufferSource();s.buffer=b;s.playbackRate.value=pr;s.connect(gain);s.start(playhead);
+  playhead+=frames/rate/pr;SYNC.rate=pr;return true;
 }
 function load(k,d){try{const v=localStorage.getItem('de_'+k);return v===null?d:Number(v);}catch(e){return d;}}
 function save(k,v){try{localStorage.setItem('de_'+k,String(v));}catch(e){}}
@@ -149,7 +181,7 @@ function onAudio(buf){
   for(let i=0;i<Math.min(gap,MAX_CONCEAL);i++){
     const cb=ctx.createBuffer(2,frames,rate);
     plcConceal(cb.getChannelData(0),cb.getChannelData(1),frames,rate);
-    schedule(cb,frames,rate);
+    schedule(cb,frames,rate,(seq-(gap-i))>>>0);
   }
   const pcm=new Int16Array(buf,8,frames*2);
   const b=ctx.createBuffer(2,frames,rate);
@@ -157,13 +189,15 @@ function onAudio(buf){
   for(let i=0;i<frames;i++){L[i]=pcm[2*i]/32768;R[i]=pcm[2*i+1]/32768;}
   plcCrossfade(L,R,frames,rate);
   plcRemember(L,R,frames);
-  if(!schedule(b,frames,rate))return;
+  if(!schedule(b,frames,rate,seq))return;
   packets++;
 }
 function onText(t){
   let m;try{m=JSON.parse(t);}catch(e){return;}
-  if(m.type==='hello'){pcName=m.pc||'';$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
+  if(m.type==='hello'){pcName=m.pc||'';if(typeof m.playoutMs==='number')SYNC.playout=Math.max(30,Math.min(1000,m.playoutMs));$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
   else if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',t:m.t}));}
+  else if(m.type==='sync'&&typeof m.c==='number'&&typeof m.h==='number'){onSync(m);}
+  else if(m.type==='clock'&&typeof m.seq==='number'&&typeof m.h==='number'){SYNC.seq0=m.seq>>>0;SYNC.h0=m.h;}
   else if(m.type==='state'){$('rate').textContent=m.mirroring?(m.rate/1000)+' kHz':'';if(!m.mirroring)$('st').textContent='The laptop stopped mirroring.';}
   else if(m.type==='control'&&typeof m.volume==='number'){const v=Math.max(0,Math.min(150,Math.round(m.volume)));$('vol').value=v;showVals();save('vol',v);if(gain)gain.gain.value=v/100;sendStatus();}
   else if(m.type==='kick'){kicked=true;stop();$('st').textContent=(m.reason||'Removed by the host')+'. Open the link again to rejoin.';}
@@ -173,7 +207,7 @@ function connect(){
   opened=false;
   ws=new WebSocket((location.protocol==='https:'?'wss://':'ws://')+location.host+'/ws?k='+encodeURIComponent(key)+'&client=web&name='+name+(pin?'&p='+encodeURIComponent(pin):''));
   ws.binaryType='arraybuffer';
-  ws.onopen=()=>{opened=true;$('st').textContent='Connected. Play something on the laptop.';sendStatus();};
+  ws.onopen=()=>{opened=true;$('pinErr').textContent='';SYNC.samples=[];SYNC.ok=false;SYNC.seq0=-1;SYNC.quick=0;syncTick();$('st').textContent='Connected. Play something on the laptop.';sendStatus();};
   ws.onmessage=e=>{if(typeof e.data==='string')onText(e.data);else onAudio(e.data);};
   ws.onclose=e=>{
     setDot('warn');
@@ -225,13 +259,13 @@ async function start(){
     uiTimer=setInterval(()=>{
       $('pk').textContent=packets+' packets';$('lost').textContent=lost+' lost';
       if(ctx)$('lat').textContent='buffer '+Math.max(0,Math.round((playhead-ctx.currentTime)*1000))+' ms';
-      if(ws&&ws.readyState===1&&packets>0)$('st').textContent='Playing. You can lock the phone now.';
+      if(ws&&ws.readyState===1&&packets>0)$('st').textContent=(SYNC.ok&&SYNC.seq0>=0?'Playing in step with the host.':'Playing.')+' You can lock the phone now.';
     },1000);
   }catch(e){$('st').textContent='Could not start audio: '+e.message;}
 }
 function stop(){
   running=false;
-  clearInterval(statusTimer);clearInterval(uiTimer);
+  clearInterval(statusTimer);clearInterval(uiTimer);clearTimeout(SYNC.timer);
   if(ws){try{ws.close(1000);}catch(e){}}
   try{$('out').pause();}catch(e){}
   if('mediaSession' in navigator)try{navigator.mediaSession.playbackState='paused';}catch(e){}

@@ -1302,6 +1302,10 @@ static class EngineTests
             link.Pin = "4711";
             var info = MiniJson.ParseObject(Http(port, "GET /info?k=ABCD2345 HTTP/1.1").Split(new[] { "\r\n\r\n" }, StringSplitOptions.None)[1]);
             Check(MiniJson.GetBool(info, "pin", false) && !MiniJson.GetBool(info, "remote", true) && MiniJson.GetString(info, "source", "") == "all", "/info: pin, remote, source");
+            link.SetSource("app", "VLC");
+            var info2 = MiniJson.ParseObject(Http(port, "GET /info?k=ABCD2345 HTTP/1.1").Split(new[] { "\r\n\r\n" }, StringSplitOptions.None)[1]);
+            Check(MiniJson.GetString(info2, "app", "") == "DualEarbuds" && MiniJson.GetString(info2, "sourceApp", "") == "VLC", "/info: app stays DualEarbuds, shared app is sourceApp");
+            link.SetSource("all", null);
             Check(!link.Url("1.2.3.4").Contains("4711"), "the link never contains the PIN");
             using (var noPin = WsClient.Open(port, "k=ABCD2345&name=A"))
                 Check(noPin.Handshake.StartsWith("HTTP/1.1 403"), "missing PIN -> 403");

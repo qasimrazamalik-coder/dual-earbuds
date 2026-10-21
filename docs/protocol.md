@@ -148,8 +148,10 @@ All optional; a listener or host that does not know them ignores them.
 
 ### Sound source
 
-- `/info` and `hello` carry `"source":"all"` or `"source":"app"` plus `"app":"<name>"` when the host shares
-  only one app's sound (Windows process loopback, Android `addMatchingUid`).
+- `/info` and `hello` carry `"source":"all"` or `"source":"app"` when the host shares only one app's sound
+  (Windows process loopback, Android `addMatchingUid`). The shared app's name is `"sourceApp":"<name>"` in
+  `/info` (where `"app"` already means `"DualEarbuds"`) and `"app":"<name>"` in `hello`. Listeners read
+  `sourceApp` first, then `hello.app`.
 
 ### Equalizer
 
