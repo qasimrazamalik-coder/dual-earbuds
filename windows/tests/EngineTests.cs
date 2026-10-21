@@ -206,6 +206,27 @@ static class EngineTests
         File.WriteAllLines(path, new[] { "netscope\teverything", "updatechecked\tsoon" });
         var x = Settings.Load(path);
         Check(x.NetworkScope == Settings.NetScopeAll && x.LastUpdateCheckUtc == DateTime.MinValue, "bad v3 values ignored");
+        Check(!x.RemoteControl && !x.PinOn && RoomPin.IsValid(x.Pin) && x.SmartEq == "off" && x.Dialogue == "off" && x.Buffer == "smart" && x.Noise == "strong" && x.SourceMode == "all", "v3.1 / smart defaults (all optional features off)");
+
+        var y = Settings.Load(path);
+        y.RemoteControl = true; y.PinOn = true; y.Pin = "90210"; y.SuggestEq = "movie"; y.SourceMode = "app"; y.SourceApp = "Spotify.exe";
+        y.Noise = "light"; y.SmartEq = "both"; y.Dialogue = "night"; y.Buffer = "manual"; y.BufferMs = 140; y.TalkMode = "toggle"; y.ShowOnNetwork = true;
+        y.LatencyByName["Headphones (Evo Z-Buds)"] = 183.5;
+        var prof = new HearingProfile { Name = "Ammi" }; prof.LeftDb[4] = 6; y.Profiles.Add(prof);
+        var yo = y.For("dev1"); yo.Enabled = true; yo.Eq = "voice"; yo.EqAuto = true; yo.Profile = "Ammi";
+        for (int i = 0; i < 7; i++) y.AddRecent("10.0.0." + i + ":8790", "ABCD234" + (i % 5 + 2), "PC " + i);
+        y.AddRecent("10.0.0.3:8790", "QQQQ2345", "PC again");
+        y.ListenOutputs.Add("dev1");
+        y.Save(path);
+        var z = Settings.Load(path);
+        Check(z.RemoteControl && z.PinOn && z.Pin == "90210" && z.SuggestEq == "movie" && z.SourceMode == "app" && z.SourceApp == "Spotify.exe" && z.TalkMode == "toggle" && z.ShowOnNetwork, "v3.1 settings round trip");
+        Check(z.Noise == "light" && z.SmartEq == "both" && z.Dialogue == "night" && z.Buffer == "manual" && z.BufferMs == 140, "smart settings round trip");
+        Check(z.LatencyFor("Headphones (Evo Z-Buds)") == 183.5 && z.LatencyFor("other") == 0, "calibrated latency per output name");
+        Check(z.FindProfile("Ammi") != null && z.FindProfile("Ammi").LeftDb[4] == 6, "hearing profiles");
+        var zo = z.For("dev1");
+        Check(zo.Enabled && zo.Eq == "voice" && zo.EqAuto && zo.Profile == "Ammi", "per-output EQ / profile");
+        Check(z.Recent.Count == 5 && z.Recent[0].Name == "PC again" && z.Recent[0].Key == "QQQQ2345" && z.Recent.FindAll(r => r.HostPort == "10.0.0.3:8790").Count == 1, "5 recent hosts, newest first, no duplicates");
+        Check(z.ListenOutputs.Count == 1 && z.ListenOutputs[0] == "dev1", "listener outputs");
     }
 
     static void TestJson()

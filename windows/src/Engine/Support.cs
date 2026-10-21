@@ -115,7 +115,23 @@ namespace DualEarbuds
         }
     }
 
-    public class OutSetting { public bool Enabled; public int DelayMs; public int Volume = 100; }
+    public class OutSetting
+    {
+        public bool Enabled;
+        public int DelayMs;
+        public int Volume = 100;
+        public string Eq = "flat";       // manual EQ preset
+        public bool EqAuto;               // Smart EQ picks (only when Smart EQ is on)
+        public string Profile = "";       // hearing profile name, "" = none
+    }
+
+    public class RecentHost
+    {
+        public string HostPort;   // "ip:port"
+        public string Key;
+        public string Name = "";
+        public string Link { get { return "http://" + HostPort + "/?k=" + Key; } }
+    }
 
     public class Settings
     {
@@ -138,6 +154,57 @@ namespace DualEarbuds
         public DateTime LastUpdateCheckUtc = DateTime.MinValue;
         public string NetworkScope = NetScopeAll;   // which Windows network types phones may connect on (firewall rule)
         public Dictionary<string, OutSetting> Outs = new Dictionary<string, OutSetting>();
+
+        // protocol v3.1 host options
+        public bool RemoteControl = false;    // "Let listeners control playback"
+        public bool ShowOnNetwork = false;    // advertise the key even on public networks
+        public bool PinOn = false;            // Party mode room PIN
+        public string Pin = "";
+        public string SuggestEq = "";         // "" = no suggestion
+        public string SourceMode = "all";     // all | app
+        public string SourceApp = "";         // process name for "One app only"
+        public string TalkMode = "hold";      // hold | toggle
+
+        // smart features (docs/smart-features.md)
+        public string Noise = "strong";       // off | light | strong   (talk-over mic)
+        public string SmartEq = "off";        // off | app | sound | both
+        public string Dialogue = "off";       // off | light | strong | night
+        public string Buffer = "smart";       // smart | steady | manual (listener mode)
+        public int BufferMs = 80;
+        public Dictionary<string, double> LatencyByName = new Dictionary<string, double>();   // calibrated output latency
+        public List<HearingProfile> Profiles = new List<HearingProfile>();
+
+        // listener mode
+        public List<RecentHost> Recent = new List<RecentHost>();
+        public List<string> ListenOutputs = new List<string>();
+        public const int MaxRecent = 5;
+
+        static readonly string[] NoiseValues = { "off", "light", "strong" }, SmartEqValues = { "off", "app", "sound", "both" },
+                                 DialogueValues = { "off", "light", "strong", "night" }, BufferValues = { "smart", "steady", "manual" };
+
+        static bool OneOf(string v, string[] set) { return Array.IndexOf(set, v) >= 0; }
+
+        // Most recent first, no duplicates (same address), at most 5.
+        public void AddRecent(string hostPort, string key, string name)
+        {
+            Recent.RemoveAll(r => string.Equals(r.HostPort, hostPort, StringComparison.OrdinalIgnoreCase));
+            Recent.Insert(0, new RecentHost { HostPort = hostPort, Key = key.ToUpperInvariant(), Name = Clean(name) });
+            while (Recent.Count > MaxRecent) Recent.RemoveAt(Recent.Count - 1);
+        }
+
+        static string Clean(string s) { return (s ?? "").Replace("\t", " ").Replace("\r", " ").Replace("\n", " ").Trim(); }
+
+        public HearingProfile FindProfile(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return null;
+            return Profiles.Find(p => p.Name == name);
+        }
+
+        public double LatencyFor(string outputName)
+        {
+            double v;
+            return outputName != null && LatencyByName.TryGetValue(outputName, out v) ? v : 0;
+        }
 
         public static string DefaultPath { get { return Path.Combine(AppInfo.DataDir, "settings.txt"); } }
 
@@ -179,16 +246,53 @@ namespace DualEarbuds
                                     s.LastUpdateCheckUtc = new DateTime(ticks, DateTimeKind.Utc);
                                 break;
                             case "netscope": if (v == NetScopePrivate || v == NetScopeAll) s.NetworkScope = v; break;
+                            case "remote": s.RemoteControl = v == "1"; break;
+                            case "shownet": s.ShowOnNetwork = v == "1"; break;
+                            case "pinon": s.PinOn = v == "1"; break;
+                            case "pin": if (RoomPin.IsValid(v)) s.Pin = v; break;
+                            case "suggesteq": if (v == "" || EqPresets.IsValid(v)) s.SuggestEq = v; break;
+                            case "sourcemode": if (v == "all" || v == "app") s.SourceMode = v; break;
+                            case "sourceapp": s.SourceApp = v; break;
+                            case "talkmode": if (v == "hold" || v == "toggle") s.TalkMode = v; break;
+                            case "noise": if (OneOf(v, NoiseValues)) s.Noise = v; break;
+                            case "smarteq": if (OneOf(v, SmartEqValues)) s.SmartEq = v; break;
+                            case "dialogue": if (OneOf(v, DialogueValues)) s.Dialogue = v; break;
+                            case "buffer": if (OneOf(v, BufferValues)) s.Buffer = v; break;
+                            case "bufferms":
+                                int bm;
+                                if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out bm)) s.BufferMs = JitterBuffer.Clamp(bm);
+                                break;
+                            case "latency":
+                                double lat;
+                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && lat >= 0 && lat <= 1000) s.LatencyByName[v] = lat;
+                                break;
+                            case "profile":
+                                var hp = HearingProfile.Parse(v);
+                                if (hp != null && s.FindProfile(hp.Name) == null && s.Profiles.Count < 20) s.Profiles.Add(hp);
+                                break;
+                            case "recent":
+                                if (p.Length >= 3 && DualEarbuds.LinkKey.IsValid(p[2]) && s.Recent.Count < MaxRecent)
+                                    s.Recent.Add(new RecentHost { HostPort = v, Key = p[2].ToUpperInvariant(), Name = p.Length >= 4 ? p[3] : "" });
+                                break;
+                            case "listenout": if (v.Length > 0 && !s.ListenOutputs.Contains(v)) s.ListenOutputs.Add(v); break;
+                            case "outfx":
+                                if (p.Length >= 5)
+                                {
+                                    var of = s.For(v);
+                                    if (EqPresets.IsValid(p[2])) of.Eq = p[2];
+                                    of.EqAuto = p[3] == "1";
+                                    of.Profile = p[4];
+                                }
+                                break;
                             case "out":
                                 if (p.Length >= 5)
                                 {
-                                    var o = new OutSetting();
+                                    var o = s.For(p[1]);
                                     o.Enabled = p[2] == "1";
                                     int.TryParse(p[3], out o.DelayMs);
                                     int.TryParse(p[4], out o.Volume);
                                     o.DelayMs = Math.Max(0, Math.Min(1000, o.DelayMs));
                                     o.Volume = Math.Max(0, Math.Min(150, o.Volume));
-                                    s.Outs[p[1]] = o;
                                 }
                                 break;
                         }
@@ -197,6 +301,7 @@ namespace DualEarbuds
             }
             catch (Exception ex) { Log.Warn("Settings load: " + ex.Message); }
             if (!DualEarbuds.LinkKey.IsValid(s.LinkKey)) s.LinkKey = DualEarbuds.LinkKey.New();
+            if (!RoomPin.IsValid(s.Pin)) { s.Pin = RoomPin.New(); if (s.PinOn) s.PinOn = false; }
             return s;
         }
 
@@ -222,8 +327,29 @@ namespace DualEarbuds
                 lines.Add("updates\t" + B(CheckUpdates));
                 lines.Add("updatechecked\t" + LastUpdateCheckUtc.Ticks.ToString(CultureInfo.InvariantCulture));
                 lines.Add("netscope\t" + NetworkScope);
+                lines.Add("remote\t" + B(RemoteControl));
+                lines.Add("shownet\t" + B(ShowOnNetwork));
+                lines.Add("pinon\t" + B(PinOn));
+                lines.Add("pin\t" + Pin);
+                lines.Add("suggesteq\t" + SuggestEq);
+                lines.Add("sourcemode\t" + SourceMode);
+                lines.Add("sourceapp\t" + Clean(SourceApp));
+                lines.Add("talkmode\t" + TalkMode);
+                lines.Add("noise\t" + Noise);
+                lines.Add("smarteq\t" + SmartEq);
+                lines.Add("dialogue\t" + Dialogue);
+                lines.Add("buffer\t" + Buffer);
+                lines.Add("bufferms\t" + BufferMs.ToString(CultureInfo.InvariantCulture));
+                foreach (var kv in LatencyByName)
+                    lines.Add("latency\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
+                foreach (var hp in Profiles) lines.Add("profile\t" + hp.Serialize());
+                foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name));
+                foreach (var id in ListenOutputs) lines.Add("listenout\t" + id);
                 foreach (var kv in Outs)
+                {
                     lines.Add(string.Format(CultureInfo.InvariantCulture, "out\t{0}\t{1}\t{2}\t{3}", kv.Key, B(kv.Value.Enabled), kv.Value.DelayMs, kv.Value.Volume));
+                    lines.Add("outfx\t" + kv.Key + "\t" + kv.Value.Eq + "\t" + B(kv.Value.EqAuto) + "\t" + Clean(kv.Value.Profile));
+                }
                 string tmp = path + ".tmp";
                 File.WriteAllLines(tmp, lines.ToArray());
                 if (File.Exists(path)) File.Replace(tmp, path, null);   // atomic: never leaves no settings file
