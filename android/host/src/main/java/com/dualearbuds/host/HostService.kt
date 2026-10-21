@@ -1,28 +1,21 @@
 package com.dualearbuds.host
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
-import android.media.AudioAttributes
-import android.media.AudioFormat
-import android.media.AudioPlaybackCaptureConfiguration
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.PowerManager
 import android.os.Process
 import android.os.SystemClock
 import android.provider.Settings
@@ -32,13 +25,24 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
-import com.dualearbuds.host.server.AudioPacket
+import com.dualearbuds.host.audio.MicRing
+import com.dualearbuds.host.audio.NoiseCancel
+import com.dualearbuds.host.audio.Packetizer
+import com.dualearbuds.host.audio.SpectralDenoiser
+import com.dualearbuds.host.audio.TalkMixer
+import com.dualearbuds.host.capture.AppCatalog
+import com.dualearbuds.host.capture.MicCapture
+import com.dualearbuds.host.capture.PlaybackCapture
+import com.dualearbuds.host.net.Discovery
+import com.dualearbuds.host.net.NsdAdvertiser
+import com.dualearbuds.host.remote.MediaRemote
 import com.dualearbuds.host.server.HostIdentity
 import com.dualearbuds.host.server.HostServer
 
 /**
- * Foreground service (type mediaProjection) for "Share this phone": captures other apps' sound with
- * AudioPlaybackCapture (Android 10+) and serves it to listeners with [HostServer] (protocol v3).
+ * Foreground service (type mediaProjection, plus microphone for talk-over) for "Share this phone".
+ * Owns the capture ([PlaybackCapture], Android 10+), the talk-over mic, the [HostServer]
+ * (protocol v3 + v3.1), the mDNS advertisement and media-key remote control.
  * The phone keeps playing its own sound normally; capture only copies it.
  */
 class HostService : Service() {
@@ -50,8 +54,7 @@ class HostService : Service() {
         const val EXTRA_RESULT_DATA = "com.dualearbuds.host.extra.RESULT_DATA"
         const val CHANNEL_ID = "host_sharing"
         const val NOTIFICATION_ID = 4310
-        const val SAMPLE_RATE = 48_000
-        const val DEFAULT_PORT = 8790
+        private const val VERSION = "3.1.0"
         private const val SILENCE_HINT_MS = 5_000L
         private const val SILENCE_LEVEL = 4 // |sample| at or below this counts as silence (about -78 dBFS)
     }
@@ -62,17 +65,23 @@ class HostService : Service() {
     private var record: AudioRecord? = null
     private var captureThread: Thread? = null
     private var server: HostServer? = null
+    private var nsd: NsdAdvertiser? = null
+    private var remote: MediaRemote? = null
     private var inForeground = false
+    private val locks by lazy { HostLocks(this) }
+    private val name by lazy { deviceName() }
 
-    @Volatile
-    private var capturing = false
+    // Talk-over: mic → ring → denoiser → mixer (on the capture thread).
+    private val micRing = MicRing(PlaybackCapture.SAMPLE_RATE / 10) // 100 ms
+    private val mic = MicCapture(micRing)
+    private val mixer = TalkMixer(PlaybackCapture.SAMPLE_RATE)
+    private val denoiser = SpectralDenoiser()
 
-    @Volatile
-    private var lastListenerCount = -1
-
-    private var wakeLock: PowerManager.WakeLock? = null
-    private var wifiLock: WifiManager.WifiLock? = null
-    private var wifiLockHighPerf: WifiManager.WifiLock? = null
+    @Volatile private var talking = false
+    @Volatile private var noiseCancel = NoiseCancel.DEFAULT
+    @Volatile private var resetDenoiser = false
+    @Volatile private var capturing = false
+    @Volatile private var lastListenerCount = -1
 
     private val page: ByteArray? by lazy {
         try {
@@ -130,12 +139,14 @@ class HostService : Service() {
 
     // ---------------------------------------------------------------- sharing
 
+    private fun hasMicPermission() =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
     /** Returns null on success, otherwise a message for the user. */
     @RequiresApi(Build.VERSION_CODES.Q)
     private fun startSharing(resultCode: Int, data: Intent): String? {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            return "Allow the audio permission so this phone can share other apps' sound."
-        }
+        if (!hasMicPermission()) return "Allow the audio permission so this phone can share other apps' sound."
+        val prefs = HostController.prefs(this)
         val mpm = getSystemService(MediaProjectionManager::class.java)
             ?: return "Sharing is not available on this phone."
         val proj = try {
@@ -156,72 +167,92 @@ class HostService : Service() {
         } catch (_: Throwable) {
         }
 
-        val rec = createRecord(proj) ?: return "Could not capture sound on this phone."
-        record = rec
-
         val srv = HostServer(
-            identity = HostIdentity(pcName = deviceName(), version = "3.0.0", host = "android"),
-            initialKey = HostController.linkKey(this),
+            identity = HostIdentity(pcName = name, version = VERSION, host = "android"),
+            initialKey = prefs.key,
             pageProvider = { page }
         )
-        srv.setParty(HostController.party(this))
+        val rem = MediaRemote(this)
+        remote = rem
+        srv.onRemote = { action -> rem.perform(action) }
         srv.onChange = { onServerChanged(srv) }
+        applyToServer(srv, prefs)
         val port = try {
-            srv.start(DEFAULT_PORT)
+            srv.start(prefs.port)
         } catch (t: Throwable) {
             return "Could not open a network port: ${t.message ?: "unknown error"}"
         }
         server = srv
-        HostController.server = srv
-        srv.setSharing(SAMPLE_RATE)
+        noiseCancel = prefs.noiseCancel
 
-        try {
-            rec.startRecording()
-        } catch (_: Throwable) {
-            return "Could not start capturing sound."
-        }
-        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
-            return "Another app is using sound capture. Close it and try again."
-        }
-        capturing = true
-        captureThread = Thread({ captureLoop(rec, srv) }, "host-capture").apply { start() }
+        startCapture(proj, prefs.app)?.let { return it }
 
-        acquireLocks()
+        locks.acquire()
+        nsd = NsdAdvertiser(this)
+        HostController.engine = engine
         HostController.refreshNetwork(this)
-        HostController.reportSharing(port, srv.key)
+        HostController.reportSharing(port)
+        engine.applyDiscovery()
         onServerChanged(srv)
         return null
     }
 
-    @SuppressLint("MissingPermission") // checked in startSharing()
+    private fun applyToServer(srv: HostServer, prefs: HostPrefs) {
+        srv.setParty(prefs.party)
+        srv.setPin(prefs.activePin)
+        srv.setRemoteAllowed(prefs.remote)
+    }
+
+    /** Creates the AudioRecord for [app] (null = all apps) and starts the capture thread. */
     @RequiresApi(Build.VERSION_CODES.Q)
-    private fun createRecord(proj: MediaProjection): AudioRecord? {
-        return try {
-            val config = AudioPlaybackCaptureConfiguration.Builder(proj)
-                .addMatchingUsage(AudioAttributes.USAGE_MEDIA)
-                .addMatchingUsage(AudioAttributes.USAGE_GAME)
-                .addMatchingUsage(AudioAttributes.USAGE_UNKNOWN)
-                .build()
-            val format = AudioFormat.Builder()
-                .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                .setSampleRate(SAMPLE_RATE)
-                .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
-                .build()
-            val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-            val packet = AudioPacket.pcmBytes(SAMPLE_RATE)
-            val rec = AudioRecord.Builder()
-                .setAudioFormat(format)
-                .setBufferSizeInBytes(maxOf(minBuf, packet * 8))
-                .setAudioPlaybackCaptureConfig(config)
-                .build()
-            if (rec.state != AudioRecord.STATE_INITIALIZED) {
-                rec.release()
-                null
+    private fun startCapture(proj: MediaProjection, app: AppChoice?): String? {
+        val srv = server ?: return "Not sharing."
+        var uid: Int? = null
+        var label: String? = null
+        if (app != null) {
+            uid = AppCatalog.uidOf(this, app.packageName)
+            if (uid == null) {
+                HostController.setSource(this, null) // the app was uninstalled: share all apps
+                HostController.reportError("${app.label} is not installed any more, so all apps are shared.")
             } else {
-                rec
+                label = app.label
             }
+        }
+        val rec = PlaybackCapture.create(proj, uid) ?: return "Could not capture sound on this phone."
+        try {
+            rec.startRecording()
         } catch (_: Throwable) {
-            null
+            rec.release()
+            return "Could not start capturing sound."
+        }
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            rec.release()
+            return "Another app is using sound capture. Close it and try again."
+        }
+        record = rec
+        srv.setSource(label)
+        srv.setSharing(PlaybackCapture.SAMPLE_RATE)
+        capturing = true
+        captureThread = Thread({ captureLoop(rec, srv) }, "host-capture").apply { start() }
+        return null
+    }
+
+    private fun stopCapture() {
+        capturing = false
+        val rec = record
+        record = null
+        try {
+            rec?.stop()
+        } catch (_: Throwable) {
+        }
+        try {
+            captureThread?.join(500)
+        } catch (_: InterruptedException) {
+        }
+        captureThread = null
+        try {
+            rec?.release()
+        } catch (_: Throwable) {
         }
     }
 
@@ -230,44 +261,61 @@ class HostService : Service() {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         } catch (_: Throwable) {
         }
-        val bytes = AudioPacket.pcmBytes(SAMPLE_RATE) // 10 ms = 1920 bytes
-        val buf = ByteArray(bytes)
+        val micBuf = FloatArray(SpectralDenoiser.HOP)
         var lastSound = SystemClock.elapsedRealtime()
         var silentShown = false
+        val packetizer = Packetizer(PlaybackCapture.SAMPLE_RATE) { pkt, capturedAt ->
+            val frames = pkt.size / 4
+            val talk = talking
+            if (talk || mixer.active) {
+                if (talk) {
+                    if (resetDenoiser) {
+                        resetDenoiser = false
+                        denoiser.reset()
+                    }
+                    micRing.read(micBuf, frames)
+                    denoiser.process(micBuf, noiseCancel)
+                } else {
+                    micBuf.fill(0f)
+                }
+                mixer.process(pkt, frames, micBuf, talk)
+            }
+            srv.sendAudio(pkt, 0, pkt.size, capturedAt)
+
+            val now = SystemClock.elapsedRealtime()
+            if (isSilent(pkt)) {
+                if (!silentShown && now - lastSound >= SILENCE_HINT_MS) {
+                    silentShown = true
+                    HostController.reportSilent(true)
+                }
+            } else {
+                lastSound = now
+                if (silentShown) {
+                    silentShown = false
+                    HostController.reportSilent(false)
+                }
+            }
+        }
+        val buf = ByteArray(packetizer.packetBytes)
         try {
             while (capturing) {
-                var off = 0
-                while (off < bytes && capturing) {
-                    val r = rec.read(buf, off, bytes - off, AudioRecord.READ_BLOCKING)
-                    if (r < 0) throw IllegalStateException("AudioRecord.read error $r")
-                    if (r == 0) SystemClock.sleep(2)
-                    off += r
+                val r = rec.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
+                if (r < 0) throw IllegalStateException("AudioRecord.read error $r")
+                if (r == 0) {
+                    SystemClock.sleep(2)
+                    continue
                 }
                 if (!capturing) break
-                srv.sendAudio(buf, 0, bytes)
-
-                val now = SystemClock.elapsedRealtime()
-                if (isSilent(buf, bytes)) {
-                    if (!silentShown && now - lastSound >= SILENCE_HINT_MS) {
-                        silentShown = true
-                        HostController.reportSilent(true)
-                    }
-                } else {
-                    lastSound = now
-                    if (silentShown) {
-                        silentShown = false
-                        HostController.reportSilent(false)
-                    }
-                }
+                packetizer.write(buf, 0, r, srv.hostMs())
             }
         } catch (_: Throwable) {
             if (capturing) main.post { stopEverything("Sound capture stopped unexpectedly.") }
         }
     }
 
-    private fun isSilent(buf: ByteArray, len: Int): Boolean {
+    private fun isSilent(buf: ByteArray): Boolean {
         var i = 0
-        while (i + 1 < len) {
+        while (i + 1 < buf.size) {
             val s = (buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)
             if (s > SILENCE_LEVEL || s < -SILENCE_LEVEL) return false
             i += 2
@@ -284,6 +332,78 @@ class HostService : Service() {
         }
     }
 
+    // ---------------------------------------------------------------- HostEngine (main thread)
+
+    /** Live setting changes from [HostController]; kept private so the service's public API stays small. */
+    private val engine = object : HostEngine {
+        override fun applyPrefs(prefs: HostPrefs, sourceChanged: Boolean) {
+            main.post {
+                val srv = server ?: return@post
+                applyToServer(srv, prefs)
+                noiseCancel = prefs.noiseCancel
+                if (sourceChanged && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    val proj = projection ?: return@post
+                    stopCapture()
+                    startCapture(proj, prefs.app)?.let { stopEverything(it) }
+                }
+                applyDiscovery()
+            }
+        }
+
+        override fun applyTalk(on: Boolean) {
+            main.post {
+                val srv = server ?: return@post
+                if (on) {
+                    if (!hasMicPermission()) {
+                        HostController.reportTalking(false)
+                        HostController.reportError("Allow the microphone to talk to your listeners.")
+                        return@post
+                    }
+                    if (!mic.start()) {
+                        HostController.reportTalking(false)
+                        HostController.reportError("The microphone is busy (a call or another app?). Try again later.")
+                        return@post
+                    }
+                    resetDenoiser = true
+                    talking = true
+                    srv.setTalking(true)
+                } else {
+                    talking = false
+                    mic.stop()
+                    srv.setTalking(false)
+                }
+                postNotification()
+            }
+        }
+
+        override fun applyDiscovery() {
+            main.post {
+                val srv = server ?: return@post
+                val advertiser = nsd ?: return@post
+                val st = HostController.state.value
+                val txt = Discovery.txt(name, srv.key, pin = srv.pin != null, show = st.showOnNetwork)
+                advertiser.update(NsdAdvertiser.Ad(Discovery.instanceName(name), srv.port, txt))
+            }
+        }
+
+        override fun newKey(key: String) {
+            main.post {
+                server?.setKey(key)
+                applyDiscovery()
+            }
+        }
+
+        override fun setVolume(id: Int, volume: Int) {
+            server?.setVolume(id, volume)
+        }
+
+        override fun kick(id: Int) {
+            server?.kick(id)
+        }
+    }
+
+    // ---------------------------------------------------------------- stop
+
     /** Stops capture and the server and removes the service. Safe to call more than once. */
     private fun stopEverything(error: String?) {
         teardown()
@@ -299,37 +419,24 @@ class HostService : Service() {
     }
 
     private fun teardown() {
-        capturing = false
-        val rec = record
-        record = null
-        if (rec != null) {
-            try {
-                rec.stop()
-            } catch (_: Throwable) {
-            }
-        }
-        try {
-            captureThread?.join(500)
-        } catch (_: InterruptedException) {
-        }
-        captureThread = null
-        if (rec != null) {
-            try {
-                rec.release()
-            } catch (_: Throwable) {
-            }
-        }
+        if (HostController.engine === engine) HostController.engine = null
+        talking = false
+        mic.stop()
+        stopCapture()
+        nsd?.update(null)
+        nsd = null
         val srv = server
         server = null
         if (srv != null) {
-            if (HostController.server === srv) HostController.server = null
             srv.onChange = null
+            srv.onRemote = null
             try {
                 srv.setSharing(0)
                 srv.stop()
             } catch (_: Throwable) {
             }
         }
+        remote = null
         val proj = projection
         projection = null
         if (proj != null) {
@@ -344,7 +451,7 @@ class HostService : Service() {
         }
         projectionCallback = null
         lastListenerCount = -1
-        releaseLocks()
+        locks.release()
     }
 
     private fun deviceName(): String {
@@ -376,19 +483,24 @@ class HostService : Service() {
 
     private fun startForegroundSafely(): Boolean {
         if (inForeground) return true
-        return try {
-            val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
-            } else {
-                0
-            }
-            ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
-            inForeground = true
-            true
-        } catch (_: Throwable) {
-            inForeground = false
-            false
+        val projectionType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
+        // Also the microphone type, so talk-over keeps working with the screen off. It needs
+        // RECORD_AUDIO (which capture needs anyway); if Android refuses it, start without it.
+        val withMic = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission()) {
+            projectionType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+        } else {
+            projectionType
         }
+        for (type in if (withMic != projectionType) listOf(withMic, projectionType) else listOf(projectionType)) {
+            try {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
+                inForeground = true
+                return true
+            } catch (_: Throwable) {
+            }
+        }
+        inForeground = false
+        return false
     }
 
     private fun postNotification() {
@@ -417,11 +529,12 @@ class HostService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
         val count = server?.listenerCount() ?: 0
-        val text = when (count) {
+        var text = when (count) {
             0 -> "Waiting for listeners to join"
             1 -> "1 listener"
             else -> "$count listeners"
         }
+        if (talking) text += " · Talk-over on"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.host_ic_stat_share)
             .setContentTitle("Sharing this phone's sound")
@@ -431,62 +544,10 @@ class HostService : Service() {
             .setOnlyAlertOnce(true)
             .setSilent(true)
             .setShowWhen(false)
-            .setColor(0xFF14E0C2.toInt())
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .addAction(R.drawable.host_ic_stop, "Stop", stopIntent)
             .build()
-    }
-
-    // ---------------------------------------------------------------- locks
-
-    @Suppress("DEPRECATION")
-    private fun acquireLocks() {
-        try {
-            if (wakeLock == null) {
-                val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DualEarbuds:host").apply {
-                    setReferenceCounted(false)
-                }
-            }
-            wakeLock?.let { if (!it.isHeld) it.acquire(12 * 60 * 60 * 1000L) }
-        } catch (_: Throwable) {
-        }
-        try {
-            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-            if (wifiLock == null) {
-                val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
-                } else {
-                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
-                }
-                wifiLock = wm.createWifiLock(mode, "DualEarbuds:host").apply { setReferenceCounted(false) }
-            }
-            wifiLock?.let { if (!it.isHeld) it.acquire() }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                if (wifiLockHighPerf == null) {
-                    wifiLockHighPerf = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "DualEarbuds:host-hp")
-                        .apply { setReferenceCounted(false) }
-                }
-                wifiLockHighPerf?.let { if (!it.isHeld) it.acquire() }
-            }
-        } catch (_: Throwable) {
-        }
-    }
-
-    private fun releaseLocks() {
-        try {
-            wakeLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Throwable) {
-        }
-        try {
-            wifiLock?.let { if (it.isHeld) it.release() }
-        } catch (_: Throwable) {
-        }
-        try {
-            wifiLockHighPerf?.let { if (it.isHeld) it.release() }
-        } catch (_: Throwable) {
-        }
     }
 }

@@ -1,4 +1,4 @@
-package com.dualearbuds.host
+package com.dualearbuds.host.net
 
 import android.content.Context
 import android.net.ConnectivityManager
@@ -6,18 +6,13 @@ import android.net.NetworkCapabilities
 import java.net.Inet4Address
 import java.net.NetworkInterface
 
-/** Finds the address other phones should use: the Wi-Fi address, else this phone's hotspot address. */
+/** Finds this phone's addresses on the joined Wi-Fi and on its own hotspot / USB tethering. */
 internal object HostNetwork {
 
-    data class Info(val address: String?, val onWifi: Boolean)
+    fun addresses(context: Context): List<HostAddress> =
+        LinkBuilder.addresses(interfaceAddresses(), wifiAddress(context))
 
-    fun current(context: Context): Info {
-        val wifiAddress = wifiAddress(context)
-        if (wifiAddress != null) return Info(wifiAddress, true)
-        return Info(pickAddress(interfaceAddresses()), false)
-    }
-
-    /** IPv4 address of a connected Wi-Fi (or Ethernet) network, or null. */
+    /** IPv4 address of a joined Wi-Fi (or Ethernet) network, or null. */
     @Suppress("DEPRECATION")
     private fun wifiAddress(context: Context): String? {
         return try {
@@ -49,24 +44,13 @@ internal object HostNetwork {
                 }
                 for (addr in ni.inetAddresses) {
                     if (addr is Inet4Address && !addr.isLoopbackAddress && addr.isSiteLocalAddress) {
-                        out.add(ni.name to (addr.hostAddress ?: continue))
+                        val ip = addr.hostAddress ?: continue
+                        out.add(ni.name to ip)
                     }
                 }
             }
         } catch (_: Throwable) {
         }
         return out
-    }
-
-    private val cellularPrefixes = listOf("rmnet", "ccmni", "pdp", "v4-", "clat", "tun", "ppp", "dummy", "ipsec", "seth", "radio")
-    private val hotspotPrefixes = listOf("ap", "swlan", "softap", "wlan", "wigig", "bt-pan", "rndis", "usb", "eth")
-
-    /** Picks a hotspot-like interface address from (interface name, IPv4) pairs. */
-    fun pickAddress(candidates: List<Pair<String, String>>): String? {
-        val usable = candidates.filter { (name, _) -> cellularPrefixes.none { name.startsWith(it) } }
-        for (prefix in hotspotPrefixes) {
-            usable.firstOrNull { it.first.startsWith(prefix) }?.let { return it.second }
-        }
-        return usable.firstOrNull()?.second
     }
 }

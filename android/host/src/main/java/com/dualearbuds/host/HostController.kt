@@ -2,11 +2,16 @@ package com.dualearbuds.host
 
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import androidx.core.content.ContextCompat
-import com.dualearbuds.host.server.HostServer
+import com.dualearbuds.host.audio.NoiseCancel
+import com.dualearbuds.host.net.Discovery
+import com.dualearbuds.host.net.HostAddress
+import com.dualearbuds.host.net.HostNetwork
+import com.dualearbuds.host.net.LinkBuilder
+import com.dualearbuds.host.net.NetKind
 import com.dualearbuds.host.server.LinkKey
 import com.dualearbuds.host.server.ListenerInfo
+import com.dualearbuds.host.server.RoomPin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -16,84 +21,135 @@ enum class HostStatus { IDLE, STARTING, SHARING }
 
 data class HostUiState(
     val status: HostStatus = HostStatus.IDLE,
+    val prefs: HostPrefs = HostPrefs(key = ""),
+    /** Port actually bound while sharing (may differ from the setting if it was busy). */
     val port: Int = 0,
-    val key: String = "",
-    val address: String? = null,
-    val onWifi: Boolean = true,
-    val party: Boolean = false,
-    val maxClients: Int = 8,
+    val addresses: List<HostAddress> = emptyList(),
+    /** Address the link/QR uses; null = the first of [addresses]. */
+    val chosenAddress: String? = null,
+    /** "Show on this network" chosen by the user this session; null = automatic. */
+    val showChoice: Boolean? = null,
+    val talking: Boolean = false,
     val listeners: List<ListenerInfo> = emptyList(),
     val silent: Boolean = false,
     val error: String? = null
 ) {
-    /** The exact URL the QR code holds, or null while not sharing / no network. */
-    val link: String?
-        get() = if (status == HostStatus.SHARING && address != null && port > 0) "http://$address:$port/?k=$key" else null
+    val address: HostAddress? get() = addresses.firstOrNull { it.address == chosenAddress } ?: addresses.firstOrNull()
+    val netKind: NetKind get() = address?.kind ?: NetKind.NONE
+    val showOnNetwork: Boolean get() = Discovery.showOnNetwork(netKind, showChoice)
+    val maxClients: Int get() = if (prefs.party) 16 else 8
+
+    /** The exact URL the QR code holds (never the PIN), or null while not sharing / no network. */
+    val link: String? get() = if (status == HostStatus.SHARING) LinkBuilder.link(address?.address, port, prefs.key) else null
 }
 
-/** Shared state between [HostService] and [HostScreen]. */
-object HostController {
-    private const val PREFS = "dualearbuds_host"
-    private const val KEY_LINK = "link_key"
-    private const val KEY_PARTY = "party"
+/** What the running [HostService] applies live. */
+internal interface HostEngine {
+    fun applyPrefs(prefs: HostPrefs, sourceChanged: Boolean)
+    fun applyTalk(on: Boolean)
+    fun applyDiscovery()
+    fun newKey(key: String)
+    fun setVolume(id: Int, volume: Int)
+    fun kick(id: Int)
+}
 
+/** Shared state between [HostService] and [HostScreen]; every setting change goes through here. */
+object HostController {
     private val _state = MutableStateFlow(HostUiState())
     val state: StateFlow<HostUiState> = _state.asStateFlow()
 
     @Volatile
-    internal var server: HostServer? = null
+    internal var engine: HostEngine? = null
 
-    private fun prefs(context: Context): SharedPreferences =
-        context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private var settings: HostSettings? = null
 
-    /** Loads the saved key and Party setting (creates a key on first use). */
+    private fun settings(context: Context): HostSettings =
+        settings ?: HostSettings(context).also { settings = it }
+
+    /** Loads saved settings (creates a link key on first use) and looks up the network. */
     fun init(context: Context) {
-        val key = linkKey(context)
-        val party = prefs(context).getBoolean(KEY_PARTY, false)
-        _state.update { it.copy(key = key, party = party, maxClients = if (party) 16 else 8) }
+        if (_state.value.prefs.key.isEmpty()) {
+            val prefs = settings(context).load()
+            _state.update { it.copy(prefs = prefs) }
+        }
         refreshNetwork(context)
     }
 
-    internal fun linkKey(context: Context): String {
-        val p = prefs(context)
-        val saved = p.getString(KEY_LINK, null)
-        if (saved != null && LinkKey.isWellFormed(saved)) return LinkKey.normalize(saved)
-        val fresh = LinkKey.generate()
-        p.edit().putString(KEY_LINK, fresh).apply()
-        return fresh
+    internal fun prefs(context: Context): HostPrefs {
+        init(context)
+        return _state.value.prefs
     }
 
-    internal fun party(context: Context): Boolean = prefs(context).getBoolean(KEY_PARTY, false)
+    private fun changePrefs(context: Context, sourceChanged: Boolean = false, change: (HostPrefs) -> HostPrefs) {
+        init(context)
+        val next = change(_state.value.prefs)
+        settings(context).save(next)
+        _state.update { it.copy(prefs = next) }
+        engine?.applyPrefs(next, sourceChanged)
+    }
+
+    fun setParty(context: Context, on: Boolean) = changePrefs(context) { it.copy(party = on) }
+
+    fun setPinOn(context: Context, on: Boolean) = changePrefs(context) { it.copy(pinOn = on) }
+
+    /** Stores the typed PIN (digits only, max 6); it takes effect once it has 4–6 digits. */
+    fun setPin(context: Context, raw: String) = changePrefs(context) { it.copy(pin = RoomPin.sanitizeInput(raw)) }
+
+    fun setRemote(context: Context, on: Boolean) = changePrefs(context) { it.copy(remote = on) }
+
+    fun setNoiseCancel(context: Context, level: NoiseCancel) = changePrefs(context) { it.copy(noiseCancel = level) }
+
+    /** null = all apps. */
+    fun setSource(context: Context, app: AppChoice?) = changePrefs(context, sourceChanged = true) { it.copy(app = app) }
+
+    /** Port for the next start (1024–65535). Returns false when invalid. */
+    fun setPort(context: Context, text: String): Boolean {
+        val p = LinkBuilder.parsePort(text) ?: return false
+        changePrefs(context) { it.copy(port = p) }
+        return true
+    }
 
     /** New random key; current listeners are disconnected and must scan the new QR code. */
     fun newLink(context: Context) {
         val fresh = LinkKey.generate()
-        prefs(context).edit().putString(KEY_LINK, fresh).apply()
-        server?.setKey(fresh)
-        _state.update { it.copy(key = fresh) }
+        changePrefs(context) { it.copy(key = fresh) }
+        engine?.newKey(fresh)
     }
 
-    fun setParty(context: Context, on: Boolean) {
-        prefs(context).edit().putBoolean(KEY_PARTY, on).apply()
-        server?.setParty(on)
-        _state.update { it.copy(party = on, maxClients = if (on) 16 else 8) }
+    fun setShowOnNetwork(on: Boolean) {
+        _state.update { it.copy(showChoice = on) }
+        engine?.applyDiscovery()
+    }
+
+    fun chooseAddress(address: String) {
+        _state.update { it.copy(chosenAddress = address) }
+        engine?.applyDiscovery()
+    }
+
+    fun setTalking(on: Boolean) {
+        if (_state.value.status != HostStatus.SHARING) return
+        _state.update { it.copy(talking = on) }
+        engine?.applyTalk(on)
     }
 
     fun setVolume(id: Int, volume: Int) {
-        server?.setVolume(id, volume)
+        engine?.setVolume(id, volume)
     }
 
     fun kick(id: Int) {
-        server?.kick(id)
+        engine?.kick(id)
     }
 
     fun refreshNetwork(context: Context) {
-        val net = HostNetwork.current(context)
-        _state.update { it.copy(address = net.address, onWifi = net.onWifi) }
+        val list = HostNetwork.addresses(context)
+        val before = _state.value
+        _state.update { if (it.addresses == list) it else it.copy(addresses = list) }
+        if (before.addresses != list && before.netKind != _state.value.netKind) engine?.applyDiscovery()
     }
 
     /** Starts [HostService] with the MediaProjection consent result. */
     fun startSharing(context: Context, resultCode: Int, data: Intent) {
+        init(context)
         _state.update { it.copy(status = HostStatus.STARTING, error = null, silent = false) }
         val intent = Intent(context, HostService::class.java)
             .setAction(HostService.ACTION_START)
@@ -119,21 +175,26 @@ object HostController {
         _state.update { it.copy(error = null) }
     }
 
-    internal fun setError(message: String?) {
+    internal fun reportError(message: String?) {
         _state.update { it.copy(error = message) }
     }
 
-    internal fun reportSharing(port: Int, key: String) {
-        _state.update {
-            it.copy(status = HostStatus.SHARING, port = port, key = key, error = null, silent = false)
-        }
+    internal fun reportSharing(port: Int) {
+        _state.update { it.copy(status = HostStatus.SHARING, port = port, error = null, silent = false) }
     }
 
     internal fun reportStopped(error: String?) {
-        server = null
+        engine = null
         _state.update {
-            it.copy(status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, error = error ?: it.error)
+            it.copy(
+                status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, talking = false,
+                showChoice = null, error = error ?: it.error
+            )
         }
+    }
+
+    internal fun reportTalking(on: Boolean) {
+        _state.update { it.copy(talking = on) }
     }
 
     internal fun reportListeners(list: List<ListenerInfo>) {

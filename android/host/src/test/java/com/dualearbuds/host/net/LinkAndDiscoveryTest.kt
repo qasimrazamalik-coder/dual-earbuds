@@ -32,6 +32,14 @@ class LinkAndDiscoveryTest {
     }
 
     @Test
+    fun addressListPutsWifiFirstThenHotspots() {
+        val ifaces = listOf("wlan0" to "192.168.1.5", "rmnet0" to "10.0.0.9", "rndis0" to "192.168.42.129", "swlan0" to "192.168.43.1")
+        val list = LinkBuilder.addresses(ifaces, "192.168.1.5")
+        assertEquals(listOf(HostAddress("192.168.1.5", NetKind.WIFI), HostAddress("192.168.43.1", NetKind.HOTSPOT), HostAddress("192.168.42.129", NetKind.HOTSPOT)), list)
+        assertEquals(listOf(HostAddress("192.168.43.1", NetKind.HOTSPOT)), LinkBuilder.addresses(listOf("swlan0" to "192.168.43.1"), null))
+    }
+
+    @Test
     fun showOnNetworkDefaults() {
         assertTrue(Discovery.showOnNetwork(NetKind.HOTSPOT, null))
         assertFalse(Discovery.showOnNetwork(NetKind.WIFI, null))
