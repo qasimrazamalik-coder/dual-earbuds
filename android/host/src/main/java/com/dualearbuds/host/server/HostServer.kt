@@ -7,8 +7,6 @@ import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.net.SocketException
-import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -23,42 +21,26 @@ data class HostLimits(
     val idleTimeoutMs: Int = 30_000,
     val queueMs: Int = 600,
     val pingIntervalMs: Long = 2_000,
+    val clockIntervalMs: Long = 1_000,
     val writeStallMs: Long = 1_200,
     val guessMaxDistinct: Int = 10,
     val guessWindowMs: Long = 60_000,
-    val guessLockMs: Long = 5 * 60_000
+    val guessLockMs: Long = 5 * 60_000,
+    val remotePerSecond: Double = 5.0
 )
 
 /** Who this host is, as reported in `/info` and `hello`. */
 data class HostIdentity(
     val pcName: String,
-    val version: String = "3.0.0",
+    val version: String = "3.1.0",
     val host: String = "android"
 )
 
-/** A listener as shown in the host's UI. */
-data class ListenerInfo(
-    val id: Int,
-    val name: String,
-    val client: String,
-    val address: String,
-    val device: String,
-    val earbuds: String,
-    val battery: Int,
-    val volume: Int,
-    val bufferMs: Int,
-    val underruns: Int,
-    val playing: Boolean,
-    val rttMs: Int,
-    val dropped: Long
-) {
-    val displayName: String get() = device.ifBlank { name.ifBlank { "Listener" } }
-}
-
 /**
- * Host side of Dual Earbuds link protocol v3 on plain sockets: HTTP/1.1 and RFC 6455 WebSocket on one
- * port. Free of Android APIs. One accept thread, one short-lived thread per HTTP request, and a
- * reader + writer thread per listener (max 16), plus one housekeeping thread for pings and stalls.
+ * Host side of Dual Earbuds link protocol v3 (+ v3.1 additions) on plain sockets: HTTP/1.1 and
+ * RFC 6455 WebSocket on one port. Free of Android APIs so it runs in JVM unit tests.
+ * One accept thread, one short-lived thread per HTTP request, a reader + writer thread per listener
+ * (max 16), and one housekeeping thread for ping (2 s), clock (1 s) and stalled writers.
  *
  * [sendAudio] must be called from a single thread (the capture thread).
  */
@@ -67,11 +49,15 @@ class HostServer(
     initialKey: String,
     private val pageProvider: () -> ByteArray?,
     private val limits: HostLimits = HostLimits(),
-    private val nowMs: () -> Long = { System.nanoTime() / 1_000_000 }
+    private val clock: () -> Long = { System.nanoTime() / 1_000_000 }
 ) {
     /** Called (from any thread) when the listener list or a listener's stats change. */
     @Volatile
     var onChange: (() -> Unit)? = null
+
+    /** Called on a listener's reader thread for an allowed, rate-limited `remote` press. */
+    @Volatile
+    var onRemote: ((RemoteAction) -> Unit)? = null
 
     @Volatile
     var key: String = LinkKey.normalize(initialKey)
@@ -80,6 +66,28 @@ class HostServer(
     @Volatile
     var party: Boolean = false
         private set
+
+    /** Room PIN, or null when off. */
+    @Volatile
+    var pin: String? = null
+        private set
+
+    @Volatile
+    var remoteAllowed: Boolean = false
+        private set
+
+    @Volatile
+    var talking: Boolean = false
+        private set
+
+    @Volatile
+    private var source: String = "all"
+
+    @Volatile
+    private var sourceApp: String? = null
+
+    @Volatile
+    var playoutMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
 
     /** Current sample rate, 0 while not sharing. */
     @Volatile
@@ -92,18 +100,20 @@ class HostServer(
 
     val maxClients: Int get() = if (party) limits.maxClientsParty else limits.maxClients
 
-    private val startedAt = nowMs()
+    private val startedAt = clock()
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
     private var acceptThread: Thread? = null
     private var houseThread: Thread? = null
     private val pending = AtomicInteger(0)
     private val nextId = AtomicInteger(1)
-    private val guard = GuessGuard(nowMs, limits.guessMaxDistinct, limits.guessWindowMs, limits.guessLockMs)
+    private val guard = GuessGuard(clock, limits.guessMaxDistinct, limits.guessWindowMs, limits.guessLockMs)
+    private val remoteLimiter = RateLimiter(limits.remotePerSecond, limits.remotePerSecond, clock)
+    private val clockTrack = ClockTrack()
     private val clientsLock = Any()
 
     @Volatile
-    private var clients: Array<Session> = emptyArray()
+    private var clients: Array<ListenerSession> = emptyArray()
 
     // Audio frame pool: frames are shared by all listeners and reused round-robin. The pool covers
     // well over queue (600 ms) + write-stall limit, so a frame is never rewritten while queued or sending.
@@ -111,6 +121,16 @@ class HostServer(
     private var poolIndex = 0
     private var poolFrameLen = 0
     private val seq = AtomicInteger(0)
+
+    private val owner = object : SessionOwner {
+        override val limits: HostLimits get() = this@HostServer.limits
+        override fun nowMs(): Long = clock()
+        override fun onText(session: ListenerSession, text: String) = handleText(session, text)
+        override fun onClosed(session: ListenerSession) = removeClient(session)
+    }
+
+    /** Host time used on the wire (`ping.t`, `sync.h`, `clock.h`): ms since this server was made. */
+    fun hostMs(): Long = clock() - startedAt
 
     // ------------------------------------------------------------------ lifecycle
 
@@ -163,11 +183,10 @@ class HostServer(
         } catch (_: IOException) {
         }
         serverSocket = null
-        val all = clients
         // Polite close (listeners may auto-reconnect when sharing resumes); force after a short wait.
-        for (c in all) c.sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_GOING_AWAY, "Host stopped"), closeAfter = true)
-        val until = nowMs() + STOP_DRAIN_MS
-        while (clients.isNotEmpty() && nowMs() < until) {
+        for (c in clients) c.sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_GOING_AWAY, "Host stopped"), closeAfter = true)
+        val until = clock() + STOP_DRAIN_MS
+        while (clients.isNotEmpty() && clock() < until) {
             try {
                 Thread.sleep(10)
             } catch (_: InterruptedException) {
@@ -189,16 +208,47 @@ class HostServer(
     /** Sharing started ([rate] > 0) or stopped ([rate] = 0). Resets the sequence on start. */
     fun setSharing(rate: Int) {
         val on = rate > 0
-        if (on && this.rate == 0) seq.set(0)
+        if (on && this.rate == 0) {
+            seq.set(0)
+            clockTrack.reset()
+        }
         this.rate = if (on) rate else 0
-        broadcastText(MiniJson.obj("type" to "state", "mirroring" to on, "rate" to this.rate))
+        broadcastText(HostMessages.state(on, this.rate))
     }
 
     fun setParty(on: Boolean) {
         if (party == on) return
         party = on
-        broadcastText(MiniJson.obj("type" to "party", "on" to on))
+        broadcastText(HostMessages.party(on))
         onChange?.invoke()
+    }
+
+    /** Sets the room PIN (4–6 digits) or turns it off with null. Joined listeners stay. */
+    fun setPin(newPin: String?) {
+        require(newPin == null || RoomPin.isValid(newPin)) { "PIN must be 4-6 digits" }
+        pin = newPin
+    }
+
+    fun setRemoteAllowed(on: Boolean) {
+        remoteAllowed = on
+    }
+
+    /** Talk-over on/off: listeners get `{"type":"talk","on":…}`. */
+    fun setTalking(on: Boolean) {
+        if (talking == on) return
+        talking = on
+        broadcastText(HostMessages.talk(on))
+    }
+
+    /** Sound source shown in `/info` and `hello`: everything, or one app ([appName]). */
+    fun setSource(appName: String?) {
+        if (appName.isNullOrBlank()) {
+            source = "all"
+            sourceApp = null
+        } else {
+            source = "app"
+            sourceApp = appName
+        }
     }
 
     /** Replaces the link key; current listeners are told and disconnected. */
@@ -212,7 +262,7 @@ class HostServer(
         val c = clients.firstOrNull { it.id == id } ?: return false
         val v = volume.coerceIn(0, 150)
         c.volume = v
-        c.send(MiniJson.obj("type" to "control", "volume" to v))
+        c.send(HostMessages.volume(v))
         onChange?.invoke()
         return true
     }
@@ -223,18 +273,37 @@ class HostServer(
         return true
     }
 
-    fun listeners(): List<ListenerInfo> = clients.map { it.info() }
+    fun listeners(): List<ListenerInfo> {
+        val now = clock()
+        return clients.map { it.info(now) }
+    }
 
     fun listenerCount(): Int = clients.size
 
+    fun facts(): HostFacts = HostFacts(
+        identity = identity,
+        rate = rate,
+        party = party,
+        maxClients = maxClients,
+        pin = pin != null,
+        remote = remoteAllowed,
+        source = source,
+        app = sourceApp,
+        playoutMs = playoutMs
+    )
+
+    fun infoJson(): String = HostMessages.info(facts())
+
     /**
      * Broadcasts one packet of s16le stereo PCM ([len] bytes, normally 10 ms). Single caller thread.
+     * [capturedAtHostMs] is when the packet was captured on the [hostMs] clock (for `clock`).
      * No allocation once the frame pool exists.
      */
-    fun sendAudio(pcm: ByteArray, off: Int, len: Int) {
+    fun sendAudio(pcm: ByteArray, off: Int, len: Int, capturedAtHostMs: Long = hostMs()) {
         val r = rate
         val s = seq.getAndIncrement()
         if (r <= 0) return
+        clockTrack.record(s, capturedAtHostMs)
         val targets = clients
         if (targets.isEmpty()) return
         val payloadLen = AudioPacket.HEADER_SIZE + len
@@ -252,9 +321,52 @@ class HostServer(
         for (c in targets) c.offerAudio(buf)
     }
 
-    // ------------------------------------------------------------------ internals
+    // ------------------------------------------------------------------ listener messages
 
-    private fun msSinceStart(): Long = nowMs() - startedAt
+    private fun handleText(session: ListenerSession, text: String) {
+        val m = MiniJson.parseObject(text) ?: return
+        when (m.str("type")) {
+            "pong" -> {
+                val t = m.num("t") ?: return
+                val rtt = hostMs() - t.toLong()
+                if (rtt in 0..60_000) {
+                    session.rttMs = rtt.toInt()
+                    onChange?.invoke()
+                }
+            }
+            "status" -> {
+                val st = HostMessages.parseStatus(m)
+                st.device?.let { session.device = sanitizeName(it) }
+                st.earbuds?.let { session.earbuds = sanitizeName(it) }
+                st.battery?.let { session.battery = it }
+                st.volume?.let { session.volume = it }
+                st.bufferMs?.let { session.bufferMs = it }
+                st.underruns?.let { session.underruns = it }
+                st.playing?.let { session.playing = it }
+                st.synced?.let { session.syncedHint = it }
+                onChange?.invoke()
+            }
+            "sync" -> {
+                val reply = ClockTrack.syncReply(m.num("c"), hostMs()) ?: return
+                session.send(reply)
+                val first = session.lastSyncAt == 0L
+                session.lastSyncAt = clock()
+                if (first) onChange?.invoke()
+            }
+            "remote" -> {
+                if (!remoteAllowed) return
+                val action = RemoteAction.parse(m.str("action")) ?: return
+                if (!remoteLimiter.tryAcquire()) return
+                try {
+                    onRemote?.invoke(action)
+                } catch (_: RuntimeException) {
+                }
+            }
+            else -> Unit // unknown types are ignored
+        }
+    }
+
+    // ------------------------------------------------------------------ internals
 
     private fun broadcastText(json: String) {
         val all = clients
@@ -263,13 +375,13 @@ class HostServer(
         for (c in all) c.sendFrame(frame)
     }
 
-    private fun kickSession(c: Session, reason: String) {
-        c.send(MiniJson.obj("type" to "kick", "reason" to reason))
+    private fun kickSession(c: ListenerSession, reason: String) {
+        c.send(HostMessages.kick(reason))
         c.sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_NORMAL, "kicked"), closeAfter = true)
         removeClient(c)
     }
 
-    private fun removeClient(c: Session) {
+    private fun removeClient(c: ListenerSession) {
         var changed = false
         synchronized(clientsLock) {
             val cur = clients
@@ -298,7 +410,7 @@ class HostServer(
                 pending.decrementAndGet()
                 try {
                     socket.soTimeout = 1000
-                    writeResponse(socket.getOutputStream(), 503, "Service Unavailable", "text/plain; charset=utf-8", "Busy".toByteArray())
+                    writeResponse(socket.getOutputStream(), 503, "Service Unavailable", TEXT, "Busy".toByteArray())
                 } catch (_: IOException) {
                 }
                 closeQuietly(socket)
@@ -329,18 +441,18 @@ class HostServer(
             socket.tcpNoDelay = true
             val input = BufferedInputStream(socket.getInputStream(), 4096)
             val output = socket.getOutputStream()
-            val deadline = nowMs() + limits.headerDeadlineMs
+            val deadline = clock() + limits.headerDeadlineMs
             val head = try {
-                HttpHead.read(input, socket, deadline, limits.maxHeaderBytes, nowMs)
+                HttpHead.read(input, socket, deadline, limits.maxHeaderBytes, clock)
             } catch (_: HeadTooLargeException) {
-                writeResponse(output, 431, "Request Header Fields Too Large", "text/plain; charset=utf-8", "Header too large".toByteArray())
+                writeResponse(output, 431, "Request Header Fields Too Large", TEXT, "Header too large".toByteArray())
                 return
             } catch (_: HeadTimeoutException) {
                 return
             } ?: return
             val req = HttpHead.parse(head)
             if (req == null) {
-                writeResponse(output, 400, "Bad Request", "text/plain; charset=utf-8", "Bad request".toByteArray())
+                writeResponse(output, 400, "Bad Request", TEXT, "Bad request".toByteArray())
                 return
             }
             if (req.path == "/favicon.ico") {
@@ -348,7 +460,7 @@ class HostServer(
                 return
             }
             if (req.method != "GET" || (req.path != "/" && req.path != "/info" && req.path != "/ws")) {
-                writeResponse(output, 404, "Not Found", "text/plain; charset=utf-8", "Not found".toByteArray())
+                writeResponse(output, 404, "Not Found", TEXT, "Not found".toByteArray())
                 return
             }
             val given = req.query["k"]
@@ -356,19 +468,31 @@ class HostServer(
                 if (!given.isNullOrBlank() && guard.recordWrong(address, given)) {
                     return // just locked: ignore from now on
                 }
-                writeResponse(output, 403, "Forbidden", "text/plain; charset=utf-8", "Wrong or missing link key".toByteArray())
+                writeResponse(output, 403, "Forbidden", TEXT, "Wrong or missing link key".toByteArray())
                 return
+            }
+            // Room PIN: required on /ws. The page and /info stay open so the page can see "pin":true
+            // and ask for it, but a wrong `p` on the page is refused and counted too.
+            if (req.path != "/info") {
+                val pinCheck = RoomPin.check(pin, req.query["p"])
+                val refuse = pinCheck == RoomPin.Check.WRONG ||
+                    (pinCheck == RoomPin.Check.MISSING && req.path == "/ws")
+                if (refuse) {
+                    if (pinCheck == RoomPin.Check.WRONG && guard.recordWrong(address, "PIN:" + req.query["p"])) return
+                    writeResponse(output, 403, "Forbidden", TEXT, "Wrong or missing room PIN".toByteArray())
+                    return
+                }
             }
             when (req.path) {
                 "/" -> {
                     val page = pageProvider()
                     if (page == null) {
-                        writeResponse(output, 503, "Service Unavailable", "text/plain; charset=utf-8", "Player page missing".toByteArray())
+                        writeResponse(output, 503, "Service Unavailable", TEXT, "Player page missing".toByteArray())
                     } else {
                         writeResponse(output, 200, "OK", "text/html; charset=utf-8", page)
                     }
                 }
-                "/info" -> writeResponse(output, 200, "OK", "application/json; charset=utf-8", infoJson().toByteArray(Charsets.UTF_8))
+                "/info" -> writeResponse(output, 200, "OK", JSON, infoJson().toByteArray(Charsets.UTF_8))
                 "/ws" -> {
                     val session = upgrade(socket, input, output, req, address) ?: return
                     upgraded = true
@@ -384,53 +508,31 @@ class HostServer(
         }
     }
 
-    fun infoJson(): String = MiniJson.obj(
-        "app" to "DualEarbuds",
-        "protocol" to 3,
-        "version" to identity.version,
-        "host" to identity.host,
-        "pc" to identity.pcName,
-        "rate" to rate,
-        "channels" to 2,
-        "format" to "s16le",
-        "party" to party,
-        "maxClients" to maxClients
-    )
-
-    private fun helloJson(): String = MiniJson.obj(
-        "type" to "hello",
-        "protocol" to 3,
-        "pc" to identity.pcName,
-        "version" to identity.version,
-        "host" to identity.host,
-        "rate" to rate,
-        "party" to party
-    )
-
-    private fun upgrade(socket: Socket, input: InputStream, output: OutputStream, req: HttpRequest, address: String): Session? {
+    private fun upgrade(socket: Socket, input: InputStream, output: OutputStream, req: HttpRequest, address: String): ListenerSession? {
         val wsKey = req.header("sec-websocket-key")
         val okHeaders = req.header("upgrade")?.trim()?.equals("websocket", ignoreCase = true) == true &&
             HttpHead.hasToken(req.header("connection"), "upgrade") &&
             WsCodec.isValidClientKey(wsKey)
         if (!okHeaders) {
-            writeResponse(output, 400, "Bad Request", "text/plain; charset=utf-8", "WebSocket upgrade expected".toByteArray())
+            writeResponse(output, 400, "Bad Request", TEXT, "WebSocket upgrade expected".toByteArray())
             return null
         }
         if (req.header("sec-websocket-version")?.trim() != "13") {
-            writeResponse(output, 426, "Upgrade Required", "text/plain; charset=utf-8", "WebSocket version 13 only".toByteArray(), "Sec-WebSocket-Version: 13\r\n")
+            writeResponse(output, 426, "Upgrade Required", TEXT, "WebSocket version 13 only".toByteArray(), "Sec-WebSocket-Version: 13\r\n")
             return null
         }
         val client = when (req.query["client"]?.lowercase()) {
             "android" -> "android"
-            "web" -> "web"
+            "windows" -> "windows"
             else -> "web"
         }
         val name = sanitizeName(req.query["name"] ?: "")
-        val session = Session(nextId.getAndIncrement(), socket, input, output, client, name, address)
-        session.send(helloJson())
+        val session = ListenerSession(nextId.getAndIncrement(), socket, input, output, client, name, address, owner)
+        session.send(HostMessages.hello(facts()))
+        if (talking) session.send(HostMessages.talk(true))
         synchronized(clientsLock) {
             if (clients.size >= maxClients) {
-                writeResponse(output, 503, "Service Unavailable", "text/plain; charset=utf-8", "Too many listeners".toByteArray())
+                writeResponse(output, 503, "Service Unavailable", TEXT, "Too many listeners".toByteArray())
                 return null
             }
             val accept = WsCodec.acceptKey(wsKey!!)
@@ -443,7 +545,7 @@ class HostServer(
             clients = clients + session
         }
         socket.soTimeout = limits.idleTimeoutMs
-        session.lastHeard = nowMs()
+        session.lastHeard = clock()
         session.startWriter()
         onChange?.invoke()
         return session
@@ -459,22 +561,26 @@ class HostServer(
     }
 
     private fun housekeeping() {
-        var nextPing = nowMs() + limits.pingIntervalMs
+        var nextPing = clock() + limits.pingIntervalMs
+        var nextClock = clock() + limits.clockIntervalMs
         while (running.get()) {
             try {
                 Thread.sleep(HOUSEKEEPING_TICK_MS)
             } catch (_: InterruptedException) {
                 return
             }
-            val now = nowMs()
-            val all = clients
-            for (c in all) {
+            val now = clock()
+            for (c in clients) {
                 val started = c.writeStartedAt
                 if (started != 0L && now - started > limits.writeStallMs) c.close()
             }
             if (now >= nextPing) {
                 nextPing = now + limits.pingIntervalMs
-                broadcastText(MiniJson.obj("type" to "ping", "t" to msSinceStart()))
+                broadcastText(HostMessages.ping(hostMs()))
+            }
+            if (now >= nextClock) {
+                nextClock = now + limits.clockIntervalMs
+                if (rate > 0) clockTrack.clockMessage()?.let { broadcastText(it) }
             }
         }
     }
@@ -511,183 +617,12 @@ class HostServer(
         }
     }
 
-    // ------------------------------------------------------------------ one listener
-
-    private inner class Session(
-        val id: Int,
-        val socket: Socket,
-        val input: InputStream,
-        val output: OutputStream,
-        val client: String,
-        val name: String,
-        val address: String
-    ) {
-        val outbox = Outbox(maxOf(1, limits.queueMs / AudioPacket.PACKET_MS))
-        private val closed = AtomicBoolean(false)
-
-        @Volatile var writeStartedAt = 0L
-        @Volatile var lastHeard = 0L
-        @Volatile var device = ""
-        @Volatile var earbuds = ""
-        @Volatile var battery = -1
-        @Volatile var volume = 100
-        @Volatile var bufferMs = 0
-        @Volatile var underruns = 0
-        @Volatile var playing = false
-        @Volatile var rttMs = -1
-        @Volatile var dropped = 0L
-
-        fun info() = ListenerInfo(
-            id, name, client, address, device, earbuds, battery, volume, bufferMs, underruns, playing, rttMs, dropped
-        )
-
-        fun send(json: String) = sendFrame(WsCodec.textFrame(json))
-
-        fun sendFrame(frame: ByteArray, closeAfter: Boolean = false) {
-            if (!outbox.offerControl(frame, closeAfter)) {
-                // Control queue overflow means the listener is not reading at all.
-                if (!closed.get()) close()
-            }
-        }
-
-        fun offerAudio(frame: ByteArray) {
-            if (outbox.offerAudio(frame)) dropped++
-        }
-
-        fun startWriter() {
-            Thread({ writerLoop() }, "host-ws-w$id").apply {
-                isDaemon = true
-                start()
-            }
-        }
-
-        private fun writerLoop() {
-            try {
-                while (!closed.get()) {
-                    val item = outbox.take(1000) ?: continue
-                    val bytes: ByteArray
-                    var closeAfter = false
-                    if (item is Outbox.Item) {
-                        bytes = item.bytes
-                        closeAfter = item.closeAfter
-                    } else {
-                        bytes = item as ByteArray
-                    }
-                    writeStartedAt = nowMs().coerceAtLeast(1L)
-                    output.write(bytes)
-                    writeStartedAt = 0L
-                    if (closeAfter) {
-                        output.flush()
-                        close()
-                        return
-                    }
-                }
-            } catch (_: IOException) {
-                close()
-            } catch (_: RuntimeException) {
-                close()
-            } finally {
-                writeStartedAt = 0L
-            }
-        }
-
-        /** Runs on the handshake thread after the upgrade. */
-        fun runReader() {
-            val reader = WsFrameReader(input, limits.maxMessageBytes)
-            val message = ByteArray(limits.maxMessageBytes)
-            var msgLen = 0
-            var msgOpcode = -1
-            try {
-                while (!closed.get()) {
-                    val more = try {
-                        reader.next()
-                    } catch (_: SocketTimeoutException) {
-                        sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_GOING_AWAY, "idle"), closeAfter = true)
-                        return
-                    }
-                    if (!more) break
-                    lastHeard = nowMs()
-                    when (reader.opcode) {
-                        WsCodec.OP_CLOSE -> {
-                            sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_NORMAL), closeAfter = true)
-                            return
-                        }
-                        WsCodec.OP_PING -> sendFrame(WsCodec.frame(WsCodec.OP_PONG, reader.payload, 0, reader.length))
-                        WsCodec.OP_PONG -> Unit
-                        WsCodec.OP_TEXT, WsCodec.OP_BINARY -> {
-                            if (msgOpcode != -1) throw WsProtocolException(WsCodec.CLOSE_PROTOCOL, "Expected continuation")
-                            System.arraycopy(reader.payload, 0, message, 0, reader.length)
-                            msgLen = reader.length
-                            if (reader.fin) {
-                                if (reader.opcode == WsCodec.OP_TEXT) onText(String(message, 0, msgLen, Charsets.UTF_8))
-                                msgLen = 0
-                            } else {
-                                msgOpcode = reader.opcode
-                            }
-                        }
-                        WsCodec.OP_CONT -> {
-                            if (msgOpcode == -1) throw WsProtocolException(WsCodec.CLOSE_PROTOCOL, "Unexpected continuation")
-                            if (msgLen + reader.length > message.size) throw WsProtocolException(WsCodec.CLOSE_TOO_BIG, "Message too big")
-                            System.arraycopy(reader.payload, 0, message, msgLen, reader.length)
-                            msgLen += reader.length
-                            if (reader.fin) {
-                                if (msgOpcode == WsCodec.OP_TEXT) onText(String(message, 0, msgLen, Charsets.UTF_8))
-                                msgOpcode = -1
-                                msgLen = 0
-                            }
-                        }
-                    }
-                }
-                close()
-            } catch (e: WsProtocolException) {
-                sendFrame(WsCodec.closeFrame(e.closeCode, e.message ?: ""), closeAfter = true)
-            } catch (_: IOException) {
-                close()
-            } catch (_: RuntimeException) {
-                close()
-            }
-        }
-
-        private fun onText(text: String) {
-            val m = MiniJson.parseObject(text) ?: return
-            when (m.str("type")) {
-                "pong" -> {
-                    val t = m.num("t") ?: return
-                    val rtt = msSinceStart() - t.toLong()
-                    if (rtt in 0..60_000) {
-                        rttMs = rtt.toInt()
-                        onChange?.invoke()
-                    }
-                }
-                "status" -> {
-                    m.str("device")?.let { device = sanitizeName(it) }
-                    m.str("earbuds")?.let { earbuds = sanitizeName(it) }
-                    m.num("battery")?.let { battery = it.toInt().coerceIn(-1, 100) }
-                    m.num("volume")?.let { volume = it.toInt().coerceIn(0, 150) }
-                    m.num("bufferMs")?.let { bufferMs = it.toInt().coerceIn(0, 60_000) }
-                    m.num("underruns")?.let { underruns = it.toInt().coerceAtLeast(0) }
-                    m.bool("playing")?.let { playing = it }
-                    onChange?.invoke()
-                }
-                else -> Unit // unknown types are ignored
-            }
-        }
-
-        fun close() {
-            if (!closed.compareAndSet(false, true)) return
-            outbox.close()
-            try {
-                socket.close()
-            } catch (_: IOException) {
-            }
-            removeClient(this)
-        }
-    }
-
     companion object {
         /** 256 × 10 ms = 2.56 s of frames, > 600 ms queue + 1.2 s write stall + housekeeping tick. */
         private const val POOL_SIZE = 256
-        private const val HOUSEKEEPING_TICK_MS = 250L
+        private const val HOUSEKEEPING_TICK_MS = 100L
         private const val STOP_DRAIN_MS = 300L
+        private const val TEXT = "text/plain; charset=utf-8"
+        private const val JSON = "application/json; charset=utf-8"
     }
 }
