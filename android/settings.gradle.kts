@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "DualEarbudsCompanion"
 include(":app")
+include(":host")

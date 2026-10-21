@@ -5,13 +5,24 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
 
+/** GET /info (protocol v3). `host`, `party` and `maxClients` are absent on v2 hosts. */
 data class LaptopInfo(
     val pc: String,
     val version: String,
     val protocol: Int,
     val rate: Int,
     val channels: Int,
-    val format: String
+    val format: String,
+    val host: HostKind = HostKind.UNKNOWN,
+    val party: Boolean = false,
+    val maxClients: Int = 8,
+    /** v3.1: the host asks for a room PIN on `/ws`. */
+    val pin: Boolean = false,
+    /** v3.1: listeners may send `remote` actions. */
+    val remote: Boolean = false,
+    /** v3.1: "all" or "app"; [app] names the app when only one app's sound is shared. */
+    val source: String = "all",
+    val app: String = ""
 )
 
 sealed interface InfoResult {
@@ -54,7 +65,12 @@ object InfoClient {
     private fun parse(body: String, target: LinkTarget): InfoResult {
         return try {
             val o = JSONObject(body)
-            if (o.optString("app") != "DualEarbuds") return InfoResult.NotDualEarbuds
+            // "app" identifies the service. A host that (against v3.1) also put the shared app's name in "app"
+            // would overwrite it, so a v3 shape (protocol + pc + format) is accepted too.
+            val appField = o.optString("app")
+            val looksV3 = o.optInt("protocol", 0) >= 3 && o.has("pc") && o.has("format")
+            if (appField != "DualEarbuds" && !looksV3) return InfoResult.NotDualEarbuds
+            val sourceApp = o.optString("sourceApp", "").ifBlank { if (appField != "DualEarbuds") appField else "" }
             InfoResult.Ok(
                 LaptopInfo(
                     pc = o.optString("pc").ifBlank { target.host },
@@ -62,7 +78,14 @@ object InfoClient {
                     protocol = o.optInt("protocol", 0),
                     rate = o.optInt("rate", 0),
                     channels = o.optInt("channels", 2),
-                    format = o.optString("format", "s16le")
+                    format = o.optString("format", "s16le"),
+                    host = HostKind.fromWire(o.optString("host")),
+                    party = o.optBoolean("party", false),
+                    maxClients = o.optInt("maxClients", 8),
+                    pin = o.optBoolean("pin", false),
+                    remote = o.optBoolean("remote", false),
+                    source = o.optString("source", "all").ifBlank { "all" },
+                    app = sourceApp
                 )
             )
         } catch (t: Throwable) {

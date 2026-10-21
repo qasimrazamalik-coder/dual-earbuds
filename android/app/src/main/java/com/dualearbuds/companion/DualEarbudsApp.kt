@@ -4,7 +4,9 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import com.dualearbuds.companion.bt.EarbudsMonitor
+import com.dualearbuds.companion.data.AppSettings
 import com.dualearbuds.companion.data.Prefs
+import com.dualearbuds.companion.data.SoundSettings
 import com.dualearbuds.companion.service.PlaybackController
 import com.dualearbuds.companion.service.PlaybackService
 
@@ -12,6 +14,8 @@ class DualEarbudsApp : Application() {
     override fun onCreate() {
         super.onCreate()
         Prefs.init(this)
+        AppSettings.init()
+        SoundSettings.init()
         PlaybackController.init()
         createNotificationChannel()
         EarbudsMonitor.init(this)

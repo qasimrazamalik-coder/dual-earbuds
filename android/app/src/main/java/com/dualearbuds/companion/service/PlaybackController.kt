@@ -3,8 +3,12 @@ package com.dualearbuds.companion.service
 import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
+import com.dualearbuds.companion.audio.BufferMode
 import com.dualearbuds.companion.data.Prefs
+import com.dualearbuds.companion.dsp.EqPreset
+import com.dualearbuds.companion.dsp.SoundClass
 import com.dualearbuds.companion.net.ErrorKind
+import com.dualearbuds.companion.net.HostKind
 import com.dualearbuds.companion.net.LinkTarget
 import com.dualearbuds.companion.net.UserError
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -18,21 +22,57 @@ data class PlayerState(
     val status: PlayerStatus = PlayerStatus.IDLE,
     val target: LinkTarget? = null,
     val pcName: String = "",
+    /** Laptop (Windows host) or Phone (Android "Share this phone" host); UNKNOWN for v2 hosts. */
+    val hostKind: HostKind = HostKind.UNKNOWN,
+    val party: Boolean = false,
     val message: String = "",
     val error: UserError? = null,
     val packets: Long = 0,
     val lost: Long = 0,
     val dropped: Long = 0,
     val underruns: Long = 0,
+    /** Sound waiting in the jitter queue right now. */
     val bufferMs: Int = 0,
+    /** The buffer the player aims for (adaptive or manual, plus delay). */
+    val targetMs: Int = 0,
     val latencyMs: Int = 0,
     val rate: Int = 0,
-    val userMuted: Boolean = false
+    val userMuted: Boolean = false,
+    val hostVersion: String = "",
+    val protocol: Int = 0,
+    /** v3.1 */
+    val pinRequired: Boolean = false,
+    val remote: Boolean = false,
+    val talking: Boolean = false,
+    val source: String = "all",
+    val sourceApp: String = "",
+    val hostEq: EqPreset? = null,
+    /** The preset playing right now (after manual / smart / host rules). */
+    val eqInUse: EqPreset = EqPreset.FLAT,
+    val synced: Boolean = false,
+    val syncErrorMs: Double = 0.0,
+    val syncOffsetMs: Double? = null,
+    val syncRttMs: Double? = null,
+    val concealed: Long = 0,
+    val jitterP99Ms: Double = Double.NaN,
+    val soundClass: SoundClass? = null,
+    val outputLatencyMs: Double? = null
 ) {
     /** True while the service is (trying to be) playing — i.e. between Start and Stop. */
     val running: Boolean
         get() = status != PlayerStatus.IDLE && status != PlayerStatus.ERROR
+
+    /** "the laptop" / "the phone" / "the host". */
+    val hostNoun: String
+        get() = "the ${hostKind.noun}"
 }
+
+/** Playback buffer settings: adaptive (AUTO) or fixed (MANUAL), plus a manual delay on top. */
+data class BufferSettings(
+    val mode: BufferMode = BufferMode.SMART,
+    val manualMs: Int = Prefs.DEFAULT_MANUAL_BUFFER_MS,
+    val delayMs: Int = 0
+)
 
 /** Single source of truth shared by the UI and [PlaybackService]. */
 object PlaybackController {
@@ -42,18 +82,47 @@ object PlaybackController {
     private val _volume = MutableStateFlow(Prefs.DEFAULT_VOLUME)
     val volume: StateFlow<Int> = _volume.asStateFlow()
 
-    private val _bufferMs = MutableStateFlow(Prefs.DEFAULT_BUFFER_MS)
-    val bufferMs: StateFlow<Int> = _bufferMs.asStateFlow()
+    private val _buffer = MutableStateFlow(BufferSettings())
+    val buffer: StateFlow<BufferSettings> = _buffer.asStateFlow()
+
+    private val _level = MutableStateFlow(0f)
+
+    /** Output level 0..1 (~12 updates per second while playing) for the live meter. */
+    val level: StateFlow<Float> = _level.asStateFlow()
+
+    /** Set by [PlaybackService] while a link is open; sends a text frame to the host. */
+    @Volatile
+    internal var sender: ((String) -> Boolean)? = null
+
+    /** v3.1 remote control: playpause | next | prev | volup | voldown. Ignored by the host unless allowed. */
+    fun sendRemote(action: String): Boolean {
+        if (action !in setOf("playpause", "next", "prev", "volup", "voldown")) return false
+        if (!_state.value.remote) return false
+        return sender?.invoke("{\"type\":\"remote\",\"action\":\"$action\"}") ?: false
+    }
+
+    private val _testMute = MutableStateFlow(false)
+
+    /** True while calibration or a hearing test plays its own sounds: the stream is muted, the link stays up. */
+    val testMute: StateFlow<Boolean> = _testMute.asStateFlow()
+
+    fun setTestMute(on: Boolean) {
+        _testMute.value = on
+    }
 
     fun init() {
         _volume.value = Prefs.volume
-        _bufferMs.value = Prefs.bufferMs
+        _buffer.value = BufferSettings(Prefs.bufferMode, Prefs.manualBufferMs, Prefs.delayMs)
     }
 
     internal fun update(transform: (PlayerState) -> PlayerState) = _state.update(transform)
 
     internal fun set(state: PlayerState) {
         _state.value = state
+    }
+
+    internal fun setLevel(value: Float) {
+        _level.value = value
     }
 
     fun setVolume(percent: Int) {
@@ -66,15 +135,24 @@ object PlaybackController {
 
     fun changeVolume(delta: Int) = setVolume(_volume.value + delta)
 
-    fun setBufferMs(ms: Int) {
-        val v = ms.coerceIn(Prefs.MIN_BUFFER_MS, Prefs.MAX_BUFFER_MS)
-        if (_bufferMs.value != v) {
-            _bufferMs.value = v
-            Prefs.bufferMs = v
-        }
+    fun setBufferMode(mode: BufferMode) {
+        Prefs.bufferMode = mode
+        _buffer.update { it.copy(mode = mode) }
     }
 
-    /** Starts (or switches) playback from the given laptop. Call from the foreground UI. */
+    fun setManualBufferMs(ms: Int) {
+        val v = ms.coerceIn(Prefs.MIN_MANUAL_BUFFER_MS, Prefs.MAX_MANUAL_BUFFER_MS)
+        Prefs.manualBufferMs = v
+        _buffer.update { it.copy(manualMs = v) }
+    }
+
+    fun setDelayMs(ms: Int) {
+        val v = ms.coerceIn(0, Prefs.MAX_DELAY_MS)
+        Prefs.delayMs = v
+        _buffer.update { it.copy(delayMs = v) }
+    }
+
+    /** Starts (or switches) playback from the given host. Call from the foreground UI. */
     fun start(context: Context, target: LinkTarget) {
         Prefs.lastLink = target.toLink()
         Prefs.wantPlaying = true
@@ -82,13 +160,14 @@ object PlaybackController {
             it.copy(
                 status = PlayerStatus.CONNECTING,
                 target = target,
-                message = "Looking for the laptop at ${target.display}…",
+                message = "Looking for ${target.display}…",
                 error = null
             )
         }
         val intent = Intent(context, PlaybackService::class.java)
             .setAction(PlaybackService.ACTION_START)
             .putExtra(PlaybackService.EXTRA_LINK, target.toLink())
+            .putExtra(PlaybackService.EXTRA_PIN, target.pin)
         try {
             ContextCompat.startForegroundService(context, intent)
         } catch (t: Throwable) {
