@@ -101,6 +101,15 @@ object PlaybackController {
         return sender?.invoke("{\"type\":\"remote\",\"action\":\"$action\"}") ?: false
     }
 
+    private val _testMute = MutableStateFlow(false)
+
+    /** True while calibration or a hearing test plays its own sounds: the stream is muted, the link stays up. */
+    val testMute: StateFlow<Boolean> = _testMute.asStateFlow()
+
+    fun setTestMute(on: Boolean) {
+        _testMute.value = on
+    }
+
     fun init() {
         _volume.value = Prefs.volume
         _buffer.value = BufferSettings(Prefs.bufferMode, Prefs.manualBufferMs, Prefs.delayMs)

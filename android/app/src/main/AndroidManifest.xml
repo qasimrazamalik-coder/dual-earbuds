@@ -21,6 +21,9 @@
         android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
+    <!-- "Calibrate my earbuds" only: hears 8 clicks for a few seconds; asked on that screen -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
     <!-- QR code scanning -->
     <uses-permission android:name="android.permission.CAMERA" />
 

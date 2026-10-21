@@ -60,7 +60,7 @@ import com.dualearbuds.companion.power.GuideStep
 import com.dualearbuds.companion.power.OpenResult
 import com.dualearbuds.companion.ui.components.Banner
 import com.dualearbuds.companion.ui.components.SectionCard
-import com.dualearbuds.companion.ui.theme.Palette
+import com.dualearbuds.companion.ui.theme.AppTheme
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -200,7 +200,7 @@ fun GuideScreen(onBack: () -> Unit) {
 
             val currentHint = hint
             if (currentHint != null) {
-                Banner(text = currentHint, color = Palette.Amber)
+                Banner(text = currentHint, color = AppTheme.colors.warning)
             }
 
             SectionCard(title = "Good to know") {
@@ -233,9 +233,9 @@ private fun notificationsAllowed(context: android.content.Context): Boolean =
 @Composable
 private fun StatusDot(ok: Boolean) {
     if (ok) {
-        Icon(Icons.Filled.CheckCircle, contentDescription = "Done", tint = Palette.Teal, modifier = Modifier.size(26.dp))
+        Icon(Icons.Filled.CheckCircle, contentDescription = "Done", tint = AppTheme.colors.accentText, modifier = Modifier.size(26.dp))
     } else {
-        Icon(Icons.Filled.Warning, contentDescription = "Not done", tint = Palette.Amber, modifier = Modifier.size(24.dp))
+        Icon(Icons.Filled.Warning, contentDescription = "Not done", tint = AppTheme.colors.warning, modifier = Modifier.size(24.dp))
     }
 }
 

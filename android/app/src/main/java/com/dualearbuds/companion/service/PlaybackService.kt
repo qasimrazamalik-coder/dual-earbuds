@@ -537,6 +537,9 @@ class PlaybackService : Service() {
         scope.launch {
             PlaybackController.buffer.collect { b -> applyBufferSettings(b) }
         }
+        scope.launch {
+            PlaybackController.testMute.collect { applyMute() }
+        }
         // Sound settings -> engine (instantly, without restarting playback).
         scope.launch {
             combine(
@@ -884,7 +887,7 @@ class PlaybackService : Service() {
     }
 
     private fun applyMute() {
-        engine.muted = userMuted || focusMuted
+        engine.muted = userMuted || focusMuted || PlaybackController.testMute.value
     }
 
     private fun applyBufferSettings(b: BufferSettings) {
