@@ -2,11 +2,22 @@ package com.dualearbuds.companion.audio
 
 import android.media.AudioAttributes
 import android.media.AudioFormat
+import android.media.AudioTimestamp
 import android.media.AudioTrack
 import android.os.Process
 import android.os.SystemClock
+import com.dualearbuds.companion.audio.sync.ClockSync
+import com.dualearbuds.companion.audio.sync.RateTrimmer
+import com.dualearbuds.companion.audio.sync.SyncAction
+import com.dualearbuds.companion.audio.sync.SyncPlanner
+import com.dualearbuds.companion.diag.AppLog
+import com.dualearbuds.companion.dsp.DialogueMode
+import com.dualearbuds.companion.dsp.EqPreset
+import com.dualearbuds.companion.dsp.EqSpec
+import com.dualearbuds.companion.dsp.SoundClass
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 import kotlin.math.abs
@@ -16,24 +27,35 @@ import kotlin.math.roundToInt
 data class EngineStats(
     /** Sound waiting in the jitter queue. */
     val queuedMs: Int,
-    /** The buffer the queue fills to (adaptive or manual, plus delay). */
+    /** The buffer the queue fills to (smart/steady/manual, plus delay). */
     val targetMs: Int,
     /** The AudioTrack's own device buffer. */
     val trackMs: Int,
     val underruns: Long,
     val dropped: Long,
+    val concealed: Long,
     val rate: Int,
-    val playing: Boolean
+    val playing: Boolean,
+    /** True while packets are scheduled by the host clock (v3.1 clock sync). */
+    val synced: Boolean,
+    val syncErrorMs: Double,
+    val offsetMs: Double?,
+    val rttMs: Double?,
+    val jitterP99Ms: Double,
+    val soundClass: SoundClass?
 )
 
 /**
  * Jitter buffer + lowest-latency AudioTrack player on its own urgent-audio thread.
  *
- * - Packets go into a [JitterBuffer] ([push], called from the network thread).
- * - The audio thread polls it and writes 10 ms chunks with blocking writes (the AudioTrack paces the thread).
- * - The AudioTrack uses PERFORMANCE_MODE_LOW_LATENCY (API 26+, i.e. always on this app's minSdk) and the
- *   smallest buffer that is still safe: max(device minimum, 2 × 10 ms).
- * - The track is recreated when the sample rate changes.
+ * - Packets arrive via [push] (network thread). Sequence gaps are filled by [PacketConcealer] (≤ 30 ms fade).
+ * - Without a host clock the audio thread fills to the adaptive/smart/manual target and plays in order.
+ * - With a host clock (v3.1 `sync`/`clock`, see [ClockSync]) every packet is scheduled to be heard at
+ *   h(seq) + playoutMs − outputLatency − delay. [AudioTrack.getTimestamp] tells when the next written frame
+ *   will play; [SyncPlanner] trims the rate by ≤ ±0.5 % or skips/inserts beyond ±40 ms.
+ * - Sound goes through [DspChain] (dialogue boost, EQ, hearing profile, limiter, volume). A preset EQ runs on
+ *   the platform `audiofx.Equalizer` when available ([PlatformEq]), else in software.
+ * - The track uses PERFORMANCE_MODE_LOW_LATENCY and the smallest safe buffer; it is recreated on a rate change.
  */
 class AudioEngine {
     @Volatile
@@ -41,6 +63,10 @@ class AudioEngine {
 
     @Volatile
     var muted: Boolean = false
+
+    /** Calibrated output latency of the current earbuds (ms), used only in synced playback. */
+    @Volatile
+    var outputLatencyMs: Double = 0.0
 
     /** Peak level 0..1 of what was just played (after gain), with a short decay. For the UI meter only. */
     @Volatile
@@ -50,6 +76,18 @@ class AudioEngine {
     private val lock = ReentrantLock()
     private val dataAvailable = lock.newCondition()
     private val jitter = JitterBuffer()
+    private val clock = ClockSync()
+    private val concealer = PacketConcealer()
+    private val chain = DspChain()
+
+    @Volatile
+    private var delayMs = 0
+
+    @Volatile
+    private var eqPreset: EqPreset = EqPreset.FLAT
+
+    @Volatile
+    private var hearing: Pair<List<Double>?, List<Double>?> = null to null
 
     @Volatile
     private var trackRate = 0
@@ -58,10 +96,21 @@ class AudioEngine {
     private var trackMs = 0
 
     @Volatile
+    private var syncedNow = false
+
+    @Volatile
+    private var syncErrorMs = 0.0
+
+    private val concealed = AtomicLong()
+    private var lastPushSeq = -1L
+    private var lastPushRate = 0
+
+    @Volatile
     private var runFlag: AtomicBoolean? = null
 
     /** Applies the buffer settings (safe from any thread, takes effect on the next packet). */
     fun configure(mode: BufferMode, manualMs: Int, delayMs: Int) {
+        this.delayMs = delayMs
         lock.withLock {
             jitter.mode = mode
             jitter.manualMs = manualMs
@@ -69,13 +118,41 @@ class AudioEngine {
         }
     }
 
+    /** Sound settings; any thread. [preset] is the resolved EQ preset (manual / smart / host / flat). */
+    fun setSound(preset: EqPreset, hearingLeft: List<Double>?, hearingRight: List<Double>?, dialogue: DialogueMode, classify: Boolean) {
+        eqPreset = preset
+        hearing = hearingLeft to hearingRight
+        chain.dialogue = dialogue
+        chain.classify = classify
+    }
+
+    // ------------------------------------------------------------------ clock sync (network thread)
+
+    fun nowMs(): Double = System.nanoTime() / 1_000_000.0
+
+    fun onSyncReply(c: Double, h: Double) = lock.withLock { clock.onSyncReply(c, h, nowMs()) }
+
+    fun onClock(seq: Long, h: Double) = lock.withLock { clock.onClock(seq, h, nowMs()) }
+
+    fun setPlayoutMs(ms: Double) = lock.withLock { clock.playoutMs = ms }
+
+    /** New connection: forget the old host clock (offset and reference). */
+    fun resetClock() = lock.withLock { clock.reset() }
+
+    // ------------------------------------------------------------------ lifecycle
+
     /** Starts the audio thread if it is not already running; the adaptive buffer starts again at 60 ms. */
     @Synchronized
     fun start() {
         if (runFlag?.get() == true) return
         val flag = AtomicBoolean(true)
         runFlag = flag
-        lock.withLock { jitter.reset(SystemClock.elapsedRealtime()) }
+        lock.withLock {
+            jitter.reset(SystemClock.elapsedRealtime())
+            concealer.reset()
+            lastPushSeq = -1L
+        }
+        concealed.set(0)
         level = 0f
         val t = Thread({ loop(flag) }, "DualEarbuds-Audio")
         t.isDaemon = true
@@ -95,22 +172,46 @@ class AudioEngine {
         level = 0f
     }
 
-    fun push(packet: AudioPacket) {
+    /** A packet from the host. Fills sequence gaps (≤ 30 ms) with concealment first. */
+    fun push(rate: Int, seq: Long, samples: ShortArray) {
         lock.withLock {
-            jitter.push(packet, SystemClock.elapsedRealtime())
+            val now = SystemClock.elapsedRealtime()
+            val prev = lastPushSeq
+            if (prev >= 0 && rate == lastPushRate) {
+                val gap = ClockSync.seqDelta(seq, (prev + 1) and 0xFFFFFFFFL)
+                if (gap in 1..1000) {
+                    val fill = concealer.conceal(gap.toInt(), rate)
+                    fill.forEachIndexed { i, s ->
+                        jitter.push(AudioPacket(rate, s, (prev + 1 + i) and 0xFFFFFFFFL, concealed = true), now)
+                    }
+                    concealed.addAndGet(fill.size.toLong())
+                } else if (gap != 0L) {
+                    // The stream jumped (host restarted capture, or a gap too long to fill): start fresh.
+                    concealer.reset()
+                }
+            }
+            concealer.onReal(samples, rate)
+            lastPushSeq = seq and 0xFFFFFFFFL
+            lastPushRate = rate
+            jitter.push(AudioPacket(rate, samples, seq and 0xFFFFFFFFL), now)
             dataAvailable.signalAll()
         }
     }
 
     /** Clears queued audio (host stopped sharing or link dropped) and re-enters buffering. Not an underrun. */
     fun flush() {
-        lock.withLock { jitter.flush() }
+        lock.withLock {
+            jitter.flush()
+            concealer.reset()
+            lastPushSeq = -1L
+        }
         level = 0f
     }
 
-    /** Zeroes the underrun/drop counters (protocol: `underruns` counts since connect). Keeps the adaptive value. */
+    /** Zeroes the counters (protocol: `underruns` counts since connect). Keeps the adaptive value. */
     fun resetCounters() {
         lock.withLock { jitter.resetCounters() }
+        concealed.set(0)
     }
 
     fun stats(): EngineStats = lock.withLock {
@@ -120,13 +221,23 @@ class AudioEngine {
             trackMs = trackMs,
             underruns = jitter.underruns,
             dropped = jitter.dropped,
+            concealed = concealed.get(),
             rate = trackRate,
-            playing = !jitter.buffering && runFlag?.get() == true
+            playing = !jitter.buffering && runFlag?.get() == true,
+            synced = syncedNow,
+            syncErrorMs = syncErrorMs,
+            offsetMs = clock.offsetMs,
+            rttMs = clock.bestRttMs,
+            jitterP99Ms = jitter.jitterP99Ms,
+            soundClass = chain.soundClass
         )
     }
 
-    private fun nextPacket(): AudioPacket? = lock.withLock {
-        val p = jitter.poll(SystemClock.elapsedRealtime())
+    // ------------------------------------------------------------------ audio thread
+
+    private fun nextPacket(synced: Boolean): AudioPacket? = lock.withLock {
+        val now = SystemClock.elapsedRealtime()
+        val p = if (synced) jitter.pollSynced(now) else jitter.poll(now)
         if (p == null) {
             try {
                 dataAvailable.await(5, TimeUnit.MILLISECONDS)
@@ -136,103 +247,196 @@ class AudioEngine {
         p
     }
 
+    private class Track(val track: AudioTrack, val rate: Int) {
+        var framesWritten = 0L
+        val ts = AudioTimestamp()
+    }
+
     private fun loop(flag: AtomicBoolean) {
         try {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         } catch (_: Throwable) {
         }
-        var track: AudioTrack? = null
-        var currentRate = 0
-        var scratch = ShortArray(0)
+        var t: Track? = null
+        val platformEq = PlatformEq()
+        val planner = SyncPlanner()
+        val trimmer = RateTrimmer()
+        var processed = ShortArray(0)
+        var trimmed = ShortArray(0)
+        var tail = ShortArray(0)
+        var appliedPreset: EqPreset? = null
+        var appliedSession = -1
+        var wasSynced = false
         try {
             while (flag.get()) {
-                val packet = nextPacket()
+                // Synced playback needs the host clock and a working output timestamp.
+                val synced = t != null && lock.withLock { clock.isReady(nowMs()) } && presentationMs(t) != null
+                if (synced != wasSynced) {
+                    lock.withLock { jitter.synced = synced }
+                    planner.reset()
+                    trimmer.reset()
+                    wasSynced = synced
+                    syncedNow = synced
+                    AppLog.i(if (synced) "Clock sync on" else "Clock sync off: adaptive buffer")
+                }
+                val packet = nextPacket(synced)
                 if (packet == null) {
                     level *= 0.8f
                     continue
                 }
                 if (!flag.get()) break
-                if (track == null || packet.rate != currentRate) {
-                    if (track != null) releaseTrack(track)
-                    track = null
-                    currentRate = 0
+                if (t == null || packet.rate != t.rate) {
+                    t?.let { releaseTrack(it.track) }
+                    platformEq.release()
+                    appliedPreset = null
+                    t = null
                     trackRate = 0
                     val created = createTrack(packet.rate)
                     if (created == null) {
                         sleepQuietly(100)
                         continue
                     }
-                    track = created
-                    currentRate = packet.rate
+                    t = Track(created, packet.rate)
                 }
-                val n = packet.samples.size
-                if (scratch.size < n) scratch = ShortArray(n)
-                val peak = applyGain(packet.samples, scratch, n)
+                val track = t ?: continue
+
+                // EQ: platform equalizer when possible, else the software fallback in the chain.
+                val preset = eqPreset
+                val session = track.track.audioSessionId
+                if (preset != appliedPreset || session != appliedSession) {
+                    val platformOk = platformEq.attach(session, preset, SystemClock.elapsedRealtime())
+                    appliedPreset = preset
+                    appliedSession = session
+                    chain.platformPreGain = if (platformOk) PlatformEq.preGainFor(platformEq.maxBoostDb) else 1f
+                    val (hl, hr) = hearing
+                    chain.eqSpec = EqSpec(preset, includePreset = !platformOk, hearingLeftDb = hl, hearingRightDb = hr)
+                } else {
+                    val (hl, hr) = hearing
+                    val spec = chain.eqSpec
+                    if (spec.hearingLeftDb != hl || spec.hearingRightDb != hr) {
+                        chain.eqSpec = spec.copy(hearingLeftDb = hl, hearingRightDb = hr)
+                    }
+                }
+                platformEq.tick(SystemClock.elapsedRealtime())
+
+                var src = packet.samples
+                var n = src.size
+                var ratio = 1.0
+                if (synced && packet.seq >= 0) {
+                    val target = lock.withLock { clock.targetLocalMs(packet.seq, outputLatencyMs, delayMs.toDouble()) }
+                    val heardAt = presentationMs(track)
+                    if (target != null && heardAt != null) {
+                        val err = heardAt - target
+                        syncErrorMs = err
+                        if (abs(err) < MAX_SANE_ERROR_MS) {
+                            when (val action = planner.plan(err, track.rate)) {
+                                is SyncAction.Skip -> {
+                                    val skipSamples = action.frames * 2
+                                    if (skipSamples >= n) continue // drop this whole packet
+                                    val rest = n - skipSamples
+                                    if (tail.size < rest) tail = ShortArray(rest)
+                                    System.arraycopy(src, skipSamples, tail, 0, rest)
+                                    src = tail
+                                    n = rest
+                                }
+                                is SyncAction.Insert -> {
+                                    val frames = minOf(action.frames, track.rate / 5) // ≤ 200 ms per step
+                                    if (!writeSilence(track, frames)) {
+                                        releaseTrack(track.track)
+                                        platformEq.release()
+                                        t = null
+                                        trackRate = 0
+                                        continue
+                                    }
+                                }
+                                is SyncAction.Play -> ratio = action.ratio
+                            }
+                        }
+                    }
+                }
+
+                if (processed.size < n) processed = ShortArray(n)
+                val g = if (muted) 0f else gain
+                val peak = chain.process(src, processed, n, track.rate, g)
                 level = max(peak / 32768f, level * 0.85f)
-                if (!writeChunked(track, scratch, n, currentRate)) {
-                    releaseTrack(track)
-                    track = null
-                    currentRate = 0
+                var out = processed
+                var outN = n
+                if (ratio != 1.0 || synced) {
+                    val need = trimmer.maxOutputSamples(n, ratio)
+                    if (trimmed.size < need) trimmed = ShortArray(need)
+                    outN = trimmer.process(processed, n, ratio, trimmed)
+                    out = trimmed
+                }
+                if (!writeChunked(track, out, outN)) {
+                    releaseTrack(track.track)
+                    platformEq.release()
+                    t = null
                     trackRate = 0
                 }
             }
-        } catch (_: Throwable) {
+        } catch (e: Throwable) {
+            AppLog.w("Audio thread stopped", e)
         } finally {
-            if (track != null) releaseTrack(track)
+            t?.let { releaseTrack(it.track) }
+            platformEq.release()
             if (runFlag == null || runFlag === flag) {
                 trackRate = 0
                 trackMs = 0
+                syncedNow = false
             }
             level = 0f
         }
     }
 
+    /**
+     * Local time (ms, [nowMs] clock) at which the next frame written to [t] will be heard, from
+     * [AudioTrack.getTimestamp]; null while the track can't report a timestamp yet.
+     */
+    private fun presentationMs(t: Track): Double? {
+        return try {
+            if (!t.track.getTimestamp(t.ts) || t.ts.framePosition <= 0) return null
+            t.ts.nanoTime / 1_000_000.0 + (t.framesWritten - t.ts.framePosition) * 1000.0 / t.rate
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     /** Writes in 10 ms pieces so the track never holds more than it needs. Returns false on a track error. */
-    private fun writeChunked(track: AudioTrack, data: ShortArray, n: Int, rate: Int): Boolean {
-        val chunk = max(2, (rate / 100) * 2) // 10 ms of stereo samples
+    private fun writeChunked(t: Track, data: ShortArray, n: Int): Boolean {
+        val chunk = max(2, (t.rate / 100) * 2) // 10 ms of stereo samples
         var offset = 0
         while (offset < n) {
             val len = minOf(chunk, n - offset)
             val written = try {
-                track.write(data, offset, len)
+                t.track.write(data, offset, len)
             } catch (_: Throwable) {
                 -1
             }
             if (written < 0) return false
             if (written == 0) break
             offset += written
+            t.framesWritten += written / 2
         }
         return true
     }
 
-    /** Copies [src] to [dst] with the gain applied; returns the peak absolute sample (sampled every 4th). */
-    private fun applyGain(src: ShortArray, dst: ShortArray, n: Int): Int {
-        val g = if (muted) 0f else gain
-        if (g <= 0f) {
-            java.util.Arrays.fill(dst, 0, n, 0.toShort())
-            return 0
-        }
-        var peak = 0
-        if (g == 1f) {
-            System.arraycopy(src, 0, dst, 0, n)
-            var i = 0
-            while (i < n) {
-                val a = abs(src[i].toInt())
-                if (a > peak) peak = a
-                i += 4
+    private val silence = ShortArray(960 * 2)
+
+    private fun writeSilence(t: Track, frames: Int): Boolean {
+        var left = frames * 2
+        while (left > 0) {
+            val len = minOf(left, silence.size)
+            val written = try {
+                t.track.write(silence, 0, len)
+            } catch (_: Throwable) {
+                -1
             }
-            return peak
+            if (written < 0) return false
+            if (written == 0) break
+            left -= written
+            t.framesWritten += written / 2
         }
-        for (i in 0 until n) {
-            var v = (src[i] * g).toInt()
-            if (v > 32767) v = 32767 else if (v < -32768) v = -32768
-            dst[i] = v.toShort()
-            if ((i and 3) == 0) {
-                val a = abs(v)
-                if (a > peak) peak = a
-            }
-        }
-        return peak
+        return true
     }
 
     private fun createTrack(rate: Int): AudioTrack? {
@@ -271,8 +475,10 @@ class AudioEngine {
             track.play()
             trackRate = rate
             trackMs = (track.bufferSizeInFrames * 1000L / rate).toInt()
+            AppLog.i("AudioTrack $rate Hz, buffer $trackMs ms, session ${track.audioSessionId}")
             track
         } catch (t: Throwable) {
+            AppLog.w("AudioTrack creation failed", t)
             null
         }
     }
@@ -298,5 +504,10 @@ class AudioEngine {
             Thread.sleep(ms)
         } catch (_: InterruptedException) {
         }
+    }
+
+    companion object {
+        /** Errors beyond this mean the clock data is nonsense (host restarted…): play without correcting. */
+        private const val MAX_SANE_ERROR_MS = 2_000.0
     }
 }

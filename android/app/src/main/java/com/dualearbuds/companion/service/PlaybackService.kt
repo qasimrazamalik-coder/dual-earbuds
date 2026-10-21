@@ -27,11 +27,19 @@ import androidx.media.AudioManagerCompat
 import com.dualearbuds.companion.MainActivity
 import com.dualearbuds.companion.R
 import com.dualearbuds.companion.audio.AudioEngine
-import com.dualearbuds.companion.audio.AudioPacket
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.bt.EarbudsState
 import com.dualearbuds.companion.data.AppSettings
 import com.dualearbuds.companion.data.Prefs
+import com.dualearbuds.companion.data.SoundSettings
+import com.dualearbuds.companion.diag.AppLog
+import com.dualearbuds.companion.dsp.AppEqMapper
+import com.dualearbuds.companion.dsp.EqPreset
+import com.dualearbuds.companion.dsp.EqResolver
+import com.dualearbuds.companion.dsp.SmartEqMode
+import com.dualearbuds.companion.dsp.preset
+import com.dualearbuds.companion.hearing.Ear
+import com.dualearbuds.companion.hearing.HearingEq
 import com.dualearbuds.companion.net.ErrorKind
 import com.dualearbuds.companion.net.Errors
 import com.dualearbuds.companion.net.HostKind
@@ -58,6 +66,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicLong
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 
@@ -73,6 +82,7 @@ class PlaybackService : Service() {
         const val ACTION_VOLUME_UP = "com.dualearbuds.companion.action.VOLUME_UP"
         const val ACTION_VOLUME_DOWN = "com.dualearbuds.companion.action.VOLUME_DOWN"
         const val EXTRA_LINK = "link"
+        const val EXTRA_PIN = "pin"
         const val CHANNEL_ID = "playback"
         const val NOTIFICATION_ID = 4210
 
@@ -81,6 +91,7 @@ class PlaybackService : Service() {
         private const val CUSTOM_STOP = "stop"
         private const val VOLUME_STEP = 10
         private const val MAX_BACKOFF_MS = 10_000L
+        private const val QUICK_SYNCS = 5
     }
 
     private val scope = CoroutineScope(
@@ -123,6 +134,18 @@ class PlaybackService : Service() {
     @Volatile
     private var kickReason: String? = null
 
+    /** /info said the room needs a PIN (so a 403 on /ws means a wrong PIN, not a wrong key). */
+    @Volatile
+    private var pinRequired = false
+
+    @Volatile
+    private var hostEq: EqPreset? = null
+
+    @Volatile
+    private var sourceApp = ""
+
+    private var syncJob: Job? = null
+
     private val packets = AtomicLong()
     private val lost = AtomicLong()
 
@@ -159,7 +182,8 @@ class PlaybackService : Service() {
         val link: String? = intent?.getStringExtra(EXTRA_LINK)
             ?: if (Prefs.wantPlaying) Prefs.lastLink else null
         val parsed = if (link != null) LinkParser.parse(link) else null
-        val target: LinkTarget? = (parsed as? ParseResult.Ok)?.target
+        val pin = intent?.getStringExtra(EXTRA_PIN)?.takeIf { it.isNotBlank() }
+        val target: LinkTarget? = (parsed as? ParseResult.Ok)?.target?.copy(pin = pin)
         if (target == null) {
             // startForegroundService() must still be answered with startForeground() before stopping.
             if (intent != null) startForegroundSafely()
@@ -217,6 +241,9 @@ class PlaybackService : Service() {
         hostKind = HostKind.UNKNOWN
         party = false
         kickReason = null
+        pinRequired = false
+        hostEq = null
+        sourceApp = ""
         userMuted = false
         applyMute()
 
@@ -277,8 +304,22 @@ class PlaybackService : Service() {
                 mirroring = info.info.rate > 0
                 hostKind = info.info.host
                 party = info.info.party
-                PlaybackController.update { it.copy(pcName = pcName, hostKind = hostKind, party = party, error = null) }
-                AppSettings.rememberHost(target, pcName, hostKind)
+                pinRequired = info.info.pin
+                sourceApp = if (info.info.source == "app") info.info.app else ""
+                val i = info.info
+                PlaybackController.update {
+                    it.copy(
+                        pcName = pcName, hostKind = hostKind, party = party, error = null,
+                        hostVersion = i.version, protocol = i.protocol, pinRequired = i.pin, remote = i.remote,
+                        source = i.source, sourceApp = sourceApp
+                    )
+                }
+                AppSettings.rememberHost(target.withoutPin(), pcName, hostKind)
+                AppLog.i("Host ${target.display}: ${hostKind.label} v${i.version} protocol ${i.protocol} pin=${i.pin} remote=${i.remote}")
+                if (i.pin && target.pin.isNullOrEmpty()) {
+                    fatal = Errors.pinNeeded()
+                    break
+                }
             } else {
                 val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
                 if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
@@ -292,9 +333,16 @@ class PlaybackService : Service() {
 
             val conn = StreamConnection(Net.http, target, Build.MODEL ?: "Android", connectionCallbacks)
             connection = conn
+            engine.resetClock()
+            PlaybackController.sender = { text -> conn.send(text) }
             val end = conn.runUntilClosed()
-            if (connection === conn) connection = null
+            syncJob?.cancel()
+            if (connection === conn) {
+                connection = null
+                PlaybackController.sender = null
+            }
             engine.flush()
+            AppLog.i("Link ended: opened=${end.opened} http=${end.httpCode} ${end.reason}")
 
             val kicked = kickReason
             if (kicked != null) {
@@ -303,7 +351,8 @@ class PlaybackService : Service() {
                 break
             }
             if (end.httpCode == 403) {
-                fatal = Errors.wrongKey()
+                // /info accepted the key, so with a room PIN a 403 means the PIN is wrong. Never retried.
+                fatal = if (pinRequired) Errors.wrongPin() else Errors.wrongKey()
                 break
             }
             if (end.opened) backoff = 1000L
@@ -365,6 +414,7 @@ class PlaybackService : Service() {
                 )
             }
             sendStatus()
+            startSyncLoop()
         }
 
         override fun onHello(pc: String, rate: Int, host: HostKind, party: Boolean) {
@@ -392,6 +442,30 @@ class PlaybackService : Service() {
             sendStatus()
         }
 
+        override fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) {
+            engine.setPlayoutMs(playoutMs.toDouble())
+            if (source == "app" && app.isNotBlank()) sourceApp = app else if (source == "all") sourceApp = ""
+            PlaybackController.update { it.copy(remote = remote, source = source, sourceApp = sourceApp) }
+        }
+
+        override fun onSource(source: String, app: String) {
+            sourceApp = if (source == "app") app else ""
+            PlaybackController.update { it.copy(source = source, sourceApp = sourceApp) }
+        }
+
+        override fun onSyncReply(c: Double, h: Double) = engine.onSyncReply(c, h)
+
+        override fun onClock(seq: Long, h: Double) = engine.onClock(seq, h)
+
+        override fun onTalk(on: Boolean) {
+            PlaybackController.update { it.copy(talking = on) }
+        }
+
+        override fun onSuggestEq(preset: String) {
+            hostEq = EqPreset.fromWire(preset)
+            PlaybackController.update { it.copy(hostEq = hostEq) }
+        }
+
         override fun onKick(reason: String) {
             kickReason = reason.ifBlank { "Removed by the host" }
             Prefs.wantPlaying = false
@@ -411,8 +485,46 @@ class PlaybackService : Service() {
             lastSeq = seq
             packets.incrementAndGet()
             mirroring = true
-            engine.push(AudioPacket(rate, samples))
+            engine.push(rate, seq, samples)
         }
+    }
+
+    /** v3.1 clock sync: 5 quick requests after connect, then one every 2 s. */
+    private fun startSyncLoop() {
+        syncJob?.cancel()
+        syncJob = scope.launch {
+            var n = 0
+            while (isActive) {
+                val conn = connection ?: break
+                if (!conn.isOpen) break
+                conn.send("{\"type\":\"sync\",\"c\":" + String.format(Locale.US, "%.3f", engine.nowMs()) + "}")
+                n++
+                delay(if (n < QUICK_SYNCS) 250L else 2_000L)
+            }
+        }
+    }
+
+    /** Resolves EQ / dialogue / hearing profile / calibration for the current earbuds and hands them to the engine. */
+    private fun applySound() {
+        val earbuds = EarbudsMonitor.state.value
+        val output = if (earbuds.connected && earbuds.name.isNotBlank()) earbuds.name else SoundSettings.PHONE_OUTPUT
+        val smart = SoundSettings.smartEq.value
+        val soundPreset = engine.stats().soundClass?.preset()
+        val preset = EqResolver.resolve(
+            manual = SoundSettings.eqManual.value,
+            smartMode = smart,
+            appPreset = AppEqMapper.presetFor(sourceApp),
+            soundPreset = soundPreset,
+            hostSuggested = hostEq
+        )
+        val profile = SoundSettings.profileFor(output)
+        val left = profile?.let { HearingEq.gains(it, Ear.LEFT) }
+        val right = profile?.let { HearingEq.gains(it, Ear.RIGHT) }
+        val classify = smart == SmartEqMode.BY_SOUND || smart == SmartEqMode.BOTH
+        engine.setSound(preset, left, right, SoundSettings.dialogue.value, classify)
+        val latency = SoundSettings.latencyFor(output)
+        engine.outputLatencyMs = latency ?: 0.0
+        PlaybackController.update { if (it.eqInUse != preset || it.outputLatencyMs != latency) it.copy(eqInUse = preset, outputLatencyMs = latency) else it }
     }
 
     // ---------------------------------------------------------------- observers
@@ -424,6 +536,15 @@ class PlaybackService : Service() {
         }
         scope.launch {
             PlaybackController.buffer.collect { b -> applyBufferSettings(b) }
+        }
+        // Sound settings -> engine (instantly, without restarting playback).
+        scope.launch {
+            combine(
+                combine(SoundSettings.eqManual, SoundSettings.smartEq, SoundSettings.dialogue) { a, b, c -> Triple(a, b, c) },
+                combine(SoundSettings.profiles, SoundSettings.profileForEarbuds, SoundSettings.outputLatency) { a, b, c -> Triple(a, b, c) },
+                EarbudsMonitor.state.map { it.connected to it.name }.distinctUntilChanged(),
+                PlaybackController.state.map { Triple(it.hostEq, it.sourceApp, it.soundClass) }.distinctUntilChanged()
+            ) { a, b, c, d -> listOf(a, b, c, d) }.collect { applySound() }
         }
 
         // Live level for the meter: ~12 updates per second, only while a session runs.
@@ -462,7 +583,14 @@ class PlaybackService : Service() {
                         latencyMs = if (s.rate > 0) s.queuedMs + s.trackMs else 0,
                         rate = s.rate,
                         message = if (open) "Connected" else st.message,
-                        userMuted = userMuted
+                        userMuted = userMuted,
+                        synced = s.synced,
+                        syncErrorMs = s.syncErrorMs,
+                        syncOffsetMs = s.offsetMs,
+                        syncRttMs = s.rttMs,
+                        concealed = s.concealed,
+                        jitterP99Ms = s.jitterP99Ms,
+                        soundClass = s.soundClass
                     )
                 }
             }
@@ -537,6 +665,8 @@ class PlaybackService : Service() {
     /** Stops everything. [forget] = don't auto-restart (user pressed Stop or a fatal error). */
     private fun shutdown(forget: Boolean, finalState: PlayerState?) {
         if (forget) Prefs.wantPlaying = false
+        PlaybackController.sender = null
+        syncJob?.cancel()
         sessionJob?.cancel()
         sessionJob = null
         connection?.close()

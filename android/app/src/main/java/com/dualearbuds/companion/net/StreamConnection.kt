@@ -43,6 +43,24 @@ class StreamConnection(
         fun onKick(reason: String)
         /** [samples] is interleaved stereo s16 (L,R,L,R…). [seq] is the unsigned 32-bit sequence number. */
         fun onPacket(rate: Int, seq: Long, samples: ShortArray)
+
+        /** v3.1 `hello` extras: target delay, remote control allowed, sound source ("all"/"app") and app name. */
+        fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) = Unit
+
+        /** v3.1 `sync` reply: our [c] echoed with host time [h]. */
+        fun onSyncReply(c: Double, h: Double) = Unit
+
+        /** v3.1 `clock`: packet [seq] was captured at host time [h]. */
+        fun onClock(seq: Long, h: Double) = Unit
+
+        /** v3.1 `talk`: the host is speaking over the music. */
+        fun onTalk(on: Boolean) = Unit
+
+        /** v3.1 `control.eq`: the host suggests an EQ preset (flat|bass|voice|movie). */
+        fun onSuggestEq(preset: String) = Unit
+
+        /** Source changed (in `state`, if the host sends it). */
+        fun onSource(source: String, app: String) = Unit
     }
 
     private val active = AtomicBoolean(true)
@@ -175,17 +193,44 @@ class StreamConnection(
                 reply.put("t", o.opt("t") ?: 0)
                 webSocket.send(reply.toString())
             }
-            "hello" -> callbacks.onHello(
-                o.optString("pc"),
-                o.optInt("rate", 0),
-                HostKind.fromWire(o.optString("host")),
-                o.optBoolean("party", false)
-            )
-            "state" -> callbacks.onMirroring(o.optBoolean("mirroring", true), o.optInt("rate", 0))
+            "hello" -> {
+                callbacks.onHello(
+                    o.optString("pc"),
+                    o.optInt("rate", 0),
+                    HostKind.fromWire(o.optString("host")),
+                    o.optBoolean("party", false)
+                )
+                callbacks.onHelloExtras(
+                    o.optInt("playoutMs", 120).coerceIn(20, 2_000),
+                    o.optBoolean("remote", false),
+                    o.optString("source", "all").ifBlank { "all" },
+                    o.optString("sourceApp", "").ifBlank { o.optString("app", "") }
+                )
+            }
+            "state" -> {
+                callbacks.onMirroring(o.optBoolean("mirroring", true), o.optInt("rate", 0))
+                if (o.has("source")) {
+                    callbacks.onSource(o.optString("source", "all"), o.optString("sourceApp", "").ifBlank { o.optString("app", "") })
+                }
+            }
+            "sync" -> {
+                val c = o.optDouble("c", Double.NaN)
+                val h = o.optDouble("h", Double.NaN)
+                if (!c.isNaN() && !h.isNaN()) callbacks.onSyncReply(c, h)
+            }
+            "clock" -> {
+                val seq = o.optLong("seq", -1L)
+                val h = o.optDouble("h", Double.NaN)
+                if (seq >= 0 && !h.isNaN()) callbacks.onClock(seq and 0xFFFFFFFFL, h)
+            }
+            "talk" -> callbacks.onTalk(o.optBoolean("on", false))
             "party" -> callbacks.onParty(o.optBoolean("on", false))
-            "control" -> if (o.has("volume")) {
-                val v = o.optDouble("volume", Double.NaN)
-                if (!v.isNaN()) callbacks.onControlVolume(v.toInt().coerceIn(0, 150))
+            "control" -> {
+                if (o.has("volume")) {
+                    val v = o.optDouble("volume", Double.NaN)
+                    if (!v.isNaN()) callbacks.onControlVolume(v.toInt().coerceIn(0, 150))
+                }
+                if (o.has("eq")) callbacks.onSuggestEq(o.optString("eq"))
             }
             "kick" -> callbacks.onKick(o.optString("reason"))
             else -> Unit // Unknown types are ignored (docs/protocol.md).

@@ -4,8 +4,11 @@ import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.Locale
 
-/** Where the laptop is and the key it expects. */
-data class LinkTarget(val host: String, val port: Int, val key: String) {
+/**
+ * Where the host is and the key it expects. [pin] is the optional room PIN (v3.1): it is sent on `/ws` only and is
+ * never part of [toLink] (the link and QR never contain the PIN).
+ */
+data class LinkTarget(val host: String, val port: Int, val key: String, val pin: String? = null) {
 
     /** The canonical link, exactly in the form the QR code uses: http://IP:PORT/?k=KEY */
     fun toLink(): String = HttpUrl.Builder()
@@ -33,7 +36,17 @@ data class LinkTarget(val host: String, val port: Int, val key: String) {
         .addQueryParameter("k", key)
         .addQueryParameter("client", "android")
         .addQueryParameter("name", deviceName)
+        .apply { if (!pin.isNullOrEmpty()) addQueryParameter("p", pin) }
         .build()
+
+    /** Same host without the PIN (for storing and showing). */
+    fun withoutPin(): LinkTarget = if (pin == null) this else copy(pin = null)
+
+    /** Same address and key? (The PIN doesn't make it a different host.) */
+    fun sameHost(other: LinkTarget?): Boolean =
+        other != null && other.host.equals(host, ignoreCase = true) && other.port == port && other.key == key
+
+    override fun toString(): String = "LinkTarget($display)" // never prints the key or PIN
 
     val display: String
         get() = if (host.contains(':')) "[$host]:$port" else "$host:$port"

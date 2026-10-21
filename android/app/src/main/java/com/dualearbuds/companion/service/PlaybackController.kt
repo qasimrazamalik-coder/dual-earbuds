@@ -5,6 +5,8 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.dualearbuds.companion.audio.BufferMode
 import com.dualearbuds.companion.data.Prefs
+import com.dualearbuds.companion.dsp.EqPreset
+import com.dualearbuds.companion.dsp.SoundClass
 import com.dualearbuds.companion.net.ErrorKind
 import com.dualearbuds.companion.net.HostKind
 import com.dualearbuds.companion.net.LinkTarget
@@ -35,7 +37,26 @@ data class PlayerState(
     val targetMs: Int = 0,
     val latencyMs: Int = 0,
     val rate: Int = 0,
-    val userMuted: Boolean = false
+    val userMuted: Boolean = false,
+    val hostVersion: String = "",
+    val protocol: Int = 0,
+    /** v3.1 */
+    val pinRequired: Boolean = false,
+    val remote: Boolean = false,
+    val talking: Boolean = false,
+    val source: String = "all",
+    val sourceApp: String = "",
+    val hostEq: EqPreset? = null,
+    /** The preset playing right now (after manual / smart / host rules). */
+    val eqInUse: EqPreset = EqPreset.FLAT,
+    val synced: Boolean = false,
+    val syncErrorMs: Double = 0.0,
+    val syncOffsetMs: Double? = null,
+    val syncRttMs: Double? = null,
+    val concealed: Long = 0,
+    val jitterP99Ms: Double = Double.NaN,
+    val soundClass: SoundClass? = null,
+    val outputLatencyMs: Double? = null
 ) {
     /** True while the service is (trying to be) playing — i.e. between Start and Stop. */
     val running: Boolean
@@ -68,6 +89,17 @@ object PlaybackController {
 
     /** Output level 0..1 (~12 updates per second while playing) for the live meter. */
     val level: StateFlow<Float> = _level.asStateFlow()
+
+    /** Set by [PlaybackService] while a link is open; sends a text frame to the host. */
+    @Volatile
+    internal var sender: ((String) -> Boolean)? = null
+
+    /** v3.1 remote control: playpause | next | prev | volup | voldown. Ignored by the host unless allowed. */
+    fun sendRemote(action: String): Boolean {
+        if (action !in setOf("playpause", "next", "prev", "volup", "voldown")) return false
+        if (!_state.value.remote) return false
+        return sender?.invoke("{\"type\":\"remote\",\"action\":\"$action\"}") ?: false
+    }
 
     fun init() {
         _volume.value = Prefs.volume
@@ -126,6 +158,7 @@ object PlaybackController {
         val intent = Intent(context, PlaybackService::class.java)
             .setAction(PlaybackService.ACTION_START)
             .putExtra(PlaybackService.EXTRA_LINK, target.toLink())
+            .putExtra(PlaybackService.EXTRA_PIN, target.pin)
         try {
             ContextCompat.startForegroundService(context, intent)
         } catch (t: Throwable) {

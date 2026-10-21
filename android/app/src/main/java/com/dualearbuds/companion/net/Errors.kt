@@ -2,7 +2,7 @@ package com.dualearbuds.companion.net
 
 import android.content.Context
 
-enum class ErrorKind { WRONG_KEY, NOT_FOUND, WIFI_OFF, SERVER_FULL, NOT_DUAL_EARBUDS, BAD_LINK, KICKED, OTHER }
+enum class ErrorKind { WRONG_KEY, NOT_FOUND, WIFI_OFF, SERVER_FULL, NOT_DUAL_EARBUDS, BAD_LINK, KICKED, PIN_NEEDED, WRONG_PIN, OTHER }
 
 data class UserError(val kind: ErrorKind, val message: String) {
     /** Errors where "Use a hotspot" is the likely fix (public Wi-Fi blocks devices from reaching each other). */
@@ -43,6 +43,15 @@ object Errors {
     fun kicked(reason: String?) = UserError(
         ErrorKind.KICKED,
         reason?.trim()?.takeIf { it.isNotEmpty() }?.take(200) ?: "Removed by the host"
+    )
+
+    /** The host has a room PIN (v3.1) and none was given. Not retried: the UI asks for it. */
+    fun pinNeeded() = UserError(ErrorKind.PIN_NEEDED, "This room has a PIN. Ask the host for it — it is never in the link or QR code.")
+
+    /** /info accepted the key but /ws refused: the PIN is wrong. Never retried automatically. */
+    fun wrongPin() = UserError(
+        ErrorKind.WRONG_PIN,
+        "Wrong PIN. Check it with the host and type it again. (Too many wrong tries lock this phone out for 5 minutes.)"
     )
 
     fun other(reason: String) = UserError(ErrorKind.OTHER, "Connection problem: $reason")
