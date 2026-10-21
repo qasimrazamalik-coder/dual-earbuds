@@ -131,6 +131,7 @@ namespace DualEarbuds
                 if (!s.SyncMode) { s.SyncMode = true; s.SetBufferMs(0); lastBufferMs = 0; }
                 double queuedMs = s.QueuedFrames * 1000.0 / rate;
                 double heardAt = hostNow + queuedMs + OutputLatencyMs;
+                // protocol: heard at h(seq) + playoutMs + delay (submitted outputLatency earlier); Delay always makes it later
                 double error = heardAt - (playAtHost + DelayMs);
                 // never steer the queue below what the network needs; a late host plays late, not choppy
                 double minQueue = jitterTargetMs;

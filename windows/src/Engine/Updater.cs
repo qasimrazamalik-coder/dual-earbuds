@@ -38,7 +38,7 @@ namespace DualEarbuds
         public const long MaxInstallerBytes = 200L * 1024 * 1024;
         const int MaxJsonBytes = 2 * 1024 * 1024;
         const int TimeoutMs = 20000;
-        public static readonly string[] AllowedDownloadHosts = { "github.com", "objects.githubusercontent.com" };
+        public static readonly string[] AllowedDownloadHosts = { "github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com" };
         public static readonly TimeSpan AutoCheckInterval = TimeSpan.FromHours(24);
 
         public static string UserAgent { get { return "DualEarbuds/" + AppInfo.Version + " (Windows)"; } }

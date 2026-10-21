@@ -88,6 +88,57 @@ namespace DualEarbuds
             return b;
         }
 
+        // Segmented choice that also hands back its buttons (to disable or re-check one later).
+        public static Border Segmented(string group, string[] labels, int selected, Action<int> onPick, out RadioButton[] buttons)
+        {
+            var b = Segmented(group, labels, selected, onPick);
+            var sp = (StackPanel)b.Child;
+            buttons = new RadioButton[sp.Children.Count];
+            for (int i = 0; i < buttons.Length; i++) buttons[i] = (RadioButton)sp.Children[i];
+            return b;
+        }
+
+        public static ComboBox Combo(double width)
+        {
+            return new ComboBox { Width = width, Height = 34, FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
+        }
+
+        public static void SelectTag(ComboBox c, string tag)
+        {
+            foreach (var o in c.Items) { var it = o as ComboBoxItem; if (it != null && (string)it.Tag == tag) { c.SelectedItem = it; return; } }
+            if (c.Items.Count > 0) c.SelectedIndex = 0;
+        }
+
+        public static string Tag(ComboBox c)
+        {
+            var it = c.SelectedItem as ComboBoxItem;
+            return it == null ? null : it.Tag as string;
+        }
+
+        // A tinted note card: icon + title + text (+ optional button underneath).
+        public static Border Note(string icon, string brush, string title, string text, Button action, out TextBlock titleBlock, out TextBlock textBlock)
+        {
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var ic = Ui.Icon(icon, 22, brush, false);
+            ic.Margin = new Thickness(0, 2, 14, 0);
+            ic.VerticalAlignment = VerticalAlignment.Top;
+            g.Children.Add(ic);
+            var body = new StackPanel();
+            titleBlock = Ui.Heading(title, 15);
+            body.Children.Add(titleBlock);
+            textBlock = Ui.Text(text, 13, FontWeights.Normal, "Muted");
+            textBlock.Margin = new Thickness(0, 4, 0, 0);
+            body.Children.Add(textBlock);
+            if (action != null) { action.HorizontalAlignment = HorizontalAlignment.Left; action.Margin = new Thickness(0, 12, 0, 0); body.Children.Add(action); }
+            Grid.SetColumn(body, 1);
+            g.Children.Add(body);
+            var card = Ui.Card(g);
+            card.SetResourceReference(Border.BorderBrushProperty, brush);
+            return card;
+        }
+
         public static void OpenFolder(string dir)
         {
             try { Directory.CreateDirectory(dir); Process.Start("explorer.exe", "\"" + dir + "\""); }
@@ -109,7 +160,10 @@ namespace DualEarbuds
         readonly Path batteryIcon, deviceIcon;
         readonly Meter meter;
         readonly Slider delay, volume;
-        readonly Button test;
+        readonly Button test, calibrate;
+        readonly ComboBox eq, hearing;
+        readonly TextBlock syncText, note;
+        string comboSig;
         bool updating;
 
         public string Id { get { return vm.Id; } }
@@ -186,6 +240,39 @@ namespace DualEarbuds
             sliders.Children.Add(v);
             root.Children.Add(sliders);
 
+            // sound shaping + auto-sync
+            var tools = new Grid { Margin = new Thickness(0, 12, 0, 0) };
+            for (int i = 0; i < 5; i++) tools.ColumnDefinitions.Add(new ColumnDefinition { Width = i == 2 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
+            eq = PageKit.Combo(150);
+            eq.ToolTip = "Equalizer for this output";
+            eq.SelectionChanged += (s, e) => { if (!updating) { string t = PageKit.Tag(eq); if (t != null) ctl.SetOutputEq(vm, t); } };
+            tools.Children.Add(eq);
+            hearing = PageKit.Combo(170);
+            hearing.Margin = new Thickness(8, 0, 0, 0);
+            hearing.ToolTip = "Hearing profile for the person wearing these";
+            hearing.SelectionChanged += (s, e) => { if (!updating) ctl.SetOutputProfile(vm, PageKit.Tag(hearing) ?? ""); };
+            Grid.SetColumn(hearing, 1);
+            tools.Children.Add(hearing);
+            syncText = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            syncText.VerticalAlignment = VerticalAlignment.Center;
+            syncText.TextAlignment = TextAlignment.Right;
+            syncText.Margin = new Thickness(12, 0, 10, 0);
+            Grid.SetColumn(syncText, 3);
+            tools.Children.Add(syncText);
+            calibrate = Ui.Button("Auto-sync", "Ghost", (s, e) => Calibrate());
+            calibrate.ToolTip = "Measure this output's delay with the laptop microphone, so every pair plays in step";
+            var forget = new MenuItem { Header = "Forget the measurement" };
+            forget.Click += (s, e) => { ctl.ForgetCalibration(vm); note.Visibility = Visibility.Collapsed; Refresh(); };
+            calibrate.ContextMenu = new ContextMenu();
+            calibrate.ContextMenu.Items.Add(forget);
+            Grid.SetColumn(calibrate, 4);
+            tools.Children.Add(calibrate);
+            root.Children.Add(tools);
+            note = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            note.Margin = new Thickness(0, 8, 0, 0);
+            note.Visibility = Visibility.Collapsed;
+            root.Children.Add(note);
+
             error = Ui.Text("", 12.5, FontWeights.Normal, "Bad");
             error.Margin = new Thickness(0, 10, 0, 0);
             error.Visibility = Visibility.Collapsed;
@@ -196,9 +283,52 @@ namespace DualEarbuds
             Refresh();
         }
 
+        void Calibrate()
+        {
+            var r = MessageBox.Show("Hold one earbud of " + vm.Name + " right against the laptop's microphone, in a quiet room.\n\n" +
+                                    "Press OK and keep it still: 8 clicks play over about 7 seconds. Dual Earbuds measures how late this output plays and lines it up with the others.",
+                                    "Auto-sync", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            if (r != MessageBoxResult.OK) return;
+            note.Visibility = Visibility.Collapsed;
+            ctl.Calibrate(vm, res =>
+            {
+                note.Text = res.Ok ? "Measured " + Math.Round(res.LatencyMs) + " ms (" + res.Agreeing + " of 8 clicks agreed)." : res.Problem;
+                note.SetResourceReference(TextBlock.ForegroundProperty, res.Ok ? "Good" : "Warn");
+                note.Visibility = Visibility.Visible;
+                Refresh();
+            });
+            Refresh();
+        }
+
+        void FillCombos()
+        {
+            var profiles = ctl.Settings.Profiles;
+            string sig = ctl.SmartEqOn + "|" + string.Join(",", profiles.ConvertAll(p => p.Name).ToArray());
+            if (sig == comboSig) return;
+            comboSig = sig;
+            eq.Items.Clear();
+            if (ctl.SmartEqOn) eq.Items.Add(new ComboBoxItem { Content = "EQ: Auto", Tag = "auto" });
+            for (int i = 0; i < EqPresets.Names.Length; i++) eq.Items.Add(new ComboBoxItem { Content = "EQ: " + EqPresets.Labels[i], Tag = EqPresets.Names[i] });
+            hearing.Items.Clear();
+            hearing.Items.Add(new ComboBoxItem { Content = "Hearing: none", Tag = "" });
+            foreach (var p in profiles) hearing.Items.Add(new ComboBoxItem { Content = "Hearing: " + p.Name, Tag = p.Name });
+            hearing.Visibility = profiles.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         public void Refresh()
         {
             updating = true;
+            FillCombos();
+            var os = ctl.Settings.For(vm.Id);
+            PageKit.SelectTag(eq, os.EqAuto && ctl.SmartEqOn ? "auto" : os.Eq);
+            PageKit.SelectTag(hearing, os.Profile);
+            eq.IsEnabled = !vm.IsSource;
+            hearing.IsEnabled = !vm.IsSource;
+            calibrate.IsEnabled = !vm.IsSource && !vm.Calibrating;
+            calibrate.Content = vm.Calibrating ? "Listening..." : "Auto-sync";
+            string auto = os.EqAuto && ctl.SmartEqOn ? " · Auto EQ: " + Cap(vm.Effects.EffectivePreset) : "";
+            syncText.Text = vm.IsSource ? "" : vm.Calibrating ? "Listening for the clicks..." :
+                (vm.LatencyMs > 0 ? "In sync · " + Math.Round(vm.LatencyMs) + " ms" + (vm.ExtraDelayMs > 0 ? " (+" + vm.ExtraDelayMs + " ms)" : "") : "Not measured") + auto;
             sw.IsChecked = vm.Enabled;
             sw.IsEnabled = !vm.IsSource;
             sw.ToolTip = vm.IsSource ? "This is where the sound comes from" : null;
@@ -216,6 +346,8 @@ namespace DualEarbuds
         }
 
         public void Animate() { meter.Level = vm.IsSource ? ctl.Level : vm.Level; }
+
+        static string Cap(string s) { return string.IsNullOrEmpty(s) ? "" : char.ToUpperInvariant(s[0]) + s.Substring(1); }
     }
 
     class HomePage : IPage
@@ -227,7 +359,10 @@ namespace DualEarbuds
         readonly TextBlock statusText, heroTitle, phonesText;
         readonly Ellipse statusDot;
         readonly Meter heroMeter;
-        readonly ComboBox source;
+        readonly ComboBox source, apps;
+        readonly Grid appRow;
+        readonly TextBlock appNote;
+        readonly RadioButton[] modeButtons;
         readonly StackPanel cards;
         readonly List<OutputCard> cardList = new List<OutputCard>();
         bool suppress;
@@ -257,9 +392,44 @@ namespace DualEarbuds
             left.Children.Add(statusText);
             heroMeter = new Meter { Height = 8, Margin = new Thickness(0, 0, 0, 16) };
             left.Children.Add(heroMeter);
-            var srcLabel = Ui.Text("Sound comes from", 12.5, FontWeights.SemiBold, "Muted");
-            srcLabel.Margin = new Thickness(0, 0, 0, 6);
-            left.Children.Add(srcLabel);
+            var srcHead = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+            srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var srcLabel = Ui.Text("Share", 12.5, FontWeights.SemiBold, "Muted");
+            srcLabel.VerticalAlignment = VerticalAlignment.Center;
+            srcHead.Children.Add(srcLabel);
+            var modeSeg = PageKit.Segmented("srcmode", new[] { "Whole laptop", "One app only" }, ctl.Settings.SourceMode == "app" && ctl.AppSupported ? 1 : 0, i =>
+            {
+                if (suppress) return;
+                if (i == 1) { ctl.RefreshApps(FillApps); ctl.SetSourceMode("app", null); }
+                else ctl.SetSourceMode("all", null);
+                Refresh();
+            }, out modeButtons);
+            if (!ctl.AppSupported) { modeButtons[1].IsEnabled = false; modeButtons[1].ToolTip = AppAudio.WhyNot; }
+            Grid.SetColumn(modeSeg, 1);
+            srcHead.Children.Add(modeSeg);
+            left.Children.Add(srcHead);
+            appRow = new Grid { Visibility = Visibility.Collapsed };
+            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            apps = new ComboBox();
+            apps.SelectionChanged += (s, e) =>
+            {
+                if (suppress) return;
+                string t = PageKit.Tag(apps);
+                if (!string.IsNullOrEmpty(t) && t != ctl.Settings.SourceApp) ctl.SetSourceMode("app", t);
+            };
+            appRow.Children.Add(apps);
+            var refreshApps = new Button { Content = Ui.Icon(Icons.Refresh, 16, "Muted", false), ToolTip = "Look again for apps playing sound", Margin = new Thickness(8, 0, 0, 0), Width = 40, Height = 40 };
+            refreshApps.SetResourceReference(FrameworkElement.StyleProperty, "Ghost");
+            refreshApps.Padding = new Thickness(0);
+            refreshApps.Click += (s, e) => ctl.RefreshApps(FillApps);
+            Grid.SetColumn(refreshApps, 1);
+            appRow.Children.Add(refreshApps);
+            left.Children.Add(appRow);
+            appNote = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            appNote.Margin = new Thickness(0, 6, 0, 0);
+            appNote.Visibility = Visibility.Collapsed;
             source = new ComboBox();
             source.SelectionChanged += (s, e) =>
             {
@@ -268,6 +438,7 @@ namespace DualEarbuds
                 ctl.SetSource(it == null ? "" : (string)it.Tag);
             };
             left.Children.Add(source);
+            left.Children.Add(appNote);
             hero.Children.Add(left);
 
             var right = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
@@ -310,6 +481,30 @@ namespace DualEarbuds
             root.Children.Add(Ui.Card(ph));
 
             Rebuild();
+            if (ctl.Settings.SourceMode == "app" && ctl.AppSupported) ctl.RefreshApps(FillApps);
+        }
+
+        void FillApps()
+        {
+            suppress = true;
+            apps.Items.Clear();
+            string cur = ctl.Settings.SourceApp;
+            bool found = false;
+            foreach (var a in ctl.Apps)
+            {
+                var it = new ComboBoxItem { Content = a.Title + (a.Active ? "  · playing" : ""), Tag = a.Process };
+                apps.Items.Add(it);
+                if (string.Equals(a.Process, cur, StringComparison.OrdinalIgnoreCase)) { apps.SelectedItem = it; found = true; }
+            }
+            if (!found && cur != "")
+            {
+                var it = new ComboBoxItem { Content = AppAudio.Pretty(cur) + "  · not playing now", Tag = cur };
+                apps.Items.Insert(0, it);
+                apps.SelectedItem = it;
+            }
+            if (apps.Items.Count == 0) apps.Items.Add(new ComboBoxItem { Content = "No app is playing sound - play something, then press refresh", Tag = "", IsEnabled = false });
+            suppress = false;
+            Refresh();
         }
 
         public void Rebuild()
@@ -349,7 +544,18 @@ namespace DualEarbuds
             startBtn.Content = on ? "Stop mirroring" : "Start mirroring";
             startBtn.SetResourceReference(FrameworkElement.StyleProperty, on ? "Ghost" : "Primary");
             startBtn.FontSize = 16;
-            heroTitle.Text = ctl.Running ? "Mirroring" : (ctl.WantRunning ? "Waiting for sound source" : "Stopped");
+            heroTitle.Text = ctl.Listening ? "Listening to " + ctl.ListenHostName : ctl.Running ? "Sharing " + (ctl.Settings.SourceMode == "app" && ctl.AppSupported && ctl.Settings.SourceApp != "" ? ctl.SourceDescription : "this laptop") : (ctl.WantRunning ? "Waiting for sound source" : "Stopped");
+            bool appMode = ctl.Settings.SourceMode == "app" && ctl.AppSupported;
+            suppress = true;
+            modeButtons[appMode ? 1 : 0].IsChecked = true;
+            suppress = false;
+            source.Visibility = appMode ? Visibility.Collapsed : Visibility.Visible;
+            appRow.Visibility = appMode ? Visibility.Visible : Visibility.Collapsed;
+            string note = !ctl.AppSupported ? AppAudio.WhyNot
+                : appMode && ctl.Settings.SourceApp == "" ? "Pick the app to share. Until then the whole laptop is shared."
+                : appMode ? "Only " + ctl.SourceDescription + " is shared (with its child windows and tabs). Other sounds - calls, notifications - stay on this laptop." : null;
+            appNote.Text = note ?? "";
+            appNote.Visibility = note == null || (!appMode && ctl.AppSupported) ? Visibility.Collapsed : Visibility.Visible;
             string key = Ui.KindBrush(ctl.StatusKind);
             statusDot.SetResourceReference(Shape.FillProperty, ctl.Running ? (ctl.StatusKind == StateKind.Problem ? "Warn" : "Good") : key);
             statusText.Text = ctl.StatusText;

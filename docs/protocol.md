@@ -114,8 +114,9 @@ All optional; a listener or host that does not know them ignores them.
   Listener offset = `h − (c + now)/2`; keep the sample with the smallest round trip of the last 8.
 - Host → listener every 1 s: `{"type":"clock","seq":<uint32>,"h":<host ms when that packet was captured>}`
   and in `hello`: `"playoutMs":<target delay, default 120>`.
-- A synced listener plays packet `seq` at host time `h(seq) + playoutMs − outputLatency − delay`, where
-  `outputLatency` is the device's measured/calibrated output latency and `delay` the manual Delay.
+- A synced listener plays packet `seq` at host time `h(seq) + playoutMs − outputLatency + delay`, where
+  `outputLatency` is the device's measured/calibrated output latency (played that much earlier so the sound
+  *leaves the earbuds* on time) and `delay` the manual Delay (always makes this listener later, as in buffer mode).
   It speeds up/slows down by at most ±0.5 % (resampling) to stay within ±5 ms; beyond ±40 ms it skips/inserts.
 - Listeners that can't sync fall back to the adaptive buffer above.
 
@@ -181,4 +182,4 @@ and on demand from Settings. Tags are `vMAJOR.MINOR.PATCH`. Release assets are n
 - `DualEarbuds-Setup.exe` — Windows installer (runs as an update when the app is installed)
 - `DualEarbuds.apk` — Android app, signed with the same key every release
 
-The updater downloads only from `github.com`/`objects.githubusercontent.com` over HTTPS and only when the user agrees.
+The updater downloads only from `github.com`, `objects.githubusercontent.com` and `release-assets.githubusercontent.com` over HTTPS and only when the user agrees.

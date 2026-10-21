@@ -230,6 +230,12 @@ namespace DualEarbuds
         public const string Speaker = "M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 8v8a4.47 4.47 0 0 0 2.5-4z";
         public const string Copy = "M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z";
         public const string Wifi = "M1 9l2 2c4.97-4.97 13.03-4.97 18 0l2-2C16.93 2.93 7.08 2.93 1 9zm8 8l3 3 3-3a4.24 4.24 0 0 0-6 0zm-4-4l2 2a7.07 7.07 0 0 1 10 0l2-2C15.14 9.14 8.87 9.14 5 13z";
+        public const string Listen = "M4 13a8 8 0 0 1 16 0 M4 13v5a2 2 0 0 0 2 2h1v-7H4 M20 13v5a2 2 0 0 1-2 2h-1v-7h3";
+        public const string Mic = "M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z";
+        public const string Refresh = "M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z";
+        public const string Lock = "M18 8h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z";
+        public const string Spark = "M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z";
+        public const string Laptop = "M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9H4zm2 0v7h12V6zM2 17h20v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z";
         public const string LogoMark = "M7 14a3 3 0 1 1 0-6v8 M17 10a3 3 0 1 1 0 6V8 M10 12h4";
         public const string Minimize = "M0,5 L10,5";
         public const string Maximize = "M0.5,0.5 H9.5 V9.5 H0.5 Z";

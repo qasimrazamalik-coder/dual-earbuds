@@ -852,6 +852,8 @@ static class EngineTests
 
     static void TestUpdaterChecks()
     {
+        Check(Updater.IsAllowedDownloadUrl("https://release-assets.githubusercontent.com/github-production-release-asset/1/abc?sp=r"), "release-assets.githubusercontent.com allowed (GitHub's new download host)");
+        Check(!Updater.IsAllowedDownloadUrl("http://release-assets.githubusercontent.com/x") && !Updater.IsAllowedDownloadUrl("https://release-assets.githubusercontent.com.evil.example/x"), "only HTTPS and the exact host");
         Check(Updater.LatestUrl == "https://api.github.com/repos/qasimrazamalik-coder/dual-earbuds/releases/latest", "latest release URL");
         Check(Updater.IsAllowedDownloadUrl("https://github.com/qasimrazamalik-coder/dual-earbuds/releases/download/v3.0.1/DualEarbuds-Setup.exe"), "github.com allowed");
         Check(Updater.IsAllowedDownloadUrl("https://objects.githubusercontent.com/github-production-release-asset/1?x=y"), "objects.githubusercontent.com allowed");

@@ -32,9 +32,13 @@ namespace DualEarbuds
             catch { return true; }
         }
 
+        public static string Mode { get; private set; }
+        public static event Action Changed;
+
         // mode: system | dark | light
         public static void Apply(ResourceDictionary res, string mode)
         {
+            Mode = mode == "dark" || mode == "light" ? mode : "system";
             IsDark = mode == "dark" || (mode != "light" && SystemPrefersDark());
             string[] colors = IsDark ? DarkColors : LightColors;
             for (int i = 0; i < Keys.Length; i++)
@@ -49,6 +53,46 @@ namespace DualEarbuds
                 res.MergedDictionaries.Add((ResourceDictionary)XamlReader.Parse(StylesXaml));
                 res["Styles.Loaded"] = true;
             }
+            var h = Changed;
+            if (h != null) h();
+        }
+
+        // "System" follows Windows' app mode (HKCU\...\Themes\Personalize\AppsUseLightTheme) live.
+        static ResourceDictionary followRes;
+        static System.Windows.Threading.Dispatcher followUi;
+        static UserPreferenceChangedEventHandler followHandler;
+
+        public static void StartFollowingSystem(ResourceDictionary res)
+        {
+            if (followHandler != null) return;
+            followRes = res;
+            followUi = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+            followHandler = (s, e) =>
+            {
+                if (e.Category != UserPreferenceCategory.General && e.Category != UserPreferenceCategory.VisualStyle && e.Category != UserPreferenceCategory.Color) return;
+                var d = followUi;
+                if (d == null) return;
+                try
+                {
+                    d.BeginInvoke(new Action(() =>
+                    {
+                        if (Mode != "system" || followRes == null) return;
+                        bool dark = SystemPrefersDark();
+                        if (dark != IsDark) Apply(followRes, "system");
+                    }));
+                }
+                catch { }
+            };
+            SystemEvents.UserPreferenceChanged += followHandler;   // static event: removed again in StopFollowingSystem
+        }
+
+        public static void StopFollowingSystem()
+        {
+            if (followHandler == null) return;
+            SystemEvents.UserPreferenceChanged -= followHandler;
+            followHandler = null;
+            followRes = null;
+            followUi = null;
         }
 
         public static Brush B(string key) { return (Brush)Application.Current.Resources[key]; }
