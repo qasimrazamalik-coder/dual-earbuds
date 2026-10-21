@@ -53,7 +53,7 @@ object Prefs {
         set(value) = sp.edit().putInt(K_BUFFER, value.coerceIn(MIN_MANUAL_BUFFER_MS, MAX_MANUAL_BUFFER_MS)).apply()
 
     var bufferMode: BufferMode
-        get() = enumOr(sp.getString(K_BUFFER_MODE, null), BufferMode.AUTO)
+        get() = enumOr(sp.getString(K_BUFFER_MODE, null), BufferMode.SMART)
         set(value) = sp.edit().putString(K_BUFFER_MODE, value.name).apply()
 
     var delayMs: Int
@@ -103,6 +103,11 @@ object Prefs {
         get() = sp.getString(K_RECENT_HOSTS, "") ?: ""
         set(value) = sp.edit().putString(K_RECENT_HOSTS, value).apply()
 
-    private inline fun <reified E : Enum<E>> enumOr(name: String?, fallback: E): E =
+    /** Generic string values for the smaller settings stores ([SoundSettings]). */
+    fun getString(key: String): String? = sp.getString(key, null)
+
+    fun putString(key: String, value: String?) = sp.edit().putString(key, value).apply()
+
+    inline fun <reified E : Enum<E>> enumOr(name: String?, fallback: E): E =
         enumValues<E>().firstOrNull { it.name == name } ?: fallback
 }
