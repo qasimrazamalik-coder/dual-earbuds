@@ -672,3 +672,72 @@ namespace DualEarbuds
         }
     }
 }
+
+namespace DualEarbuds
+{
+    // Everything one laptop output plays through: EQ preset (manual or Smart EQ), hearing profile and
+    // dialogue boost. Settings are written by the UI thread and picked up by the audio thread at the start
+    // of the next block, so a change never tears a filter mid-block. Off settings cost nothing.
+    public class OutputEffects
+    {
+        volatile string manualPreset = "flat";
+        volatile bool auto;                 // the user picked "Auto" (Smart EQ decides)
+        volatile string autoPreset;         // Smart EQ's current pick, null = no opinion
+        volatile HearingProfile hearing;
+        volatile int dialogue;              // DialogueMode
+        int version, applied = -1;
+        EqChain eq;
+        DialogueBoost boost;
+        int rate;
+        string activePreset;
+
+        public string ManualPreset { get { return manualPreset; } }
+        public bool Auto { get { return auto; } }
+        public string AutoPreset { get { return autoPreset; } }
+        public HearingProfile Hearing { get { return hearing; } }
+        public DialogueMode Dialogue { get { return (DialogueMode)dialogue; } }
+
+        // What is actually playing now (for the UI).
+        public string EffectivePreset { get { string a = autoPreset; return auto && a != null ? a : manualPreset; } }
+
+        // A manual choice always wins until the user picks Auto again.
+        public void SetManual(string preset) { manualPreset = EqPresets.IsValid(preset) ? preset : "flat"; auto = false; Bump(); }
+        public void SetAuto(bool on) { auto = on; Bump(); }
+        public void SetAutoPreset(string preset) { string p = EqPresets.IsValid(preset) ? preset : null; if (p == autoPreset) return; autoPreset = p; Bump(); }
+        public void SetHearing(HearingProfile p) { hearing = p; Bump(); }
+        public void SetDialogue(DialogueMode m) { dialogue = (int)m; Bump(); }
+
+        void Bump() { System.Threading.Interlocked.Increment(ref version); }
+
+        public bool IsBypass
+        {
+            get { return EffectivePreset == "flat" && hearing == null && dialogue == 0 && (eq == null || eq.IsFlat); }
+        }
+
+        // Audio thread. buf is stereo interleaved.
+        public void Process(float[] buf, int offsetFrames, int frames, int sampleRate)
+        {
+            if (frames <= 0) return;
+            if (eq == null || rate != sampleRate)
+            {
+                // built once per stream (first block); never per block
+                rate = sampleRate;
+                eq = new EqChain(sampleRate);
+                boost = new DialogueBoost(sampleRate, 480);
+                applied = -1;
+                activePreset = null;
+            }
+            int v = System.Threading.Thread.VolatileRead(ref version);
+            if (v != applied)
+            {
+                applied = v;
+                string p = EffectivePreset;
+                if (p != activePreset) { eq.SetPreset(p, activePreset != null); activePreset = p; }
+                eq.SetHearing(hearing);
+                boost.Mode = (DialogueMode)dialogue;
+            }
+            boost.Process(buf, offsetFrames, frames);
+            eq.Process(buf, offsetFrames, frames);
+        }
+    }
+}

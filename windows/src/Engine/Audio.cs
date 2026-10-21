@@ -62,6 +62,10 @@ namespace DualEarbuds
         public volatile string Error;
         public volatile bool Running;
         public volatile int LastHResult;
+        public volatile OutputEffects Effects;   // EQ / hearing profile / dialogue boost, or null
+        // Listener sync mode: the queue length is steered from outside (Adjust), so the built-in drift
+        // limit doesn't throw away audio the clock sync wants to keep.
+        public volatile bool SyncMode;
         long sourceFrames;
         float peak;
 
@@ -161,7 +165,7 @@ namespace DualEarbuds
         {
             lock (lk)
             {
-                int excess = pendingSilence + ring.Count - (target + driftLimit);
+                int excess = SyncMode ? 0 : pendingSilence + ring.Count - (target + driftLimit);
                 if (excess > 0)
                 {
                     int fromSil = Math.Min(excess, pendingSilence);
@@ -187,12 +191,30 @@ namespace DualEarbuds
                     w += r;
                     Interlocked.Add(ref sourceFrames, r);
                 }
+                var fx = Effects;
+                if (fx != null && w > 0) fx.Process(dst, 0, w, rate);
                 if (w == 0 && deviceEmpty)
                 {
                     if (primed) Interlocked.Increment(ref underruns);
                     primed = false;
                 }
                 return w;
+            }
+        }
+
+        // Frames waiting to be played (silence still to insert + sound in the ring), excluding the device's own buffer.
+        public int QueuedFrames { get { lock (lk) return pendingSilence + ring.Count; } }
+
+        // frames > 0 inserts that much silence at the end of the queue's head; < 0 drops that much (silence first).
+        public void Adjust(int frames)
+        {
+            lock (lk)
+            {
+                if (frames > 0) { pendingSilence += frames; return; }
+                int d = -frames;
+                int fromSil = Math.Min(d, pendingSilence);
+                pendingSilence -= fromSil;
+                ring.Discard(d - fromSil);
             }
         }
 

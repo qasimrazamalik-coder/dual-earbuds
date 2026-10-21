@@ -65,6 +65,8 @@ static class EngineTests
         Run("Calibration cross-correlation", TestCalibration);
         Run("Host v3.1: PIN, sync, clock, remote, talk, source, EQ", TestHostV31);
         Run("mDNS / DNS-SD messages", TestDiscovery);
+        Run("Join by link: parsing", TestLinkParse);
+        Run("Laptop to laptop: loopback host + listener", TestLoopbackListen);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -1421,5 +1423,111 @@ static class EngineTests
             catch (Exception) { crashes++; }
         }
         Check(crashes == 0, "fuzzed packets never crash the parser");
+    }
+
+    static void TestLinkParse()
+    {
+        LinkTarget t; string why;
+        Check(LinkAddress.TryParse("http://192.168.1.16:8790/?k=Q7RK2MXD", out t, out why) && t.Host == "192.168.1.16" && t.Port == 8790 && t.Key == "Q7RK2MXD", "full link");
+        Check(LinkAddress.TryParse("  192.168.1.16:9000/?k=q7rk2mxd ", out t, out why) && t.Port == 9000 && t.Key == "Q7RK2MXD", "no scheme, lower-case key");
+        Check(LinkAddress.TryParse("10.0.0.5/?k=Q7RK2MXD", out t, out why) && t.Port == 8790, "missing port = 8790");
+        Check(LinkAddress.TryParse("HTTP://laptop.local:8790?k=Q7RK2MXD&p=1234", out t, out why) && t.Host == "laptop.local", "host name, extra params ignored");
+        Check(LinkAddress.TryParse("http://[fe80::1]:8790/?k=Q7RK2MXD", out t, out why) && t.Host == "fe80::1" && t.WsUrl(null, "x").StartsWith("ws://[fe80::1]:8790/ws?"), "IPv6");
+        Check(!LinkAddress.TryParse("http://192.168.1.16:8790/", out t, out why) && why.Contains("key"), "missing key explained");
+        Check(!LinkAddress.TryParse("192.168.1.16:99999/?k=Q7RK2MXD", out t, out why) && why.Contains("port"), "bad port explained");
+        Check(!LinkAddress.TryParse("https://evil.example/?k=Q7RK2MXD", out t, out why), "https refused");
+        Check(!LinkAddress.TryParse("javascript:alert(1)", out t, out why) && !LinkAddress.TryParse("", out t, out why), "garbage refused");
+        Check(!LinkAddress.TryParse("1.2.3.4/?k=SHORT", out t, out why), "invalid key refused");
+        var g = new LinkTarget { Host = "1.2.3.4", Port = 8790, Key = "Q7RK2MXD" };
+        Check(g.WsUrl("4711", "My PC").EndsWith("/ws?k=Q7RK2MXD&client=windows&name=My%20PC&p=4711"), "ws url carries client=windows, name and PIN");
+    }
+
+    static void TestLoopbackListen()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.PcName = "Host PC";
+        host.Start();
+        LinkClient client = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            LinkTarget t; string why;
+            LinkAddress.TryParse("127.0.0.1:" + port + "/?k=abcd2345", out t, out why);
+            client = new LinkClient(t, null, "Listener PC");
+            var got = new List<float>();
+            var seqs = new List<uint>();
+            client.Tap = (d, n, s) => { lock (got) { seqs.Add(s); for (int i = 0; i < n * 2; i += 2) got.Add(d[i]); } };
+            client.Start();
+            Check(WaitFor(() => client.State == ListenState.Playing, 5000), "connects and plays (" + client.State + " " + client.Detail + ")");
+            Check(client.HostName == "Host PC" && client.PlayoutMs == 120, "hello read");
+            Check(WaitFor(() => host.Snapshot().Count == 1 && host.Snapshot()[0].Client == "windows" && host.Snapshot()[0].Name == "Listener PC", 2000), "host lists a Windows listener");
+
+            // 30 packets of a ramp, then drop packet 31-32 on the "network" by skipping their sequence numbers
+            var buf = new float[480 * 2];
+            int v = 0;
+            for (int p = 0; p < 30; p++)
+            {
+                for (int i = 0; i < 480; i++) { float x = ((v++ % 1000) - 500) / 1000f; buf[2 * i] = x; buf[2 * i + 1] = x; }
+                host.Broadcast(buf, 480, 48000);
+                Thread.Sleep(2);
+            }
+            Check(WaitFor(() => { lock (got) return seqs.Count >= 30; }, 3000), "30 packets arrive");
+            lock (got)
+            {
+                bool inOrder = true;
+                for (int i = 1; i < seqs.Count; i++) if (seqs[i] != seqs[i - 1] + 1) inOrder = false;
+                Check(inOrder, "in order");
+                Check(Math.Abs(got[100] - ((100 % 1000) - 500) / 1000f) < 0.001, "samples survive the trip (16-bit)");
+            }
+            Check(WaitFor(() => client.Synced, 4000), "clock sync from sync replies + clock messages");
+            Check(client.RttMs >= 0 && client.RttMs < 200, "round trip measured (" + client.RttMs.ToString("0.0") + " ms)");
+            Check(WaitFor(() => host.Snapshot()[0].Synced, 1000), "host sees a synced listener");
+
+            host.SuggestedEq = "voice";
+            Check(WaitFor(() => client.SuggestedEq == "voice", 2000), "EQ suggestion reaches the laptop listener");
+            var id = host.Snapshot()[0].Id;
+            host.SetVolume(id, 70);
+            Check(WaitFor(() => client.HostVolume == 70, 2000), "host volume control applied");
+            Check(WaitFor(() => host.Snapshot()[0].Volume == 70, 6000), "reported back in status");
+            Check(!client.Remote("next"), "remote refused while the host doesn't allow it");
+
+            host.Kick(id);
+            Check(WaitFor(() => client.State == ListenState.Kicked, 4000), "kick -> stays disconnected (" + client.State + ")");
+            Thread.Sleep(1500);
+            Check(host.ClientCount == 0, "no automatic reconnect after a kick");
+        }
+        finally
+        {
+            if (client != null) client.Dispose();
+            host.Stop();
+        }
+
+        // PIN required: the client reports it instead of retrying forever
+        int port2 = FreePort();
+        var h2 = new PhoneLink(port2, "ABCD2345", IPAddress.Loopback);
+        h2.Pin = "2468";
+        h2.Start();
+        try
+        {
+            var t2 = new LinkTarget { Host = "127.0.0.1", Port = port2, Key = "ABCD2345" };
+            using (var c2 = new LinkClient(t2, null, "L"))
+            {
+                c2.Start();
+                Check(WaitFor(() => c2.State == ListenState.NeedPin, 6000), "PIN needed -> asks for it (" + c2.State + ")");
+            }
+            using (var c3 = new LinkClient(t2, "2468", "L"))
+            {
+                c3.Start();
+                Check(WaitFor(() => c3.State == ListenState.HostPaused || c3.State == ListenState.Playing, 5000), "right PIN joins (" + c3.State + ")");
+            }
+            var bad = new LinkTarget { Host = "127.0.0.1", Port = port2, Key = "ZZZZ2345" };
+            using (var c4 = new LinkClient(bad, "2468", "L"))
+            {
+                c4.Start();
+                Check(WaitFor(() => c4.State == ListenState.WrongKey, 6000), "wrong key -> says so (" + c4.State + ")");
+            }
+        }
+        finally { h2.Stop(); }
     }
 }
