@@ -25,6 +25,8 @@ reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own e
 - 🎧 **Two, three, ten pairs.** Laptop earbuds + any number of phones (up to 16 in Party mode).
 - 🎬 **Works with Netflix, YouTube, Spotify, games** — anything your laptop plays.
 - 📱 **Phone-to-phone.** Share your Android phone's music or YouTube with friends' phones (Android 10+).
+- 💻 **Laptop-to-laptop.** A second Windows laptop can listen and play to its own earbuds or speakers.
+- 🔗 **Join with a QR code or a link.** Open the link in any browser — phone, laptop, tablet or iPhone — and it plays, no install needed.
 - 🔒 **Private by design.** Local network only; every link has a secret key; devices that guess keys get locked out.
 - ⚡ **Low latency.** 10 ms audio packets and an adaptive buffer from 30 ms, plus per-device delay to line everyone up.
 - 🌙 **Keeps playing with the screen off** on Xiaomi, Redmi, POCO, Realme, OPPO, Samsung and others.
