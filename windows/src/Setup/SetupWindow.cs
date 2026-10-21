@@ -325,6 +325,16 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
         public static int Screenshots(string dir)
         {
             Directory.CreateDirectory(dir);
+            Theme.Apply(Application.Current.Resources, "dark");
+            ScreenshotSet(dir, "");
+            Theme.Apply(Application.Current.Resources, "light");
+            ScreenshotSet(dir, "-light");
+            Theme.Apply(Application.Current.Resources, "dark");
+            return 0;
+        }
+
+        static void ScreenshotSet(string dir, string suffix)
+        {
             var core = new SetupCore(@"C:\Users\You\AppData\Local");   // test mode: only used for display paths
             var win = new SetupWindow(core, new byte[0], "", SetupMode.Install);
             var root = (FrameworkElement)win.Content;
@@ -334,19 +344,18 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
             TextElement.SetFontFamily(frame, Theme.Body);
             var info = new InstalledInfo { Folder = core.DefaultFolder, Version = AppInfo.Version, Options = new InstallOptions { Folder = core.DefaultFolder, RunAtStartup = true } };
 
-            win.ShowWelcome(); Snap(frame, Path.Combine(dir, "setup-1-welcome.png"));
-            win.ShowLicense(); Snap(frame, Path.Combine(dir, "setup-2-license.png"));
-            win.ShowOptions(null); Snap(frame, Path.Combine(dir, "setup-3-options.png"));
+            win.ShowWelcome(); Snap(frame, Path.Combine(dir, "setup-1-welcome" + suffix + ".png"));
+            win.ShowLicense(); Snap(frame, Path.Combine(dir, "setup-2-license" + suffix + ".png"));
+            win.ShowOptions(null); Snap(frame, Path.Combine(dir, "setup-3-options" + suffix + ".png"));
             var log = win.ProgressPage("Installing");
             log.Text = "Copying Dual Earbuds...\nCreating shortcuts...\nRegistering with Windows...";
-            Snap(frame, Path.Combine(dir, "setup-4-installing.png"));
+            Snap(frame, Path.Combine(dir, "setup-4-installing" + suffix + ".png"));
             win.options = new InstallOptions { Folder = core.DefaultFolder };
-            win.Finish(null, "Dual Earbuds is installed", false); Snap(frame, Path.Combine(dir, "setup-5-finished.png"));
-            win.ShowMaintain(info); Snap(frame, Path.Combine(dir, "setup-6-repair-modify-uninstall.png"));
-            win.ShowOptions(info); Snap(frame, Path.Combine(dir, "setup-7-modify.png"));
-            win.ShowUninstall(info); Snap(frame, Path.Combine(dir, "setup-8-uninstall.png"));
-            win.Finish(null, "Dual Earbuds was removed", false); Snap(frame, Path.Combine(dir, "setup-9-removed.png"));
-            return 0;
+            win.Finish(null, "Dual Earbuds is installed", false); Snap(frame, Path.Combine(dir, "setup-5-finished" + suffix + ".png"));
+            win.ShowMaintain(info); Snap(frame, Path.Combine(dir, "setup-6-repair-modify-uninstall" + suffix + ".png"));
+            win.ShowOptions(info); Snap(frame, Path.Combine(dir, "setup-7-modify" + suffix + ".png"));
+            win.ShowUninstall(info); Snap(frame, Path.Combine(dir, "setup-8-uninstall" + suffix + ".png"));
+            win.Finish(null, "Dual Earbuds was removed", false); Snap(frame, Path.Combine(dir, "setup-9-removed" + suffix + ".png"));
         }
 
         static void Snap(FrameworkElement e, string path)

@@ -69,7 +69,9 @@ namespace DualEarbuds.Setup
                 }
 
                 var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-                Theme.Apply(app.Resources, "dark");
+                Theme.Apply(app.Resources, "system");                 // light or dark like Windows, and follows it live
+                Theme.StartFollowingSystem(app.Resources);
+                app.Exit += (s, e) => Theme.StopFollowingSystem();
                 var mode = args.Contains("--uninstall") ? SetupMode.Uninstall : args.Contains("--maintain") ? SetupMode.Maintain : SetupMode.Install;
                 var win = new SetupWindow(core, payload, self, mode);
                 app.Run(win);

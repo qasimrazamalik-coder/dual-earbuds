@@ -53,7 +53,7 @@ namespace DualEarbuds
         public static int Run(string dir)
         {
             Directory.CreateDirectory(dir);
-            string[] pages = { "home", "phones", "settings", "diagnostics", "about" };
+            string[] pages = { "home", "phones", "listen", "settings", "diagnostics", "about" };
             foreach (var theme in new[] { "dark", "light" })
             {
                 foreach (var page in pages)
@@ -62,6 +62,14 @@ namespace DualEarbuds
                     v.Navigate(page);
                     v.Animate();
                     SavePng(Snap(v, 1.5), Path.Combine(dir, page + "-" + theme + ".png"));
+                }
+            }
+            foreach (var theme in new[] { "dark", "light" })
+            {
+                foreach (var shot in Extras)
+                {
+                    var v = BuildExtra(shot, theme);
+                    SavePng(Snap(v, 1.5), Path.Combine(dir, shot + "-" + theme + ".png"));
                 }
             }
             var pub = Build(true, "dark");
@@ -73,6 +81,49 @@ namespace DualEarbuds
             MakeDemoGif(Path.Combine(dir, "demo.gif"));
             Theme.Apply(Application.Current.Resources, "dark");
             return 0;
+        }
+
+        static readonly string[] Extras = { "phones-pin", "listen-to-device", "settings-appearance", "settings-smart" };
+
+        // The newer screens with the demo data they need.
+        static MainView BuildExtra(string shot, string theme)
+        {
+            var v = Build(true, theme);
+            var c = v.Ctl;
+            switch (shot)
+            {
+                case "phones-pin":
+                    c.Settings.Party = true;
+                    c.Settings.PinOn = true;
+                    c.Settings.RemoteControl = true;
+                    c.Phones.Add(new PhoneInfo { Id = "2", Name = "Sara's iPhone", Client = "web", Volume = 90, BufferMs = 180, Playing = true, RttMs = 21, Synced = true });
+                    c.Phones.Add(new PhoneInfo { Id = "3", Name = "Office laptop", Client = "windows", Earbuds = "Headphones (WH-1000XM4)", Volume = 100, Playing = true, RttMs = 4, Synced = true });
+                    c.UpdateStates();
+                    v.Navigate("phones");
+                    break;
+                case "listen-to-device":
+                    c.WantRunning = false;
+                    c.StartBrowsing();
+                    c.JoinFound(c.FoundHosts[0], null);
+                    c.UpdateStates();
+                    v.Navigate("listen");
+                    break;
+                case "settings-appearance":
+                    v.Navigate("settings");
+                    Layout(v);
+                    v.ScrollTo("anchor_appearance");
+                    break;
+                case "settings-smart":
+                    c.Settings.SmartEq = "both";
+                    c.Settings.Dialogue = "light";
+                    v.Navigate("settings");
+                    Layout(v);
+                    v.ScrollTo("anchor_smart");
+                    break;
+            }
+            v.RefreshAll();
+            v.Animate();
+            return v;
         }
 
         // A short looping demo: stopped -> start -> sound levels moving -> phone page -> light theme.
@@ -114,7 +165,7 @@ namespace DualEarbuds
             int problems = 0;
             foreach (var theme in new[] { "dark", "light" })
             {
-                foreach (var page in new[] { "home", "phones", "settings", "diagnostics", "about" })
+                foreach (var page in new[] { "home", "phones", "listen", "settings", "diagnostics", "about" })
                 {
                     try
                     {
@@ -130,6 +181,38 @@ namespace DualEarbuds
                     catch (Exception ex) { problems++; sb.AppendLine(theme + "/" + page + ": EXCEPTION " + ex); }
                 }
             }
+            foreach (var theme in new[] { "dark", "light" })
+            {
+                foreach (var shot in Extras)
+                {
+                    try
+                    {
+                        var v = BuildExtra(shot, theme);
+                        Layout(v);
+                        int zero = 0;
+                        Walk(v, e => { if (e is Control && e.IsVisible && (e.ActualWidth < 1 || e.ActualHeight < 1)) zero++; });
+                        sb.AppendLine(string.Format("{0}/{1}: {2} zero-size visible controls", theme, shot, zero));
+                        if (zero > 0) { problems++; sb.AppendLine("  PROBLEM: some controls have no size"); }
+                    }
+                    catch (Exception ex) { problems++; sb.AppendLine(theme + "/" + shot + ": EXCEPTION " + ex); }
+                }
+            }
+            try
+            {
+                var d = Controller.CreateDemo(true);
+                d.Settings.Party = true;
+                d.SetPinOn(true);
+                if (!d.PinActive || !RoomPin.IsValid(d.Settings.Pin)) { problems++; sb.AppendLine("  PROBLEM: room PIN"); }
+                if (d.JoinLink("not a link", null) || d.ListenProblem == null) { problems++; sb.AppendLine("  PROBLEM: bad link accepted"); }
+                if (!d.JoinLink("192.168.1.31/?k=m4tq7zpa", null) || !d.Listening) { problems++; sb.AppendLine("  PROBLEM: link join"); }
+                d.StopListening();
+                if (d.Listening) { problems++; sb.AppendLine("  PROBLEM: stop listening"); }
+                d.SetOutputEq(d.Outputs[1], "movie");
+                if (d.Outputs[1].Effects.EffectivePreset != "movie") { problems++; sb.AppendLine("  PROBLEM: output EQ"); }
+                if (d.DiagnosticsText().Contains(d.Settings.LinkKey) || d.DiagnosticsText().Contains("4711")) { problems++; sb.AppendLine("  PROBLEM: diagnostics leak a key or PIN"); }
+                sb.AppendLine("demo listener / PIN / EQ / diagnostics checks done");
+            }
+            catch (Exception ex) { problems++; sb.AppendLine("features: EXCEPTION " + ex); }
             try
             {
                 var c = Controller.CreateDemo(true);

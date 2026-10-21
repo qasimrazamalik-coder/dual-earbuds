@@ -58,7 +58,7 @@ Compile 'dist\DualEarbuds.exe' ($engine + $appSrc + @($verFile)) ($appRes + @('/
 Write-Host '4/4  Installer'
 $setupSources = $setup + @((Resolve-Path src\App\Theme.cs).Path, (Resolve-Path src\App\Ui.cs).Path, (Resolve-Path src\App\IconFactory.cs).Path,
                            (Resolve-Path src\Engine\QrCode.cs).Path, (Resolve-Path src\Engine\Support.cs).Path,
-                           (Resolve-Path src\Engine\Firewall.cs).Path, $verFile)
+                           (Resolve-Path src\Engine\Firewall.cs).Path, (Resolve-Path src\Engine\Dsp.cs).Path, $verFile)
 Compile 'dist\DualEarbuds-Setup.exe' $setupSources @('/win32icon:build\app.ico', '/resource:dist\DualEarbuds.exe,DualEarbuds.exe', '/main:DualEarbuds.Setup.SetupProgram')
 Remove-Item bin\DualEarbuds-noicon.exe -ErrorAction SilentlyContinue
 

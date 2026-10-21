@@ -573,4 +573,32 @@ namespace DualEarbuds
             return d.TryGetValue(key, out v) && v is bool ? (bool)v : def;
         }
     }
+
+    // Optional room PIN for Party mode (protocol v3.1): 4-6 digits, never in the QR code or link.
+    public static class RoomPin
+    {
+        public static bool IsValid(string p)
+        {
+            if (p == null || p.Length < 4 || p.Length > 6) return false;
+            foreach (char c in p) if (c < '0' || c > '9') return false;
+            return true;
+        }
+
+        public static string New()
+        {
+            var b = new byte[4];
+            using (var rng = new RNGCryptoServiceProvider()) rng.GetBytes(b);
+            uint v = BitConverter.ToUInt32(b, 0) % 10000;
+            return v.ToString("0000", CultureInfo.InvariantCulture);
+        }
+
+        // Same time whether or not it matches.
+        public static bool Matches(string expected, string given)
+        {
+            if (expected == null || given == null) return false;
+            int diff = expected.Length ^ given.Length;
+            for (int i = 0; i < expected.Length; i++) diff |= expected[i] ^ (i < given.Length ? given[i] : 0);
+            return diff == 0;
+        }
+    }
 }

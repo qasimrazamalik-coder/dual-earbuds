@@ -43,7 +43,7 @@ namespace DualEarbuds
             titleRow.Children.Add(stateTitle);
             talkBadge = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
             talkBadge.SetResourceReference(Border.BackgroundProperty, "Warn");
-            var tb = Ui.Text("HOST IS TALKING", 10.5, FontWeights.Bold, "Bg");
+            var tb = Ui.Text("HOST IS TALKING", 10.5, FontWeights.Bold, "AccentInk");
             tb.TextWrapping = TextWrapping.NoWrap;
             talkBadge.Child = tb;
             titleRow.Children.Add(talkBadge);
