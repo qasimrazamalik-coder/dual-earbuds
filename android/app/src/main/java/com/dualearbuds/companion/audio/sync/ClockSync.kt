@@ -8,7 +8,7 @@ package com.dualearbuds.companion.audio.sync
  *   The sample with the smallest round trip among the last [window] is used.
  * - [onClock]: the host said packet `seq` was captured at host time `h`. Later packets are 10 ms apart.
  * - [hostTimeOf] / [localTimeOfHost] / [targetLocalMs] turn a sequence number into the local moment it must
- *   reach the ear: h(seq) + playoutMs − outputLatency − delay, converted to the local clock.
+ *   reach the ear: h(seq) + playoutMs − outputLatency + delay (Delay always makes this listener later), converted to the local clock.
  *
  * All times are milliseconds (Double for sub-ms precision). "Local" is one monotonic clock chosen by the caller.
  */
@@ -77,11 +77,11 @@ class ClockSync(
 
     /**
      * Local time the first sample of [seq] must be heard at, so that every listener plays it at the same moment:
-     * h(seq) + playoutMs − outputLatencyMs − delayMs, on the local clock.
+     * h(seq) + playoutMs − outputLatencyMs + delayMs, on the local clock.
      */
     fun targetLocalMs(seq: Long, outputLatencyMs: Double, delayMs: Double): Double? {
         val h = hostTimeOf(seq) ?: return null
-        return localTimeOfHost(h + playoutMs - outputLatencyMs - delayMs)
+        return localTimeOfHost(h + playoutMs - outputLatencyMs + delayMs)
     }
 
     companion object {

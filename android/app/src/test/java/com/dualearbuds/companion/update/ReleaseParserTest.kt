@@ -102,6 +102,7 @@ class ReleaseParserTest {
     fun downloadUrlPolicy() {
         assertTrue(UpdatePolicy.isAllowedDownloadUrl("https://github.com/a/b/releases/download/v1/DualEarbuds.apk"))
         assertTrue(UpdatePolicy.isAllowedDownloadUrl("https://objects.githubusercontent.com/github-production-release-asset/1?x=y"))
+        assertTrue(UpdatePolicy.isAllowedDownloadUrl("https://release-assets.githubusercontent.com/github-production-release-asset/1?x=y"))
         assertTrue(UpdatePolicy.isAllowedDownloadUrl("https://GitHub.com:443/a"))
         assertFalse(UpdatePolicy.isAllowedDownloadUrl("http://github.com/a"))
         assertFalse(UpdatePolicy.isAllowedDownloadUrl("https://github.com.evil.com/a"))

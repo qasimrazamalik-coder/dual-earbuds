@@ -55,8 +55,8 @@ class ClockSyncTest {
         cs.onSyncReply(100.0, 1105.0, 110.0) // offset +1000
         cs.onClock(seq = 10, hostMs = 2_000.0, nowLocal = 120.0)
         cs.playoutMs = 120.0
-        // h(12) = 2020; + 120 playout - 30 output latency - 15 delay = 2095 host = 1095 local
-        assertEquals(1_095.0, cs.targetLocalMs(12, outputLatencyMs = 30.0, delayMs = 15.0)!!, 1e-9)
+        // h(12) = 2020; + 120 playout - 30 output latency + 15 delay = 2125 host = 1125 local
+        assertEquals(1_125.0, cs.targetLocalMs(12, outputLatencyMs = 30.0, delayMs = 15.0)!!, 1e-9)
     }
 
     @Test

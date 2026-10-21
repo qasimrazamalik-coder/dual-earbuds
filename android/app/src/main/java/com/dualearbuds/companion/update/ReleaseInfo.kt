@@ -27,7 +27,7 @@ object UpdatePolicy {
     const val AUTO_CHECK_INTERVAL_MS = 24L * 60 * 60 * 1000
 
     /** Hosts the updater may download from (docs/protocol.md, "Updates"). */
-    val ALLOWED_DOWNLOAD_HOSTS = setOf("github.com", "objects.githubusercontent.com")
+    val ALLOWED_DOWNLOAD_HOSTS = setOf("github.com", "objects.githubusercontent.com", "release-assets.githubusercontent.com")
 
     /** HTTPS, default port, no user info, host exactly one of [ALLOWED_DOWNLOAD_HOSTS]. */
     fun isAllowedDownloadUrl(url: String?): Boolean {
