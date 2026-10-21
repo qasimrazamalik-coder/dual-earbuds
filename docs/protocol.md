@@ -1,7 +1,8 @@
-# Dual Earbuds — Link Protocol v3
+# Dual Earbuds — Link Protocol v3 (with v3.1 additions)
 
 The shared contract between every **host** (the Windows app, or an Android phone in *Share this phone* mode)
-and every **listener** (the Android app, or the browser player page any host serves).
+and every **listener** (the Android app, the Windows app in *Listen to another device* mode — laptop to laptop —,
+or the browser player page any host serves, opened from the link on any device).
 Everything runs on the local network or a hotspot. There is no cloud server.
 
 v3 is backward compatible with v2: a v2 listener keeps working with a v3 host, and the reverse, because
@@ -39,7 +40,7 @@ unknown fields and message types are ignored.
 
 ## WebSocket
 
-`GET /ws?k=KEY&client=<web|android>&name=<url-encoded device name>` with the usual upgrade headers.
+`GET /ws?k=KEY&client=<web|android|windows>&name=<url-encoded device name>` with the usual upgrade headers.
 
 ### Host → listener
 
@@ -88,6 +89,71 @@ Packets carry **10 ms** of sound. A listener that falls behind gets old packets 
 - On an underrun (nothing to play): +20 ms, and stay there for 10 s.
 - After 20 s with no underruns: −5 ms per 5 s down to the minimum.
 - A manual *Delay* setting in the listener adds to this and is never changed automatically.
+
+## Joining
+
+Every listener joins the same way: scan the QR code **or paste the link** (`http://IP:PORT/?k=KEY`).
+Listeners also accept `IP:PORT/?k=KEY`; a missing port means 8790; keys are case-insensitive.
+Opening the link in any browser (phone, laptop, tablet, iPhone) plays the sound with no install.
+
+## v3.1 additions
+
+All optional; a listener or host that does not know them ignores them.
+
+### Room PIN (Party mode)
+
+- The host may set a 4–6 digit **PIN** (off by default). `/info` then carries `"pin":true`.
+- Listeners add `&p=<PIN>` to `/ws` (and the browser page asks for it). Missing/wrong PIN → HTTP 403;
+  wrong PINs count toward the guessing lockout exactly like wrong keys.
+- The QR code and link never contain the PIN; it is told to guests separately.
+
+### Clock sync (everyone plays the same packet at the same moment)
+
+- Listener → host every 2 s (and 5× quickly after connect): `{"type":"sync","c":<listener ms>}`.
+- Host → listener: `{"type":"sync","c":<same c>,"h":<host ms since start>}`.
+  Listener offset = `h − (c + now)/2`; keep the sample with the smallest round trip of the last 8.
+- Host → listener every 1 s: `{"type":"clock","seq":<uint32>,"h":<host ms when that packet was captured>}`
+  and in `hello`: `"playoutMs":<target delay, default 120>`.
+- A synced listener plays packet `seq` at host time `h(seq) + playoutMs − outputLatency − delay`, where
+  `outputLatency` is the device's measured/calibrated output latency and `delay` the manual Delay.
+  It speeds up/slows down by at most ±0.5 % (resampling) to stay within ±5 ms; beyond ±40 ms it skips/inserts.
+- Listeners that can't sync fall back to the adaptive buffer above.
+
+### Calibration
+
+- Listener-local: the user holds one earbud to the phone/laptop mic, the app plays 8 clicks, finds them in the
+  mic signal by cross-correlation, and stores `outputLatency` per output device (by name). Nothing on the wire.
+
+### Packet-loss concealment
+
+- Listener-local: a missing packet (sequence gap) is filled by repeating the last 10 ms with a fade to silence
+  over ≤ 30 ms, then crossfaded back in. No clicks.
+
+### Discovery (mDNS / DNS-SD)
+
+- Hosts advertise `_dualearbuds._tcp.local` on their port with TXT `v=3`, `name=<device>`, `host=windows|android`,
+  `pin=0|1`, and `k=<KEY>` **only while the network is Private** (or the user turned "Show on this network" on).
+- Listeners list found hosts; one without `k` asks for the link/QR.
+
+### Remote control
+
+- Host setting "Let listeners control playback" (off by default). `/info` and `hello` carry `"remote":true` when on.
+- Listener → host: `{"type":"remote","action":"playpause|next|prev|volup|voldown"}`.
+  The host presses the matching media key; ignored when the setting is off.
+
+### Talk-over
+
+- Host → listener: `{"type":"talk","on":true|false}` while the host mixes its microphone into the stream
+  (the music ducks by 12 dB). Informational only.
+
+### Sound source
+
+- `/info` and `hello` carry `"source":"all"` or `"source":"app"` plus `"app":"<name>"` when the host shares
+  only one app's sound (Windows process loopback, Android `addMatchingUid`).
+
+### Equalizer
+
+- Listener-local presets `flat|bass|voice|movie`. The host may suggest one: `{"type":"control","eq":"movie"}`.
 
 ## Limits
 

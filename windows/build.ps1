@@ -20,6 +20,9 @@ $common = @('/nologo', '/optimize+', '/platform:anycpu', '/codepage:65001', '/wa
 $engine = Get-ChildItem src\Engine\*.cs | ForEach-Object FullName
 $appSrc = Get-ChildItem src\App\*.cs    | ForEach-Object FullName
 $setup  = Get-ChildItem src\Setup\*.cs  | ForEach-Object FullName
+# The phone player page is shared with the Android app; it is embedded as the resource "web-player.html".
+$player = (Resolve-Path ..\shared\web-player.html).Path
+$appRes = @("/resource:$player,web-player.html")
 
 New-Item -ItemType Directory -Force bin, dist | Out-Null
 
@@ -30,15 +33,16 @@ function Compile($out, $sources, $extra) {
 }
 
 Write-Host '1/4  App (without icon, to draw the icon)'
-Compile 'bin\DualEarbuds-noicon.exe' ($engine + $appSrc) @()
+Compile 'bin\DualEarbuds-noicon.exe' ($engine + $appSrc) $appRes
 Write-Host '2/4  Icon'
 $p = Start-Process -FilePath 'bin\DualEarbuds-noicon.exe' -ArgumentList '--make-icon', "`"$PSScriptRoot\build\app.ico`"" -Wait -PassThru -WindowStyle Hidden
 if ($p.ExitCode -ne 0 -or -not (Test-Path build\app.ico)) { throw 'Icon generation failed' }
 Write-Host '3/4  App'
-Compile 'dist\DualEarbuds.exe' ($engine + $appSrc) @('/win32icon:build\app.ico')
+Compile 'dist\DualEarbuds.exe' ($engine + $appSrc) ($appRes + @('/win32icon:build\app.ico'))
 Write-Host '4/4  Installer'
 $setupSources = $setup + @((Resolve-Path src\App\Theme.cs).Path, (Resolve-Path src\App\Ui.cs).Path, (Resolve-Path src\App\IconFactory.cs).Path,
-                           (Resolve-Path src\Engine\QrCode.cs).Path, (Resolve-Path src\Engine\Support.cs).Path)
+                           (Resolve-Path src\Engine\QrCode.cs).Path, (Resolve-Path src\Engine\Support.cs).Path,
+                           (Resolve-Path src\Engine\Firewall.cs).Path)
 Compile 'dist\DualEarbuds-Setup.exe' $setupSources @('/win32icon:build\app.ico', '/resource:dist\DualEarbuds.exe,DualEarbuds.exe', '/main:DualEarbuds.Setup.SetupProgram')
 Remove-Item bin\DualEarbuds-noicon.exe -ErrorAction SilentlyContinue
 

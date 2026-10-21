@@ -11,8 +11,9 @@ namespace DualEarbuds
     public static class AppInfo
     {
         public const string Name = "Dual Earbuds";
-        public const string Version = "2.0.0";
-        public const int Protocol = 2;
+        public const string Version = "3.0.0";
+        public const int Protocol = 3;
+        public const string Host = "windows";
 
         public static string DataDir
         {
@@ -118,6 +119,9 @@ namespace DualEarbuds
 
     public class Settings
     {
+        public const string NetScopePrivate = "private";   // firewall profile 2
+        public const string NetScopeAll = "all";            // firewall profiles 2 + 4 (installer default)
+
         public string SourceId = "";          // "" = follow the Windows default output
         public string Theme = "system";       // system | dark | light
         public bool AutoStart = true;         // start mirroring when the app opens
@@ -129,6 +133,10 @@ namespace DualEarbuds
         public bool Hotkey = true;            // Ctrl+Alt+M starts/stops mirroring
         public bool FirstRun = true;
         public bool TrayTipShown = false;
+        public bool Party = false;            // Party mode: up to 16 listeners
+        public bool CheckUpdates = true;      // look for a new release at most once a day
+        public DateTime LastUpdateCheckUtc = DateTime.MinValue;
+        public string NetworkScope = NetScopeAll;   // which Windows network types phones may connect on (firewall rule)
         public Dictionary<string, OutSetting> Outs = new Dictionary<string, OutSetting>();
 
         public static string DefaultPath { get { return Path.Combine(AppInfo.DataDir, "settings.txt"); } }
@@ -163,6 +171,14 @@ namespace DualEarbuds
                             case "key": if (DualEarbuds.LinkKey.IsValid(v)) s.LinkKey = v.ToUpperInvariant(); break;
                             case "hotkey": s.Hotkey = v == "1"; break;
                             case "traytip": s.TrayTipShown = v == "1"; break;
+                            case "party": s.Party = v == "1"; break;
+                            case "updates": s.CheckUpdates = v == "1"; break;
+                            case "updatechecked":
+                                long ticks;
+                                if (long.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out ticks) && ticks >= DateTime.MinValue.Ticks && ticks <= DateTime.MaxValue.Ticks)
+                                    s.LastUpdateCheckUtc = new DateTime(ticks, DateTimeKind.Utc);
+                                break;
+                            case "netscope": if (v == NetScopePrivate || v == NetScopeAll) s.NetworkScope = v; break;
                             case "out":
                                 if (p.Length >= 5)
                                 {
@@ -202,6 +218,10 @@ namespace DualEarbuds
                 lines.Add("key\t" + LinkKey);
                 lines.Add("hotkey\t" + B(Hotkey));
                 lines.Add("traytip\t" + B(TrayTipShown));
+                lines.Add("party\t" + B(Party));
+                lines.Add("updates\t" + B(CheckUpdates));
+                lines.Add("updatechecked\t" + LastUpdateCheckUtc.Ticks.ToString(CultureInfo.InvariantCulture));
+                lines.Add("netscope\t" + NetworkScope);
                 foreach (var kv in Outs)
                     lines.Add(string.Format(CultureInfo.InvariantCulture, "out\t{0}\t{1}\t{2}\t{3}", kv.Key, B(kv.Value.Enabled), kv.Value.DelayMs, kv.Value.Volume));
                 string tmp = path + ".tmp";
@@ -251,6 +271,68 @@ namespace DualEarbuds
                 throw new FormatException("expected , or }");
             }
             return d;
+        }
+
+        // Parses any JSON value (used for GitHub's release JSON, which nests objects and arrays).
+        // Objects become Dictionary<string, object>, arrays List<object>, numbers double. Depth is capped.
+        public const int MaxDepth = 32;
+
+        public static object Parse(string s)
+        {
+            if (s == null) throw new FormatException("no input");
+            int i = 0;
+            Ws(s, ref i);
+            object v = Any(s, ref i, 0);
+            Ws(s, ref i);
+            if (i != s.Length) throw new FormatException("trailing characters");
+            return v;
+        }
+
+        static object Any(string s, ref int i, int depth)
+        {
+            if (depth > MaxDepth) throw new FormatException("too deeply nested");
+            if (i >= s.Length) throw new FormatException("missing value");
+            char c = s[i];
+            if (c == '{')
+            {
+                var d = new Dictionary<string, object>();
+                i++;
+                Ws(s, ref i);
+                if (i < s.Length && s[i] == '}') { i++; return d; }
+                while (true)
+                {
+                    Ws(s, ref i);
+                    string key = Str(s, ref i);
+                    Ws(s, ref i);
+                    if (i >= s.Length || s[i] != ':') throw new FormatException("expected :");
+                    i++;
+                    Ws(s, ref i);
+                    d[key] = Any(s, ref i, depth + 1);
+                    Ws(s, ref i);
+                    if (i >= s.Length) throw new FormatException("unterminated object");
+                    if (s[i] == ',') { i++; continue; }
+                    if (s[i] == '}') { i++; return d; }
+                    throw new FormatException("expected , or }");
+                }
+            }
+            if (c == '[')
+            {
+                var l = new List<object>();
+                i++;
+                Ws(s, ref i);
+                if (i < s.Length && s[i] == ']') { i++; return l; }
+                while (true)
+                {
+                    Ws(s, ref i);
+                    l.Add(Any(s, ref i, depth + 1));
+                    Ws(s, ref i);
+                    if (i >= s.Length) throw new FormatException("unterminated array");
+                    if (s[i] == ',') { i++; continue; }
+                    if (s[i] == ']') { i++; return l; }
+                    throw new FormatException("expected , or ]");
+                }
+            }
+            return Value(s, ref i);
         }
 
         static void Ws(string s, ref int i) { while (i < s.Length && char.IsWhiteSpace(s[i])) i++; }

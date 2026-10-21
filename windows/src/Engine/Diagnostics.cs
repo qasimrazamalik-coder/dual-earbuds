@@ -43,11 +43,12 @@ namespace DualEarbuds
             if (phone == null) sb.AppendLine("Off" + (settings.PhoneLink ? " (failed to start)" : ""));
             else
             {
-                sb.AppendLine("Port " + phone.Port + (phone.Error != null ? " error: " + phone.Error : ""));
+                sb.AppendLine("Port " + phone.Port + (phone.Error != null ? " error: " + phone.Error : "") + " · protocol " + AppInfo.Protocol +
+                              " · party " + (phone.Party ? "on" : "off") + " (max " + phone.Capacity + ") · firewall networks: " + settings.NetworkScope);
                 sb.AppendLine("Addresses: " + string.Join(", ", PhoneLink.LanAddresses().ToArray()));
                 foreach (var p in phone.Snapshot())
-                    sb.AppendLine(string.Format("  {0} ({1}, {2}) earbuds='{3}' battery={4} rtt={5}ms sent={6} dropped={7}",
-                        p.Name, p.Client, p.Remote, p.Earbuds, p.Battery, p.RttMs, p.PacketsSent, p.PacketsDropped));
+                    sb.AppendLine(string.Format("  #{0} {1} ({2}, {3}) earbuds='{4}' battery={5} volume={6}% rtt={7}ms buffer={8}ms underruns={9} sent={10} dropped={11}",
+                        p.Id, p.Name, p.Client, p.Remote, p.Earbuds, p.Battery, p.Volume, p.RttMs, p.BufferMs, p.Underruns, p.PacketsSent, p.PacketsDropped));
             }
             sb.AppendLine();
 

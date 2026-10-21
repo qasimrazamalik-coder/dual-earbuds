@@ -68,7 +68,8 @@ namespace DualEarbuds
         readonly int rate, cushion, driftLimit;
         readonly Ring ring;
         readonly object lk = new object();
-        int target, pendingSilence;
+        int target, pendingSilence, delayMs, bufferMs;
+        int underruns;
         bool primed;
         Thread thread;
         volatile bool stopFlag;
@@ -82,8 +83,14 @@ namespace DualEarbuds
             ring = new Ring(rate * 3);
             cushion = rate * 15 / 1000;
             driftLimit = rate * 80 / 1000;
-            target = cushion + Math.Max(0, delayMs) * rate / 1000;
+            this.delayMs = Math.Max(0, delayMs);
+            target = cushion + this.delayMs * rate / 1000;
         }
+
+        public int Rate { get { return rate; } }
+
+        // Times the device ran dry while playing (network listening counts these; mirroring ignores them).
+        public int Underruns { get { return Thread.VolatileRead(ref underruns); } }
 
         public long SourceFrames { get { return Interlocked.Read(ref sourceFrames); } }
         public float TakePeak() { float p = peak; peak = 0; return p; }
@@ -107,18 +114,35 @@ namespace DualEarbuds
         {
             lock (lk)
             {
-                int nt = cushion + Math.Max(0, ms) * rate / 1000;
-                int diff = nt - target;
-                target = nt;
-                if (!primed) return;
-                if (diff > 0) pendingSilence += diff;
-                else
-                {
-                    int d = -diff;
-                    int fromSil = Math.Min(d, pendingSilence);
-                    pendingSilence -= fromSil;
-                    ring.Discard(d - fromSil);
-                }
+                delayMs = Math.Max(0, ms);
+                Retarget();
+            }
+        }
+
+        // Extra jitter buffer for network listening (on top of the 15 ms cushion and the manual delay).
+        public void SetBufferMs(int ms)
+        {
+            lock (lk)
+            {
+                bufferMs = Math.Max(0, ms);
+                Retarget();
+            }
+        }
+
+        // Caller holds lk.
+        void Retarget()
+        {
+            int nt = cushion + (delayMs + bufferMs) * rate / 1000;
+            int diff = nt - target;
+            target = nt;
+            if (!primed) return;
+            if (diff > 0) pendingSilence += diff;
+            else
+            {
+                int d = -diff;
+                int fromSil = Math.Min(d, pendingSilence);
+                pendingSilence -= fromSil;
+                ring.Discard(d - fromSil);
             }
         }
 
@@ -163,7 +187,11 @@ namespace DualEarbuds
                     w += r;
                     Interlocked.Add(ref sourceFrames, r);
                 }
-                if (w == 0 && deviceEmpty) primed = false;
+                if (w == 0 && deviceEmpty)
+                {
+                    if (primed) Interlocked.Increment(ref underruns);
+                    primed = false;
+                }
                 return w;
             }
         }
@@ -449,8 +477,14 @@ namespace DualEarbuds
         // Float stereo -> little-endian signed 16-bit, written into dst at offset.
         public static void ToPcm16(float[] src, int frames, byte[] dst, int offset)
         {
+            ToPcm16(src, 0, frames, dst, offset);
+        }
+
+        public static void ToPcm16(float[] src, int startFrame, int frames, byte[] dst, int offset)
+        {
             int o = offset;
-            for (int i = 0; i < frames * 2; i++)
+            int end = (startFrame + frames) * 2;
+            for (int i = startFrame * 2; i < end; i++)
             {
                 float s = src[i];
                 if (s > 1f) s = 1f; else if (s < -1f) s = -1f;

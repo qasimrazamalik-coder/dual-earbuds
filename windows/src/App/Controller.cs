@@ -46,6 +46,16 @@ namespace DualEarbuds
 
         public event Action DevicesChanged;   // device list changed: rebuild cards
         public event Action StateChanged;     // states/levels changed: refresh labels
+        public event Action UpdateChanged;    // update check / download state changed
+        public event Action<string> UpdateFound;   // an automatic check found this version (tray tip)
+
+        // ---- updates (all network work runs on background threads)
+        public UpdateCheckResult UpdateResult;
+        public bool UpdateChecking, UpdateDownloading;
+        public int UpdateProgress = -1;       // 0-100, -1 unknown
+        public string UpdateError;            // download / install problem, shown under the release
+        DateTime startedAt = DateTime.Now;
+        string notifiedVersion;
 
         string devSig;
         DateTime lastAutoTry = DateTime.MinValue, errorUntil = DateTime.MinValue;
@@ -146,6 +156,7 @@ namespace DualEarbuds
         // ------------------------------------------------------------------ lifecycle
         public void Initialize()
         {
+            startedAt = DateTime.Now;
             StartWorker();
             RefreshDevices(true);
             if (Settings.PhoneLink) StartPhone();
@@ -173,6 +184,7 @@ namespace DualEarbuds
             UpdateBatteries();
             if (Phone != null) Phones = Phone.Snapshot();
             if (Settings.PhoneLink) NetworkInfo.Refresh();   // background, at most every 30 s
+            MaybeAutoCheckUpdates();
             UpdateStates();
             if (dirty) { Settings.Save(); dirty = false; }
         }
@@ -375,6 +387,7 @@ namespace DualEarbuds
                 SetError("Could not start the phone link on port " + Settings.PhonePort + ": " + p.Error);
                 return;
             }
+            p.Party = Settings.Party;
             Phone = p;
             Engine.Phone = p;
             if (Engine.Running) p.SetMirroring(true, Engine.Rate);
@@ -413,6 +426,165 @@ namespace DualEarbuds
             if (Settings.PhoneLink) { StopPhone(); StartPhone(); }   // also retries after a failed start
             UpdateStates();
             return true;
+        }
+
+        public bool Party { get { return Settings.Party; } }
+        public int ListenerCapacity { get { return Settings.Party ? PhoneLink.MaxClientsParty : PhoneLink.MaxClients; } }
+
+        public void SetParty(bool on)
+        {
+            Settings.Party = on;
+            dirty = true;
+            if (Phone != null) Phone.Party = on;
+            UpdateStates();
+        }
+
+        public void SetPhoneVolume(string id, int volume)
+        {
+            int v = PhoneLink.ClampVolume(volume);
+            if (Phone != null) Phone.SetVolume(id, v);
+            foreach (var p in Phones) if (p.Id == id) p.Volume = v;   // keep the card in step until the phone reports back
+        }
+
+        public void KickPhone(string id)
+        {
+            if (Phone != null) { Phone.Kick(id); Phones = Phone.Snapshot(); }
+            else if (Demo) Phones.RemoveAll(p => p.Id == id);
+            UpdateStates();
+        }
+
+        // ------------------------------------------------------------------ firewall (network scope)
+        // Changes which Windows network types phones may connect on. Windows shows its permission prompt;
+        // done gets the result on the UI thread. The setting is only saved when Windows agreed.
+        public void ApplyNetworkScope(string scope, Action<FirewallResult> done)
+        {
+            if (Demo) { Settings.NetworkScope = scope; dirty = true; if (done != null) done(FirewallResult.Ok); return; }
+            string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+            int profiles = Firewall.ProfilesFor(scope);
+            RunAsync(() => Firewall.Apply(exe, true, profiles), r =>
+            {
+                if (r == FirewallResult.Ok)
+                {
+                    Settings.NetworkScope = scope;
+                    dirty = true;
+                    MarkInstallerFirewallRule();
+                    Log.Info("Firewall rule set to profiles " + profiles);
+                }
+                if (done != null) done(r);
+            });
+        }
+
+        // So that uninstalling also removes a rule the app created (the installer only removes rules it knows about).
+        static void MarkInstallerFirewallRule()
+        {
+            try
+            {
+                using (var k = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Uninstall\DualEarbudsPro", true))
+                    if (k != null) k.SetValue("OptFirewall", 1, RegistryValueKind.DWord);
+            }
+            catch { }
+        }
+
+        // Runs work on its own background thread (never the device worker: it may wait on the network or on
+        // a permission prompt), then done(result) on the UI thread.
+        void RunAsync<T>(Func<T> work, Action<T> done)
+        {
+            var d = Dispatcher.CurrentDispatcher;
+            var t = new Thread(() =>
+            {
+                T r = default(T);
+                try { r = work(); }
+                catch (Exception ex) { Log.Error("Background job: " + ex); }
+                try { d.BeginInvoke(new Action(() => done(r))); } catch { }
+            });
+            t.IsBackground = true;
+            t.Name = "AppJob";
+            t.Start();
+        }
+
+        // ------------------------------------------------------------------ updates
+        void MaybeAutoCheckUpdates()
+        {
+            if (Demo || UpdateChecking || UpdateDownloading) return;
+            if ((DateTime.Now - startedAt).TotalSeconds < 20) return;   // let the app settle first
+            if (!Updater.ShouldAutoCheck(Settings.CheckUpdates, Settings.LastUpdateCheckUtc, DateTime.UtcNow)) return;
+            CheckForUpdates(false);
+        }
+
+        public void CheckForUpdates(bool manual)
+        {
+            if (UpdateChecking || UpdateDownloading) return;
+            UpdateChecking = true;
+            UpdateError = null;
+            Settings.LastUpdateCheckUtc = DateTime.UtcNow;   // counts even when offline: at most one automatic try a day
+            dirty = true;
+            Raise(UpdateChanged);
+            if (Demo)
+            {
+                UpdateChecking = false;
+                UpdateResult = new UpdateCheckResult { Status = UpdateStatus.UpToDate, Message = "You have the latest version.", CheckedUtc = DateTime.UtcNow };
+                Raise(UpdateChanged);
+                return;
+            }
+            RunAsync(() => Updater.Check(), r =>
+            {
+                UpdateChecking = false;
+                if (r == null) r = new UpdateCheckResult { Status = UpdateStatus.Error, Message = "Couldn't check for updates right now. Try again later.", CheckedUtc = DateTime.UtcNow };
+                // a failed automatic check stays quiet: keep showing the last good result
+                if (manual || r.Status == UpdateStatus.Available || r.Status == UpdateStatus.UpToDate || UpdateResult == null) UpdateResult = r;
+                Log.Info("Update check: " + r.Status + (r.Release != null ? " (latest " + r.Release.Version + ")" : ""));
+                if (!manual && r.Status == UpdateStatus.Available && r.Release.Version != notifiedVersion)
+                {
+                    notifiedVersion = r.Release.Version;
+                    var h = UpdateFound;
+                    if (h != null) h(r.Release.Version);
+                }
+                Raise(UpdateChanged);
+            });
+        }
+
+        // Downloads the installer, starts it in update mode and asks the app to exit.
+        public void InstallUpdate(Action exitApp)
+        {
+            var r = UpdateResult;
+            if (UpdateDownloading || r == null || r.Status != UpdateStatus.Available || Demo) return;
+            UpdateDownloading = true;
+            UpdateProgress = 0;
+            UpdateError = null;
+            Raise(UpdateChanged);
+            var d = Dispatcher.CurrentDispatcher;
+            int shown = -2;
+            Action<int> progress = pc =>
+            {
+                if (pc == shown) return;
+                shown = pc;
+                try { d.BeginInvoke(new Action(() => { UpdateProgress = pc; Raise(UpdateChanged); })); } catch { }
+            };
+            RunAsync(() =>
+            {
+                try
+                {
+                    string path = Updater.Download(r.Release, progress);
+                    return Updater.StartInstaller(path) ? null : "The installer couldn't be started. Try again, or download it from the release page.";
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("Update install: " + ex);
+                    if (ex is System.IO.IOException || ex is System.IO.InvalidDataException || ex is InvalidOperationException) return ex.Message;
+                    return "The update couldn't be downloaded. Try again later.";
+                }
+            }, err =>
+            {
+                UpdateDownloading = false;
+                if (err == null)
+                {
+                    Log.Info("Installer started for " + r.Release.Version + " - exiting");
+                    exitApp();
+                    return;
+                }
+                UpdateError = err;
+                Raise(UpdateChanged);
+            });
         }
 
         public List<string> Addresses
@@ -517,7 +689,7 @@ namespace DualEarbuds
             c.Outputs.Add(new OutputVm { Id = "spk", Name = "Speaker (Realtek(R) Audio)", Enabled = false });
             c.Phones = new List<PhoneInfo>
             {
-                new PhoneInfo { Name = "Redmi Note 12", Client = "android", Earbuds = "Evo Z-Buds", Battery = 54, Volume = 100, BufferMs = 180, Playing = true, RttMs = 14, Remote = "192.168.1.23" },
+                new PhoneInfo { Id = "1", Name = "Redmi Note 12", Client = "android", Earbuds = "Evo Z-Buds", Battery = 54, Volume = 100, BufferMs = 60, Playing = true, RttMs = 14, Remote = "192.168.1.23" },
             };
             c.WantRunning = running;
             c.Level = running ? 0.66f : 0f;

@@ -33,6 +33,7 @@ namespace DualEarbuds
         public event Action<string> ThemeRequested;
         public event Action HotkeyChanged;
         public event Action ResetRequested;
+        public event Action ExitRequested;   // the updater started the installer: close the app
 
         public MainView(Controller ctl)
         {
@@ -110,6 +111,7 @@ namespace DualEarbuds
 
             ctl.DevicesChanged += () => { foreach (var p in pages.Values) p.Rebuild(); };
             ctl.StateChanged += RefreshAll;
+            ctl.UpdateChanged += () => { IPage p; if (pages.TryGetValue("settings", out p)) p.Refresh(); };
             Navigate("home");
         }
 
@@ -164,7 +166,8 @@ namespace DualEarbuds
                     p = new SettingsPage(Ctl,
                         m => { var h = ThemeRequested; if (h != null) h(m); },
                         () => { var h = HotkeyChanged; if (h != null) h(); },
-                        () => { var h = ResetRequested; if (h != null) h(); });
+                        () => { var h = ResetRequested; if (h != null) h(); },
+                        () => { var h = ExitRequested; if (h != null) h(); });
                     break;
                 case "diagnostics": p = new DiagnosticsPage(Ctl); break;
                 case "about": p = new AboutPage(); break;
@@ -266,6 +269,7 @@ namespace DualEarbuds
             View.ThemeRequested += m => Theme.Apply(Application.Current.Resources, m);
             View.HotkeyChanged += UpdateHotkey;
             View.ResetRequested += ResetAll;
+            View.ExitRequested += ExitApp;
             StateChanged += (s, e) =>
             {
                 View.MaxIcon.Data = Geometry.Parse(WindowState == WindowState.Maximized ? Icons.Restore : Icons.Maximize);
@@ -276,6 +280,7 @@ namespace DualEarbuds
 
             CreateTray();
             ctl.StateChanged += UpdateTray;
+            ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Open Settings > Updates to install it.");
 
             fast = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             fast.Tick += (s, e) => { ctl.FastTick(); View.Animate(); };
@@ -290,7 +295,7 @@ namespace DualEarbuds
             ctl.SlowTick();
             int sig = 0;
             var sb = new System.Text.StringBuilder();
-            foreach (var p in ctl.Phones) sb.Append(p.Id).Append(p.Name).Append(p.Earbuds).Append(p.Battery).Append(p.Volume).Append(p.RttMs / 20);
+            foreach (var p in ctl.Phones) sb.Append(p.Id).Append(p.Name).Append(p.Earbuds).Append(p.Battery).Append(p.Volume).Append(p.Underruns).Append(p.RttMs / 20);
             string detail = sb.ToString();
             sig = ctl.Phones.Count;
             if (sig != phoneSig || detail != phoneDetail) { phoneSig = sig; phoneDetail = detail; View.RebuildPhones(); }
@@ -337,6 +342,12 @@ namespace DualEarbuds
             menu.Items.Add("Exit", null, (s, e) => ExitApp());
             tray = new WinForms.NotifyIcon { Icon = IconFactory.TrayIcon(), Text = "Dual Earbuds", ContextMenuStrip = menu, Visible = true };
             tray.DoubleClick += (s, e) => ShowFromTray();
+            tray.BalloonTipClicked += (s, e) =>
+            {
+                ShowFromTray();
+                var u = ctl.UpdateResult;
+                if (u != null && u.Status == UpdateStatus.Available) View.Navigate("settings");
+            };
             UpdateTray();
         }
 
@@ -410,6 +421,9 @@ namespace DualEarbuds
             ctl.Settings.PhoneLink = true;
             ctl.Settings.PhonePort = 8790;
             ctl.Settings.Hotkey = true;
+            ctl.Settings.Party = false;
+            ctl.Settings.CheckUpdates = true;
+            // NetworkScope stays: it mirrors the firewall rule, which only changes with Windows' permission
             ctl.Settings.Outs.Clear();
             try { StartupReg.Set(false, ""); } catch { }
             ctl.ResetLinkKey();

@@ -195,6 +195,40 @@ namespace DualEarbuds
     </Setter>
   </Style>
 
+  <!-- Choice card (one of a few options, each with a title and a one-line explanation) -->
+  <Style x:Key='Choice' TargetType='RadioButton'>
+    <Setter Property='Foreground' Value='{DynamicResource Text}'/>
+    <Setter Property='Cursor' Value='Hand'/>
+    <Setter Property='Margin' Value='0,4'/>
+    <Setter Property='Template'>
+      <Setter.Value>
+        <ControlTemplate TargetType='RadioButton'>
+          <Border x:Name='b' Background='{DynamicResource Surface2}' BorderBrush='{DynamicResource Line}' BorderThickness='1' CornerRadius='12' Padding='14,12'>
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width='Auto'/><ColumnDefinition Width='*'/></Grid.ColumnDefinitions>
+              <Grid Width='18' Height='18' VerticalAlignment='Top' Margin='0,1,12,0'>
+                <Ellipse x:Name='ring' Stroke='{DynamicResource Muted}' StrokeThickness='2'/>
+                <Ellipse x:Name='dot' Width='8' Height='8' Fill='{DynamicResource Accent}' Visibility='Collapsed'/>
+              </Grid>
+              <ContentPresenter Grid.Column='1' VerticalAlignment='Center'/>
+            </Grid>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property='IsMouseOver' Value='True'><Setter TargetName='b' Property='BorderBrush' Value='{DynamicResource Muted}'/></Trigger>
+            <Trigger Property='IsChecked' Value='True'>
+              <Setter TargetName='b' Property='BorderBrush' Value='{DynamicResource Accent}'/>
+              <Setter TargetName='b' Property='Background' Value='{DynamicResource AccentSoft}'/>
+              <Setter TargetName='ring' Property='Stroke' Value='{DynamicResource Accent}'/>
+              <Setter TargetName='dot' Property='Visibility' Value='Visible'/>
+            </Trigger>
+            <Trigger Property='IsKeyboardFocused' Value='True'><Setter TargetName='b' Property='BorderBrush' Value='{DynamicResource Accent}'/></Trigger>
+            <Trigger Property='IsEnabled' Value='False'><Setter TargetName='b' Property='Opacity' Value='0.55'/></Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
   <!-- Toggle switch -->
   <Style x:Key='Switch' TargetType='CheckBox'>
     <Setter Property='Cursor' Value='Hand'/>

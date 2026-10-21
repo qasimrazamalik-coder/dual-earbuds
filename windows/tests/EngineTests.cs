@@ -40,6 +40,15 @@ static class EngineTests
         Run("Slow-header protection", TestSlowHeaders);
         Run("Wrong-key lockout", TestLockout);
         Run("Network category parsing", TestNetCategory);
+        Run("Web player resource", TestPlayerResource);
+        Run("10 ms packets", TestPacketizer);
+        Run("Party mode", TestParty);
+        Run("Listener control + kick", TestControlKick);
+        Run("Version compare", TestVersions);
+        Run("Release JSON", TestReleaseJson);
+        Run("Updater safety checks", TestUpdaterChecks);
+        Run("Nested JSON", TestNestedJson);
+        Run("Firewall script", TestFirewallScript);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -168,6 +177,17 @@ static class EngineTests
         var u = Settings.Load(path);
         Check(u.PhonePort == 8790 && u.Theme == "system" && LinkKey.IsValid(u.LinkKey), "bad values ignored");
         Check(u.For("x").DelayMs == 1000 && u.For("x").Volume == 0, "out values clamped");
+        Check(u.CheckUpdates && !u.Party && u.NetworkScope == Settings.NetScopeAll && u.LastUpdateCheckUtc == DateTime.MinValue, "v3 defaults: auto update on, party off, private+public");
+
+        var v = Settings.Load(path);
+        var when = new DateTime(2026, 10, 21, 8, 30, 0, DateTimeKind.Utc);
+        v.Party = true; v.CheckUpdates = false; v.LastUpdateCheckUtc = when; v.NetworkScope = Settings.NetScopePrivate;
+        v.Save(path);
+        var w = Settings.Load(path);
+        Check(w.Party && !w.CheckUpdates && w.LastUpdateCheckUtc == when && w.LastUpdateCheckUtc.Kind == DateTimeKind.Utc && w.NetworkScope == "private", "v3 settings round trip");
+        File.WriteAllLines(path, new[] { "netscope\teverything", "updatechecked\tsoon" });
+        var x = Settings.Load(path);
+        Check(x.NetworkScope == Settings.NetScopeAll && x.LastUpdateCheckUtc == DateTime.MinValue, "bad v3 values ignored");
     }
 
     static void TestJson()
@@ -230,7 +250,11 @@ static class EngineTests
             string page = Http(port, "GET /?k=abcd2345 HTTP/1.1");
             Check(page.StartsWith("HTTP/1.1 200") && page.Contains("Dual Earbuds") && page.Contains("mediaSession"), "page with key (any case)");
             string info = Http(port, "GET /info?k=ABCD2345 HTTP/1.1");
-            Check(info.StartsWith("HTTP/1.1 200") && info.Contains("\"protocol\":2") && info.Contains("\"format\":\"s16le\""), "info json");
+            Check(info.StartsWith("HTTP/1.1 200") && info.Contains("\"protocol\":3") && info.Contains("\"format\":\"s16le\""), "info json");
+            Check(info.Contains("\"host\":\"windows\"") && info.Contains("\"party\":false") && info.Contains("\"maxClients\":8") && info.Contains("\"version\":\"3.0.0\""), "info v3 fields");
+            var infoJson = MiniJson.ParseObject(info.Substring(info.IndexOf("\r\n\r\n") + 4));
+            Check(MiniJson.GetInt(infoJson, "protocol", 0) == 3 && MiniJson.GetString(infoJson, "app", "") == "DualEarbuds" && MiniJson.GetInt(infoJson, "rate", -1) == 0 && MiniJson.GetInt(infoJson, "channels", 0) == 2, "info json parses, rate 0 while not sharing");
+            Check(page.Contains(WebPlayer.Html.Substring(0, 200)) && page.Length > WebPlayer.Html.Length, "served page is the embedded player");
             Check(Http(port, "GET /info HTTP/1.1").StartsWith("HTTP/1.1 403"), "info needs key");
             Check(Http(port, "GET /favicon.ico HTTP/1.1").StartsWith("HTTP/1.1 204"), "favicon 204");
             Check(Http(port, "GET /nope?k=ABCD2345 HTTP/1.1").StartsWith("HTTP/1.1 404"), "unknown path 404");
@@ -371,15 +395,19 @@ static class EngineTests
             {
                 Check(w.Handshake.StartsWith("HTTP/1.1 101") && w.AcceptOk, "ws handshake + accept key");
                 string hello = w.NextText(5);
-                Check(hello != null && hello.Contains("\"type\":\"hello\"") && hello.Contains("TEST-PC") && hello.Contains("\"protocol\":2"), "hello message");
+                Check(hello != null && hello.Contains("\"type\":\"hello\"") && hello.Contains("TEST-PC") && hello.Contains("\"protocol\":3"), "hello message");
+                var hj = hello == null ? new Dictionary<string, object>() : MiniJson.ParseObject(hello);
+                Check(MiniJson.GetString(hj, "host", "") == "windows" && MiniJson.GetString(hj, "version", "") == AppInfo.Version && hj.ContainsKey("party") && !MiniJson.GetBool(hj, "party", true) && MiniJson.GetInt(hj, "rate", -1) == 0, "hello v3 fields");
                 Check(WaitFor(() => link.ClientCount == 1, 1000), "client counted");
                 var snap = link.Snapshot();
                 Check(snap.Count == 1 && snap[0].Name == "Redmi Note 12" && snap[0].Client == "android", "name and client type from query");
 
-                w.SendText("{\"type\":\"status\",\"device\":\"Redmi Note 12\",\"earbuds\":\"Evo Z-Buds\",\"battery\":80,\"volume\":120,\"bufferMs\":200,\"playing\":true}");
+                w.SendText("{\"type\":\"status\",\"device\":\"Redmi Note 12\",\"earbuds\":\"Evo Z-Buds\",\"battery\":80,\"volume\":120,\"bufferMs\":200,\"underruns\":3,\"playing\":true}");
                 Check(WaitFor(() => { var s = link.Snapshot(); return s.Count == 1 && s[0].Battery == 80; }, 1500), "status received");
                 var p0 = link.Snapshot()[0];
                 Check(p0.Earbuds == "Evo Z-Buds" && p0.Volume == 120 && p0.BufferMs == 200 && p0.Playing, "status fields");
+                Check(p0.Underruns == 3, "underruns parsed from status");
+                Check(!string.IsNullOrEmpty(p0.Id) && link.Snapshot()[0].Id == p0.Id, "listener has a stable id");
 
                 w.SendText("{\"type\":\"status\",\"battery\":250}");
                 Check(WaitFor(() => link.Snapshot()[0].Battery == -1, 1500), "out-of-range battery becomes -1");
@@ -391,9 +419,10 @@ static class EngineTests
                 string state = w.NextText(10);
                 Check(state != null && state.Contains("\"mirroring\":true") && state.Contains("48000"), "state message");
 
-                var data = new float[] { 0.5f, -0.5f, 0.25f, -0.25f };
-                link.Broadcast(data, 2, 48000);
-                link.Broadcast(data, 2, 48000);
+                var data = new float[480 * 2];
+                for (int i = 0; i < 480; i++) { data[2 * i] = i == 0 ? 0.5f : 0.25f; data[2 * i + 1] = i == 0 ? -0.5f : -0.25f; }
+                link.Broadcast(data, 480, 48000);
+                link.Broadcast(data, 480, 48000);
                 byte[] a1 = null, a2 = null;
                 for (int i = 0; i < 10 && a2 == null; i++)
                 {
@@ -402,7 +431,7 @@ static class EngineTests
                     if (op == 2) { if (a1 == null) a1 = p; else a2 = p; }
                     if (op < 0) break;
                 }
-                Check(a1 != null && a1.Length == 8 + 8 && BitConverter.ToInt32(a1, 0) == 48000, "audio packet header + size");
+                Check(a1 != null && a1.Length == 8 + 480 * 4 && BitConverter.ToInt32(a1, 0) == 48000, "audio packet header + size (10 ms)");
                 Check(a1 != null && BitConverter.ToInt16(a1, 8) == 16383 && BitConverter.ToInt16(a1, 10) == -16383, "audio samples s16le");
                 Check(a1 != null && a2 != null && BitConverter.ToUInt32(a2, 4) == BitConverter.ToUInt32(a1, 4) + 1, "sequence increments");
 
@@ -589,5 +618,243 @@ static class EngineTests
         Check(NetworkInfo.Parse(o, 7) == "Private", "private adapter found");
         Check(NetworkInfo.Parse(o, 3) == null, "unknown adapter -> unknown");
         Check(NetworkInfo.Parse("", 3) == null && NetworkInfo.Parse("junk", 3) == null, "bad output -> unknown");
+    }
+
+    // ------------------------------------------------------------------ v3
+    static void TestPlayerResource()
+    {
+        string fromResource;
+        using (var st = typeof(WebPlayer).Assembly.GetManifestResourceStream(WebPlayer.ResourceName))
+        {
+            Check(st != null, "player page embedded as manifest resource 'web-player.html'");
+            using (var r = new StreamReader(st, Encoding.UTF8)) fromResource = r.ReadToEnd();
+        }
+        Check(WebPlayer.Html == fromResource, "WebPlayer.Html is the embedded page");
+        Check(ReferenceEquals(WebPlayer.Html, WebPlayer.Html) && ReferenceEquals(WebPlayer.HtmlBytes, WebPlayer.HtmlBytes), "page is cached");
+        string shared = Path.Combine("shared", "web-player.html");
+        if (File.Exists(shared)) Check(File.ReadAllText(shared, Encoding.UTF8) == WebPlayer.Html, "embedded page matches shared/web-player.html");
+        Check(WebPlayer.Html.Contains("mediaSession") && WebPlayer.ForbiddenHtml.Contains("missing its key"), "player + forbidden pages");
+    }
+
+    static void TestPacketizer()
+    {
+        int port = FreePort();
+        var link = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        link.Start();
+        try
+        {
+            using (var w = WsClient.Open(port, "k=ABCD2345"))
+            {
+                w.NextText(3);
+                WaitFor(() => link.ClientCount == 1, 1000);
+                Check(PhoneLink.PacketFrames(48000) == 480 && PhoneLink.PacketFrames(44100) == 441, "10 ms = 480 frames at 48 kHz, 441 at 44.1 kHz");
+                // capture delivers odd sizes: 300 + 300 + 1100 frames = 1700 -> three 10 ms packets, 260 frames pending
+                var d = new float[1100 * 2];
+                for (int i = 0; i < d.Length / 2; i++) { d[2 * i] = 0.5f; d[2 * i + 1] = -0.5f; }
+                link.Broadcast(d, 300, 48000);
+                link.Broadcast(d, 300, 48000);
+                link.Broadcast(d, 1100, 48000);
+                var sizes = new List<int>();
+                var seqs = new List<uint>();
+                for (int i = 0; i < 10 && sizes.Count < 3; i++)
+                {
+                    byte[] p;
+                    int op = w.Receive(out p);
+                    if (op < 0) break;
+                    if (op == 2) { sizes.Add(p.Length - 8); seqs.Add(BitConverter.ToUInt32(p, 4)); }
+                }
+                Check(sizes.Count == 3 && sizes.TrueForAll(n => n == 480 * 4), "odd capture sizes re-cut into exact 10 ms packets");
+                Check(seqs.Count == 3 && seqs[1] == seqs[0] + 1 && seqs[2] == seqs[1] + 1, "sequence +1 per packet");
+                // a rate change throws away the partial packet instead of mixing rates
+                link.Broadcast(d, 441, 44100);
+                byte[] q;
+                int op2 = w.Receive(out q);
+                Check(op2 == 2 && q.Length == 8 + 441 * 4 && BitConverter.ToInt32(q, 0) == 44100, "rate change starts a clean 10 ms packet");
+            }
+        }
+        finally { link.Stop(); }
+    }
+
+    static void TestParty()
+    {
+        int port = FreePort();
+        var link = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        link.Start();
+        var clients = new List<WsClient>();
+        try
+        {
+            Check(PhoneLink.MaxClientsParty == 16 && link.Capacity == PhoneLink.MaxClients, "8 listeners normally");
+            var first = WsClient.Open(port, "k=ABCD2345");
+            clients.Add(first);
+            first.NextText(3);
+            link.Party = true;
+            string msg = first.NextText(10);
+            Check(msg != null && msg.Contains("\"type\":\"party\"") && msg.Contains("\"on\":true"), "party message broadcast");
+            Check(link.Capacity == 16, "party allows 16");
+            string info = Http(port, "GET /info?k=ABCD2345 HTTP/1.1");
+            Check(info.Contains("\"party\":true") && info.Contains("\"maxClients\":16"), "info shows party + 16");
+            using (var h = WsClient.Open(port, "k=ABCD2345"))
+            {
+                string hello = h.NextText(3);
+                Check(hello != null && hello.Contains("\"party\":true"), "hello shows party");
+            }
+            WaitFor(() => link.ClientCount == 1, 2000);
+            for (int i = 1; i < PhoneLink.MaxClientsParty; i++) clients.Add(WsClient.Open(port, "k=ABCD2345"));
+            Check(WaitFor(() => link.ClientCount == 16, 3000), "16 listeners connected in party mode (" + link.ClientCount + ")");
+            using (var extra = WsClient.Open(port, "k=ABCD2345"))
+                Check(extra.Handshake.StartsWith("HTTP/1.1 503"), "17th listener gets 503");
+            link.Party = false;
+            Check(link.ClientCount == 16, "switching party off keeps connected listeners");
+            using (var extra = WsClient.Open(port, "k=ABCD2345"))
+                Check(extra.Handshake.StartsWith("HTTP/1.1 503"), "no new listeners above 8 after party off");
+            Check(PhoneLink.PartyMessage(false) == "{\"type\":\"party\",\"on\":false}", "party off message");
+        }
+        finally
+        {
+            foreach (var c in clients) c.Dispose();
+            link.Stop();
+        }
+    }
+
+    static void TestControlKick()
+    {
+        Check(PhoneLink.ControlMessage(80) == "{\"type\":\"control\",\"volume\":80}", "control message");
+        Check(PhoneLink.ControlMessage(400).Contains(":150}") && PhoneLink.ControlMessage(-3).Contains(":0}"), "control volume clamped to 0-150");
+        var km = MiniJson.ParseObject(PhoneLink.KickMessage(null));
+        Check(MiniJson.GetString(km, "type", "") == "kick" && MiniJson.GetString(km, "reason", "") == "Removed by the host", "kick message");
+
+        int port = FreePort();
+        var link = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        link.Start();
+        try
+        {
+            using (var a = WsClient.Open(port, "k=ABCD2345&name=A"))
+            using (var b = WsClient.Open(port, "k=ABCD2345&name=B"))
+            {
+                a.NextText(3); b.NextText(3);
+                Check(WaitFor(() => link.ClientCount == 2, 1000), "two listeners");
+                var snap = link.Snapshot();
+                string idA = snap.Find(p => p.Name == "A").Id, idB = snap.Find(p => p.Name == "B").Id;
+                Check(idA != idB, "ids are distinct");
+                Check(link.SetVolume(idA, 135), "set volume on a listener");
+                string ctl = a.NextText(10);
+                Check(ctl == "{\"type\":\"control\",\"volume\":135}", "listener receives control");
+                Check(link.Snapshot().Find(p => p.Id == idA).Volume == 135, "host shows the new volume right away");
+                Check(!link.SetVolume("nope", 50), "unknown id ignored");
+
+                Check(link.Kick(idB), "kick a listener");
+                string kick = b.NextText(10);
+                Check(kick != null && kick.Contains("\"type\":\"kick\""), "listener receives kick first");
+                Check(b.IsClosedByServer(), "kicked listener is closed");
+                Check(WaitFor(() => link.ClientCount == 1, 2000) && link.Snapshot()[0].Id == idA, "other listener stays");
+                Check(!link.Kick(idB), "kicking twice is harmless");
+            }
+        }
+        finally { link.Stop(); }
+    }
+
+    static void TestVersions()
+    {
+        Check(Updater.CompareVersions("v3.0.0", "3.0.0") == 0, "v prefix ignored");
+        Check(Updater.CompareVersions("v3.0.10", "v3.0.9") > 0, "numeric, not text, compare");
+        Check(Updater.CompareVersions("v10.0.0", "v9.9.9") > 0, "major wins");
+        Check(Updater.CompareVersions("3.1", "3.1.0") == 0 && Updater.CompareVersions("3", "3.0.0") == 0, "missing parts are zero");
+        Check(Updater.CompareVersions("v2.9.9", "3.0.0") < 0, "older");
+        Check(Updater.IsNewer("v3.0.1", AppInfo.Version) && !Updater.IsNewer("v3.0.0", "3.0.0") && !Updater.IsNewer("v2.5.0", "3.0.0"), "IsNewer");
+        Check(Updater.ParseVersion("v3.1.0-beta.2") != null && Updater.ParseVersion("v3.1.0-beta.2")[1] == 1, "suffix ignored");
+        Check(Updater.ParseVersion("latest") == null && Updater.ParseVersion("") == null && Updater.ParseVersion("1.2.3.4") == null && Updater.ParseVersion("v1..2") == null && Updater.ParseVersion("-1.0.0") == null, "garbage is not a version");
+        Check(!Updater.IsNewer("nightly", "3.0.0") && Updater.CompareVersions("junk", "1.0.0") < 0, "garbage never counts as newer");
+    }
+
+    const string SampleRelease = @"{
+  ""url"": ""https://api.github.com/repos/qasimrazamalik-coder/dual-earbuds/releases/1"",
+  ""html_url"": ""https://github.com/qasimrazamalik-coder/dual-earbuds/releases/tag/v3.2.0"",
+  ""id"": 1, ""tag_name"": ""v3.2.0"", ""name"": ""Dual Earbuds 3.2"", ""draft"": false, ""prerelease"": false,
+  ""author"": { ""login"": ""qasimrazamalik-coder"", ""id"": 7, ""site_admin"": false },
+  ""assets"": [
+    { ""name"": ""DualEarbuds.apk"", ""size"": 5242880, ""browser_download_url"": ""https://github.com/qasimrazamalik-coder/dual-earbuds/releases/download/v3.2.0/DualEarbuds.apk"",
+      ""uploader"": { ""login"": ""x"" } },
+    { ""name"": ""DualEarbuds-Setup.exe"", ""size"": 412345, ""content_type"": ""application/x-msdownload"",
+      ""uploader"": { ""login"": ""x"", ""ids"": [1, 2, [3]] },
+      ""browser_download_url"": ""https://github.com/qasimrazamalik-coder/dual-earbuds/releases/download/v3.2.0/DualEarbuds-Setup.exe"" }
+  ],
+  ""body"": ""## What's new\r\n- Party mode \u2014 up to 16 phones\r\n- \""Faster\"" link"",
+  ""reactions"": { ""+1"": 3, ""heart"": 1 }
+}";
+
+    static void TestReleaseJson()
+    {
+        var r = Updater.ParseRelease(SampleRelease);
+        Check(r.Tag == "v3.2.0" && r.Version == "3.2.0", "tag_name parsed");
+        Check(r.SetupUrl == "https://github.com/qasimrazamalik-coder/dual-earbuds/releases/download/v3.2.0/DualEarbuds-Setup.exe" && r.SetupSize == 412345, "Windows installer asset picked (not the apk)");
+        Check(r.Notes.StartsWith("## What's new\n- Party mode \u2014 up to 16 phones") && r.Notes.Contains("\"Faster\""), "body parsed with escapes");
+        Check(r.PageUrl.EndsWith("/tag/v3.2.0"), "html_url");
+        Check(Updater.NotesForDisplay(r.Notes) == "What's new\n\u2022 Party mode \u2014 up to 16 phones\n\u2022 \"Faster\" link", "notes shown as plain text");
+        Check(Updater.NotesForDisplay(null) == "" && Updater.NotesForDisplay(new string('x', 9000)).Length <= Updater.MaxNotesChars + 3, "notes: empty and capped");
+        var e = Updater.Evaluate(r, "3.0.0");
+        Check(e.Status == UpdateStatus.Available && e.Message.Contains("3.2.0"), "newer release is offered");
+        Check(Updater.Evaluate(r, "3.2.0").Status == UpdateStatus.UpToDate && Updater.Evaluate(r, "4.0.0").Status == UpdateStatus.UpToDate, "same or older is up to date");
+
+        var noExe = Updater.ParseRelease("{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"DualEarbuds.apk\",\"browser_download_url\":\"https://github.com/a.apk\"}]}");
+        Check(noExe.SetupUrl == null && Updater.Evaluate(noExe, "3.0.0").Status == UpdateStatus.Error, "release without installer is not offered");
+        var evil = Updater.ParseRelease("{\"tag_name\":\"v9.0.0\",\"assets\":[{\"name\":\"DualEarbuds-Setup.exe\",\"browser_download_url\":\"http://evil.example/DualEarbuds-Setup.exe\"}]}");
+        Check(evil.SetupUrl == null, "installer on another host is ignored");
+        var noBody = Updater.ParseRelease("{\"tag_name\":\"3.0.1\",\"body\":null}");
+        Check(noBody.Notes == "" && noBody.Version == "3.0.1", "null body becomes empty notes");
+        bool threw = false;
+        try { Updater.ParseRelease("{\"message\":\"Not Found\",\"documentation_url\":\"https://docs.github.com\"}"); } catch (FormatException) { threw = true; }
+        Check(threw, "404 body (no tag) rejected");
+        threw = false;
+        try { Updater.ParseRelease("<html>rate limited</html>"); } catch (FormatException) { threw = true; }
+        Check(threw, "non-JSON rejected");
+    }
+
+    static void TestUpdaterChecks()
+    {
+        Check(Updater.LatestUrl == "https://api.github.com/repos/qasimrazamalik-coder/dual-earbuds/releases/latest", "latest release URL");
+        Check(Updater.IsAllowedDownloadUrl("https://github.com/qasimrazamalik-coder/dual-earbuds/releases/download/v3.0.1/DualEarbuds-Setup.exe"), "github.com allowed");
+        Check(Updater.IsAllowedDownloadUrl("https://objects.githubusercontent.com/github-production-release-asset/1?x=y"), "objects.githubusercontent.com allowed");
+        Check(!Updater.IsAllowedDownloadUrl("http://github.com/x.exe"), "plain http refused");
+        Check(!Updater.IsAllowedDownloadUrl("https://github.com.evil.example/x.exe") && !Updater.IsAllowedDownloadUrl("https://evilgithub.com/x.exe"), "look-alike hosts refused");
+        Check(!Updater.IsAllowedDownloadUrl("https://user@github.com/x.exe") && !Updater.IsAllowedDownloadUrl("https://github.com:8443/x.exe"), "user info / odd ports refused");
+        Check(!Updater.IsAllowedDownloadUrl(null) && !Updater.IsAllowedDownloadUrl("not a url") && !Updater.IsAllowedDownloadUrl("file:///C:/x.exe"), "junk refused");
+
+        var mz = new byte[] { (byte)'M', (byte)'Z' };
+        Check(Updater.LooksLikeInstaller(mz, 500 * 1024), "MZ + 500 KB looks like an installer");
+        Check(!Updater.LooksLikeInstaller(mz, 50 * 1024), "too small refused");
+        Check(!Updater.LooksLikeInstaller(new byte[] { (byte)'<', (byte)'h' }, 500 * 1024) && !Updater.LooksLikeInstaller(null, 500 * 1024), "not MZ refused");
+
+        var now = new DateTime(2026, 10, 21, 12, 0, 0, DateTimeKind.Utc);
+        Check(Updater.ShouldAutoCheck(true, DateTime.MinValue, now), "never checked -> check");
+        Check(!Updater.ShouldAutoCheck(true, now.AddHours(-23), now), "within 24 h -> wait");
+        Check(Updater.ShouldAutoCheck(true, now.AddHours(-24), now), "after 24 h -> check");
+        Check(!Updater.ShouldAutoCheck(false, DateTime.MinValue, now), "switched off -> never");
+        Check(Updater.ShouldAutoCheck(true, now.AddDays(3), now), "clock moved back -> check");
+    }
+
+    static void TestNestedJson()
+    {
+        var o = MiniJson.Parse("{\"a\":[1,{\"b\":[true,null,\"x\"]}],\"c\":{}}") as Dictionary<string, object>;
+        Check(o != null && ((List<object>)o["a"]).Count == 2 && o["c"] is Dictionary<string, object>, "nested objects and arrays");
+        var inner = (Dictionary<string, object>)((List<object>)o["a"])[1];
+        Check(((List<object>)inner["b"])[2] as string == "x", "deep value");
+        bool threw = false;
+        try { MiniJson.Parse(new string('[', 100) + new string(']', 100)); } catch (FormatException) { threw = true; }
+        Check(threw, "deep nesting rejected");
+        threw = false;
+        try { MiniJson.Parse("{\"a\":1} x"); } catch (FormatException) { threw = true; }
+        Check(threw, "trailing garbage rejected");
+        Check(MiniJson.ParseObject("{\"type\":\"pong\",\"t\":5,\"x\":[1,2]}").Count == 3, "flat parser unchanged");
+    }
+
+    static void TestFirewallScript()
+    {
+        string add = Firewall.BuildScript(@"C:\Users\O'Neil\AppData\Local\Programs\Dual Earbuds\DualEarbuds.exe", true, Firewall.ProfilePrivate);
+        Check(add.Contains("HNetCfg.FwPolicy2") && add.Contains("$r.Profiles = 2;") && add.Contains("'Dual Earbuds (phone link)'"), "private-only rule script");
+        Check(add.Contains("'C:\\Users\\O''Neil\\AppData"), "path quoted for PowerShell");
+        Check(Firewall.BuildScript("x", true, Firewall.ProfilesFor(Settings.NetScopeAll)).Contains("$r.Profiles = 6;"), "private + public = 6");
+        Check(Firewall.ProfilesFor(Settings.NetScopePrivate) == 2, "private scope = 2");
+        Check(!Firewall.BuildScript("x", false, 6).Contains("FWRule"), "remove-only script adds nothing");
+        Check(Encoding.Unicode.GetString(Convert.FromBase64String(PsScript.Encode(add))) == add, "encoded command round trip");
     }
 }

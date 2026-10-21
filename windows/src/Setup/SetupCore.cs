@@ -31,7 +31,7 @@ namespace DualEarbuds.Setup
     {
         public const string AppExe = "DualEarbuds.exe";
         public const string SetupExe = "DualEarbuds-Setup.exe";
-        public const string RuleName = "Dual Earbuds (phone link)";
+        public const string RuleName = Firewall.RuleName;
         const string UninstallKeyName = "DualEarbudsPro";
 
         // Test mode keeps everything inside one folder and a private registry key.
@@ -154,7 +154,9 @@ namespace DualEarbuds.Setup
             if (o.FirewallRule && !Test)
             {
                 Progress("Allowing phones through the firewall (Windows will ask)...");
-                bool ok = SetFirewallRule(exe, true);
+                // private and public networks by default, so it also works on cafe/hotel Wi-Fi; the link key and the
+                // app's wrong-key lockout protect it. The app's Settings can narrow it to home networks.
+                bool ok = Firewall.Apply(exe, true, Firewall.ProfilesPrivateAndPublic) == FirewallResult.Ok;
                 if (!ok)
                 {
                     Progress("Firewall rule skipped - Windows will ask the first time a phone connects.");
@@ -173,6 +175,16 @@ namespace DualEarbuds.Setup
             o.Folder = info.Folder;
             o.FirewallRule = false;            // keep the existing rule; repair never prompts
             Install(o, appBytes, setupSourcePath);
+        }
+
+        // In-place upgrade started by the app's updater: same folder, shortcuts, startup and firewall
+        // choices as the installed copy, no prompts. Returns the app to start again afterwards.
+        public string Update(byte[] appBytes, string setupSourcePath)
+        {
+            var info = Installed();
+            if (info == null) throw new InvalidOperationException("Dual Earbuds is not installed.");
+            Repair(appBytes, setupSourcePath);
+            return Path.Combine(info.Folder, AppExe);
         }
 
         // ------------------------------------------------------------------ uninstall
@@ -195,7 +207,7 @@ namespace DualEarbuds.Setup
             if (info.Options.FirewallRule && !Test)
             {
                 Progress("Removing the firewall rule (Windows will ask)...");
-                SetFirewallRule(Path.Combine(folder, AppExe), false);
+                Firewall.Apply(Path.Combine(folder, AppExe), false, 0);
             }
 
             Progress("Removing files...");
@@ -320,18 +332,14 @@ namespace DualEarbuds.Setup
             try
             {
                 string script = "Start-Sleep -Seconds 3; " +
-                    "Remove-Item -LiteralPath " + PsQuote(file) + " -Force -ErrorAction SilentlyContinue; " +
-                    "try { [IO.Directory]::Delete(" + PsQuote(folder) + ") } catch { }";   // only if empty
-                var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Encode(script))
+                    "Remove-Item -LiteralPath " + PsScript.Quote(file) + " -Force -ErrorAction SilentlyContinue; " +
+                    "try { [IO.Directory]::Delete(" + PsScript.Quote(folder) + ") } catch { }";   // only if empty
+                var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + PsScript.Encode(script))
                     { CreateNoWindow = true, UseShellExecute = false, WindowStyle = ProcessWindowStyle.Hidden };
                 Process.Start(psi);
             }
             catch { }
         }
-
-        static string PsQuote(string s) { return "'" + s.Replace("'", "''") + "'"; }
-
-        static string Encode(string script) { return Convert.ToBase64String(System.Text.Encoding.Unicode.GetBytes(script)); }
 
         public static void CreateShortcut(string lnk, string target, string workDir)
         {
@@ -350,32 +358,6 @@ namespace DualEarbuds.Setup
                 System.Runtime.InteropServices.Marshal.FinalReleaseComObject(sc);
             }
             finally { System.Runtime.InteropServices.Marshal.FinalReleaseComObject(shell); }
-        }
-
-        // Adds or removes the inbound rule with an elevated netsh (Windows shows its permission prompt).
-        static bool SetFirewallRule(string exe, bool add)
-        {
-            try
-            {
-                // Private and public networks, so it also works on cafe/hotel Wi-Fi. The link key and the
-                // app's wrong-key lockout protect it; Windows asks for permission once.
-                string script =
-                    "$fw = New-Object -ComObject HNetCfg.FwPolicy2; " +
-                    "while (@($fw.Rules | Where-Object { $_.Name -eq " + PsQuote(RuleName) + " }).Count -gt 0) { $fw.Rules.Remove(" + PsQuote(RuleName) + ") }; " +
-                    (add
-                        ? "$r = New-Object -ComObject HNetCfg.FWRule; $r.Name = " + PsQuote(RuleName) + "; $r.ApplicationName = " + PsQuote(exe) + "; " +
-                          "$r.Protocol = 6; $r.Direction = 1; $r.Action = 1; $r.Profiles = 6; $r.Enabled = $true; $fw.Rules.Add($r); "
-                        : "") +
-                    "exit 0";
-                var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -EncodedCommand " + Encode(script))
-                    { Verb = "runas", UseShellExecute = true, WindowStyle = ProcessWindowStyle.Hidden };
-                using (var p = Process.Start(psi))
-                {
-                    p.WaitForExit(30000);
-                    return p.ExitCode == 0;
-                }
-            }
-            catch { return false; }   // the user said No, or no rights
         }
     }
 }
