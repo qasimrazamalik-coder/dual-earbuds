@@ -352,8 +352,16 @@ namespace DualEarbuds
                 }
                 string tmp = path + ".tmp";
                 File.WriteAllLines(tmp, lines.ToArray());
-                if (File.Exists(path)) File.Replace(tmp, path, null);   // atomic: never leaves no settings file
-                else File.Move(tmp, path);
+                if (!File.Exists(path)) { File.Move(tmp, path); return; }
+                try { File.Replace(tmp, path, null, true); }   // atomic: never leaves no settings file
+                catch (Exception ex)
+                {
+                    // File.Replace is refused on some systems (EFS-encrypted profiles, odd ACLs, sync tools).
+                    // Fall back to an in-place overwrite; the .tmp copy stays valid until it succeeds.
+                    Log.Info("Settings save: replace refused (" + ex.Message + "), overwriting");
+                    File.Copy(tmp, path, true);
+                    File.Delete(tmp);
+                }
             }
             catch (Exception ex) { Log.Warn("Settings save: " + ex.Message); }
         }
