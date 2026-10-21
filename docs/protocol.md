@@ -1,7 +1,8 @@
 # Dual Earbuds — Link Protocol v3
 
 The shared contract between every **host** (the Windows app, or an Android phone in *Share this phone* mode)
-and every **listener** (the Android app, or the browser player page any host serves).
+and every **listener** (the Android app, the Windows app in *Listen to another device* mode — laptop to laptop —,
+or the browser player page any host serves, opened from the link on any device).
 Everything runs on the local network or a hotspot. There is no cloud server.
 
 v3 is backward compatible with v2: a v2 listener keeps working with a v3 host, and the reverse, because
@@ -39,7 +40,7 @@ unknown fields and message types are ignored.
 
 ## WebSocket
 
-`GET /ws?k=KEY&client=<web|android>&name=<url-encoded device name>` with the usual upgrade headers.
+`GET /ws?k=KEY&client=<web|android|windows>&name=<url-encoded device name>` with the usual upgrade headers.
 
 ### Host → listener
 
@@ -88,6 +89,12 @@ Packets carry **10 ms** of sound. A listener that falls behind gets old packets 
 - On an underrun (nothing to play): +20 ms, and stay there for 10 s.
 - After 20 s with no underruns: −5 ms per 5 s down to the minimum.
 - A manual *Delay* setting in the listener adds to this and is never changed automatically.
+
+## Joining
+
+Every listener joins the same way: scan the QR code **or paste the link** (`http://IP:PORT/?k=KEY`).
+Listeners also accept `IP:PORT/?k=KEY`; a missing port means 8790; keys are case-insensitive.
+Opening the link in any browser (phone, laptop, tablet, iPhone) plays the sound with no install.
 
 ## Limits
 
