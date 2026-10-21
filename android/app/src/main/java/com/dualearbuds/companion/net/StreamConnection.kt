@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 data class WsEnd(val opened: Boolean, val httpCode: Int, val reason: String)
 
 /**
- * One web socket session to the laptop (PROTOCOL.md v2). Callbacks run on OkHttp's reader thread and
+ * One web socket session to a host (docs/protocol.md v3). Callbacks run on OkHttp's reader thread and
  * must not block for long.
  */
 class StreamConnection(
@@ -32,8 +32,15 @@ class StreamConnection(
 ) {
     interface Callbacks {
         fun onOpened()
-        fun onHello(pc: String, rate: Int)
+        /** v3 `hello`. [host] and [party] are UNKNOWN/false from v2 hosts. */
+        fun onHello(pc: String, rate: Int, host: HostKind, party: Boolean)
         fun onMirroring(mirroring: Boolean, rate: Int)
+        /** v3 `party`: Party mode switched on the host. */
+        fun onParty(on: Boolean)
+        /** v3 `control`: the host set this listener's volume (0–150 %). */
+        fun onControlVolume(volume: Int)
+        /** v3 `kick`: the host is about to close this listener; it must not auto-reconnect. */
+        fun onKick(reason: String)
         /** [samples] is interleaved stereo s16 (L,R,L,R…). [seq] is the unsigned 32-bit sequence number. */
         fun onPacket(rate: Int, seq: Long, samples: ShortArray)
     }
@@ -99,7 +106,7 @@ class StreamConnection(
                     webSocket.close(1000, null)
                 } catch (_: Throwable) {
                 }
-                done.complete(WsEnd(opened.get(), 0, "laptop closed the link ($code)"))
+                done.complete(WsEnd(opened.get(), 0, "the host closed the link ($code)"))
             }
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -118,7 +125,7 @@ class StreamConnection(
             ws.cancel()
         }
 
-        // Watchdog: the laptop pings every 2 s, so 8 s of silence means the link is dead (e.g. Wi-Fi dropped).
+        // Watchdog: the host pings every 2 s, so 8 s of silence means the link is dead (e.g. Wi-Fi dropped).
         val watchdog = launch {
             while (isActive) {
                 delay(1000)
@@ -132,7 +139,7 @@ class StreamConnection(
                         ws.cancel()
                     } catch (_: Throwable) {
                     }
-                    done.complete(WsEnd(true, 0, "no data from the laptop for 8 s"))
+                    done.complete(WsEnd(true, 0, "no data from the host for 8 s"))
                     break
                 }
             }
@@ -168,9 +175,20 @@ class StreamConnection(
                 reply.put("t", o.opt("t") ?: 0)
                 webSocket.send(reply.toString())
             }
-            "hello" -> callbacks.onHello(o.optString("pc"), o.optInt("rate", 0))
+            "hello" -> callbacks.onHello(
+                o.optString("pc"),
+                o.optInt("rate", 0),
+                HostKind.fromWire(o.optString("host")),
+                o.optBoolean("party", false)
+            )
             "state" -> callbacks.onMirroring(o.optBoolean("mirroring", true), o.optInt("rate", 0))
-            else -> Unit // Unknown types are ignored (PROTOCOL.md).
+            "party" -> callbacks.onParty(o.optBoolean("on", false))
+            "control" -> if (o.has("volume")) {
+                val v = o.optDouble("volume", Double.NaN)
+                if (!v.isNaN()) callbacks.onControlVolume(v.toInt().coerceIn(0, 150))
+            }
+            "kick" -> callbacks.onKick(o.optString("reason"))
+            else -> Unit // Unknown types are ignored (docs/protocol.md).
         }
     }
 

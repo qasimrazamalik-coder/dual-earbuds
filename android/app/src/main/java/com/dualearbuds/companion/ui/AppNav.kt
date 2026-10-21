@@ -1,11 +1,9 @@
 package com.dualearbuds.companion.ui
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.dualearbuds.companion.data.Prefs
 import com.dualearbuds.companion.ui.screens.AboutScreen
 import com.dualearbuds.companion.ui.screens.GuideScreen
 import com.dualearbuds.companion.ui.screens.HomeScreen
@@ -19,18 +17,6 @@ object Routes {
 @Composable
 fun AppNav() {
     val nav = rememberNavController()
-
-    // First run: show the background guide once, on top of Home.
-    LaunchedEffect(Unit) {
-        if (!Prefs.guideShown) {
-            try {
-                nav.navigate(Routes.GUIDE) { launchSingleTop = true }
-                Prefs.guideShown = true
-            } catch (_: Throwable) {
-                // Graph not ready yet; the guide is still reachable from the lock icon on Home.
-            }
-        }
-    }
 
     NavHost(navController = nav, startDestination = Routes.HOME) {
         composable(Routes.HOME) {

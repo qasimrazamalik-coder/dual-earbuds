@@ -5,13 +5,17 @@ import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
 
+/** GET /info (protocol v3). `host`, `party` and `maxClients` are absent on v2 hosts. */
 data class LaptopInfo(
     val pc: String,
     val version: String,
     val protocol: Int,
     val rate: Int,
     val channels: Int,
-    val format: String
+    val format: String,
+    val host: HostKind = HostKind.UNKNOWN,
+    val party: Boolean = false,
+    val maxClients: Int = 8
 )
 
 sealed interface InfoResult {
@@ -62,7 +66,10 @@ object InfoClient {
                     protocol = o.optInt("protocol", 0),
                     rate = o.optInt("rate", 0),
                     channels = o.optInt("channels", 2),
-                    format = o.optString("format", "s16le")
+                    format = o.optString("format", "s16le"),
+                    host = HostKind.fromWire(o.optString("host")),
+                    party = o.optBoolean("party", false),
+                    maxClients = o.optInt("maxClients", 8)
                 )
             )
         } catch (t: Throwable) {

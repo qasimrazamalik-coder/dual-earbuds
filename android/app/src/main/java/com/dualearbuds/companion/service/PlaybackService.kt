@@ -30,9 +30,11 @@ import com.dualearbuds.companion.audio.AudioEngine
 import com.dualearbuds.companion.audio.AudioPacket
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.bt.EarbudsState
+import com.dualearbuds.companion.data.AppSettings
 import com.dualearbuds.companion.data.Prefs
 import com.dualearbuds.companion.net.ErrorKind
 import com.dualearbuds.companion.net.Errors
+import com.dualearbuds.companion.net.HostKind
 import com.dualearbuds.companion.net.InfoClient
 import com.dualearbuds.companion.net.InfoResult
 import com.dualearbuds.companion.net.LinkParser
@@ -60,8 +62,8 @@ import java.util.concurrent.atomic.AtomicLong
 import androidx.media.app.NotificationCompat as MediaNotificationCompat
 
 /**
- * Foreground media-playback service: receives the laptop stream over a web socket, plays it through
- * [AudioEngine], keeps wake/Wi-Fi locks while playing and shows a media notification with controls.
+ * Foreground media-playback service: receives a host's stream (laptop or phone, protocol v3) over a web socket,
+ * plays it through [AudioEngine], keeps wake/Wi-Fi locks while playing and shows a media notification.
  */
 class PlaybackService : Service() {
 
@@ -111,6 +113,16 @@ class PlaybackService : Service() {
     @Volatile
     private var pcName = ""
 
+    @Volatile
+    private var hostKind = HostKind.UNKNOWN
+
+    @Volatile
+    private var party = false
+
+    /** Set when the host sent `kick`; the session then ends without reconnecting. */
+    @Volatile
+    private var kickReason: String? = null
+
     private val packets = AtomicLong()
     private val lost = AtomicLong()
 
@@ -122,7 +134,7 @@ class PlaybackService : Service() {
     override fun onCreate() {
         super.onCreate()
         engine.gain = PlaybackController.volume.value / 100f
-        engine.targetMs = PlaybackController.bufferMs.value
+        applyBufferSettings(PlaybackController.buffer.value)
         createMediaSession()
         startObservers()
     }
@@ -202,6 +214,9 @@ class PlaybackService : Service() {
         lastSeq = -1L
         mirroring = true
         pcName = ""
+        hostKind = HostKind.UNKNOWN
+        party = false
+        kickReason = null
         userMuted = false
         applyMute()
 
@@ -210,7 +225,7 @@ class PlaybackService : Service() {
         mediaSession?.isActive = true
         updateMediaSession()
 
-        engine.targetMs = PlaybackController.bufferMs.value
+        applyBufferSettings(PlaybackController.buffer.value)
         engine.gain = PlaybackController.volume.value / 100f
         engine.start()
 
@@ -219,7 +234,9 @@ class PlaybackService : Service() {
                 status = PlayerStatus.CONNECTING,
                 target = target,
                 error = null,
-                message = "Looking for the laptop at ${target.display}…",
+                message = "Looking for ${target.display}…",
+                hostKind = HostKind.UNKNOWN,
+                party = false,
                 packets = 0, lost = 0, dropped = 0, underruns = 0, userMuted = false
             )
         }
@@ -251,14 +268,17 @@ class PlaybackService : Service() {
             PlaybackController.update {
                 it.copy(
                     status = if (it.status == PlayerStatus.RECONNECTING) PlayerStatus.RECONNECTING else PlayerStatus.CONNECTING,
-                    message = "Looking for the laptop at ${target.display}…"
+                    message = "Looking for ${target.display}…"
                 )
             }
             val info = withContext(Dispatchers.IO) { InfoClient.fetch(Net.infoHttp, target) }
             if (info is InfoResult.Ok) {
                 pcName = info.info.pc
                 mirroring = info.info.rate > 0
-                PlaybackController.update { it.copy(pcName = pcName, error = null) }
+                hostKind = info.info.host
+                party = info.info.party
+                PlaybackController.update { it.copy(pcName = pcName, hostKind = hostKind, party = party, error = null) }
+                AppSettings.rememberHost(target, pcName, hostKind)
             } else {
                 val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
                 if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
@@ -276,6 +296,12 @@ class PlaybackService : Service() {
             if (connection === conn) connection = null
             engine.flush()
 
+            val kicked = kickReason
+            if (kicked != null) {
+                // Protocol v3: never auto-reconnect after a kick.
+                fatal = Errors.kicked(kicked)
+                break
+            }
             if (end.httpCode == 403) {
                 fatal = Errors.wrongKey()
                 break
@@ -284,7 +310,7 @@ class PlaybackService : Service() {
             val err = when (end.httpCode) {
                 503 -> Errors.serverFull()
                 0 -> if (end.opened) {
-                    UserError(ErrorKind.OTHER, "Lost the link to ${pcName.ifBlank { "the laptop" }} (${end.reason}).")
+                    UserError(ErrorKind.OTHER, "Lost the link to ${pcName.ifBlank { "the ${hostKind.noun}" }} (${end.reason}).")
                 } else {
                     Errors.notFound(applicationContext, target)
                 }
@@ -302,6 +328,7 @@ class PlaybackService : Service() {
                     status = PlayerStatus.ERROR,
                     target = target,
                     pcName = pcName,
+                    hostKind = hostKind,
                     error = error,
                     message = error?.message ?: ""
                 )
@@ -329,6 +356,7 @@ class PlaybackService : Service() {
     private val connectionCallbacks = object : StreamConnection.Callbacks {
         override fun onOpened() {
             lastSeq = -1L
+            engine.resetCounters() // `underruns` counts since connect
             PlaybackController.update {
                 it.copy(
                     status = if (mirroring) PlayerStatus.BUFFERING else PlayerStatus.LAPTOP_PAUSED,
@@ -339,15 +367,35 @@ class PlaybackService : Service() {
             sendStatus()
         }
 
-        override fun onHello(pc: String, rate: Int) {
+        override fun onHello(pc: String, rate: Int, host: HostKind, party: Boolean) {
             if (pc.isNotBlank()) pcName = pc
             mirroring = rate > 0
-            PlaybackController.update { it.copy(pcName = pcName) }
+            if (host != HostKind.UNKNOWN) hostKind = host
+            this@PlaybackService.party = party
+            PlaybackController.update { it.copy(pcName = pcName, hostKind = hostKind, party = party) }
         }
 
         override fun onMirroring(mirroring: Boolean, rate: Int) {
             this@PlaybackService.mirroring = mirroring
             if (!mirroring) engine.flush()
+        }
+
+        override fun onParty(on: Boolean) {
+            party = on
+            PlaybackController.update { it.copy(party = on) }
+        }
+
+        override fun onControlVolume(volume: Int) {
+            // Apply, then report it back (status also goes out on the volume change, but not when unchanged).
+            PlaybackController.setVolume(volume)
+            engine.gain = PlaybackController.volume.value / 100f
+            sendStatus()
+        }
+
+        override fun onKick(reason: String) {
+            kickReason = reason.ifBlank { "Removed by the host" }
+            Prefs.wantPlaying = false
+            connection?.close()
         }
 
         override fun onPacket(rate: Int, seq: Long, samples: ShortArray) {
@@ -375,7 +423,17 @@ class PlaybackService : Service() {
             PlaybackController.volume.collect { v -> engine.gain = v / 100f }
         }
         scope.launch {
-            PlaybackController.bufferMs.collect { ms -> engine.targetMs = ms }
+            PlaybackController.buffer.collect { b -> applyBufferSettings(b) }
+        }
+
+        // Live level for the meter: ~12 updates per second, only while a session runs.
+        scope.launch {
+            while (isActive) {
+                delay(80)
+                val v = if (sessionJob?.isActive == true) engine.level else 0f
+                val rounded = (v * 50f).toInt() / 50f
+                if (rounded != PlaybackController.level.value) PlaybackController.setLevel(rounded)
+            }
         }
 
         // Live stats + derived playing state, twice a second.
@@ -399,8 +457,9 @@ class PlaybackService : Service() {
                         lost = lost.get(),
                         dropped = s.dropped,
                         underruns = s.underruns,
-                        bufferMs = s.bufferMs,
-                        latencyMs = if (s.rate > 0) s.bufferMs + s.trackMs else 0,
+                        bufferMs = s.queuedMs,
+                        targetMs = s.targetMs,
+                        latencyMs = if (s.rate > 0) s.queuedMs + s.trackMs else 0,
                         rate = s.rate,
                         message = if (open) "Connected" else st.message,
                         userMuted = userMuted
@@ -409,7 +468,7 @@ class PlaybackService : Service() {
             }
         }
 
-        // Status to the laptop every 5 s…
+        // Status to the host every 5 s…
         scope.launch {
             while (isActive) {
                 delay(5000)
@@ -421,7 +480,7 @@ class PlaybackService : Service() {
             combine(
                 EarbudsMonitor.state,
                 PlaybackController.volume,
-                PlaybackController.bufferMs,
+                PlaybackController.state.map { it.targetMs }.distinctUntilChanged(),
                 PlaybackController.state.map { it.status == PlayerStatus.PLAYING && !it.userMuted }.distinctUntilChanged()
             ) { earbuds, volume, buffer, playing ->
                 StatusKey(earbuds.name, earbuds.battery, volume, buffer, playing)
@@ -434,7 +493,7 @@ class PlaybackService : Service() {
                 PlaybackController.state.map { NotifKey(it.status, it.pcName, it.userMuted) }.distinctUntilChanged(),
                 EarbudsMonitor.state,
                 PlaybackController.volume,
-                PlaybackController.bufferMs
+                PlaybackController.state.map { it.targetMs }.distinctUntilChanged()
             ) { key, earbuds, volume, buffer ->
                 NotifContent(key, earbuds, volume, buffer)
             }.distinctUntilChanged().collect {
@@ -458,13 +517,15 @@ class PlaybackService : Service() {
         try {
             val earbuds = EarbudsMonitor.state.value
             val st = PlaybackController.state.value
+            val engineStats = engine.stats()
             val json = JSONObject()
                 .put("type", "status")
                 .put("device", Build.MODEL ?: "Android")
                 .put("earbuds", if (earbuds.connected) earbuds.name else "")
                 .put("battery", if (earbuds.connected) earbuds.battery else -1)
                 .put("volume", PlaybackController.volume.value)
-                .put("bufferMs", PlaybackController.bufferMs.value)
+                .put("bufferMs", engineStats.targetMs)
+                .put("underruns", engineStats.underruns)
                 .put("playing", st.status == PlayerStatus.PLAYING && !userMuted)
             conn.send(json.toString())
         } catch (_: Throwable) {
@@ -541,7 +602,7 @@ class PlaybackService : Service() {
 
     private fun notificationTitle(): String {
         val st = PlaybackController.state.value
-        val pc = st.pcName.ifBlank { "laptop" }
+        val pc = st.pcName.ifBlank { st.hostKind.noun }
         val base = when (st.status) {
             PlayerStatus.CONNECTING -> "Connecting to $pc…"
             PlayerStatus.RECONNECTING -> "Reconnecting to $pc…"
@@ -559,7 +620,7 @@ class PlaybackService : Service() {
 
     private fun notificationText(): String {
         val v = PlaybackController.volume.value
-        val b = PlaybackController.bufferMs.value
+        val b = PlaybackController.state.value.targetMs
         val e = EarbudsMonitor.state.value
         val buds = if (e.connected) "" else "No Bluetooth earbuds on this phone · "
         return "${buds}Volume $v% · buffer $b ms"
@@ -683,7 +744,7 @@ class PlaybackService : Service() {
                 "Dual Earbuds"
             }
             val metadata = MediaMetadataCompat.Builder()
-                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "Laptop sound · ${st.pcName.ifBlank { "laptop" }}")
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, "${st.hostKind.label} sound · ${st.pcName.ifBlank { st.hostKind.noun }}")
                 .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, subtitle)
                 .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, "Volume ${PlaybackController.volume.value}%")
                 .build()
@@ -694,6 +755,10 @@ class PlaybackService : Service() {
 
     private fun applyMute() {
         engine.muted = userMuted || focusMuted
+    }
+
+    private fun applyBufferSettings(b: BufferSettings) {
+        engine.configure(b.mode, b.manualMs, b.delayMs)
     }
 
     // ---------------------------------------------------------------- audio focus

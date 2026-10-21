@@ -1,3 +1,5 @@
+import java.io.File
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -19,6 +21,21 @@ android {
         }
     }
 
+    // Release signing from the environment (CI secrets). Without DE_KEYSTORE (or if the file is missing) the
+    // release build falls back to the debug key so `assembleRelease` still produces an installable APK.
+    val keystorePath = System.getenv("DE_KEYSTORE")?.takeIf { it.isNotBlank() }
+    val keystoreFile = keystorePath?.let { File(it) }?.takeIf { it.isFile }
+    if (keystoreFile != null) {
+        signingConfigs {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = System.getenv("DE_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("DE_KEY_ALIAS")
+                keyPassword = System.getenv("DE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -26,9 +43,11 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
-            // Signed with the debug key so `assembleRelease` produces an installable APK.
-            // Replace with your own signingConfig before publishing to a store.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (keystoreFile != null) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
@@ -44,6 +63,10 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    testOptions {
+        unitTests.isReturnDefaultValues = true
     }
 
     packaging {
@@ -74,4 +97,9 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+
+    // "Share this phone" (host mode). A placeholder module on feat/app; the real one comes from feat/host.
+    implementation(project(":host"))
+
+    testImplementation("junit:junit:4.13.2")
 }
