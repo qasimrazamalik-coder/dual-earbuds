@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - the Windows Firewall rule for the phone link, shared by the app and the installer.
+// Dual Earbuds - the Windows Firewall rule for the phone link, shared by the app and the installer.
 // One elevated PowerShell call (Windows shows its permission prompt) using the HNetCfg.FwPolicy2 COM API.
 using System;
 using System.ComponentModel;

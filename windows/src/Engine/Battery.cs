@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - reads Bluetooth earbud battery levels that Windows knows about.
+// Dual Earbuds - reads Bluetooth earbud battery levels that Windows knows about.
 // Windows stores the level on the Bluetooth device node (DEVPKEY {104EA319-...},2). The audio
 // endpoint shares a container ID with that node, which is how a battery is matched to an output.
 using System;

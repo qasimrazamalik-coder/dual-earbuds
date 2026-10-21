@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - which kind of network the laptop is on (Public / Private / Domain), as Windows sees it.
+// Dual Earbuds - which kind of network the laptop is on (Public / Private / Domain), as Windows sees it.
 // Used to explain phone-link trouble on cafe/hotel Wi-Fi. Asked in the background, never on the UI thread.
 using System;
 using System.Diagnostics;

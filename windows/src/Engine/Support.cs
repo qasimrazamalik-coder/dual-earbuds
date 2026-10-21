@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - logging, settings, tiny JSON helpers, link keys.
+// Dual Earbuds - logging, settings, tiny JSON helpers, link keys.
 using System;
 using System.Collections.Generic;
 using System.Globalization;

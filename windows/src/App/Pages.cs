@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - pages.
+// Dual Earbuds - pages.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;

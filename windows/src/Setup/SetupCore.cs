@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - installer logic (install / repair / modify / uninstall), no UI.
+// Dual Earbuds - installer logic (install / repair / modify / uninstall), no UI.
 // Per-user install: no administrator rights needed, except the optional firewall rule.
 using System;
 using System.Diagnostics;

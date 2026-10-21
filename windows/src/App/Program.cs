@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - entry point.
+// Dual Earbuds - entry point.
 //   DualEarbuds.exe                 normal start
 //   DualEarbuds.exe --tray          start hidden in the tray (used by "Run when Windows starts")
 //   DualEarbuds.exe --screenshots D render demo screenshots + demo.gif into folder D (no window, no sound)

@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - installer window (same look as the app).
+// Dual Earbuds - installer window (same look as the app).
 using System;
 using System.Diagnostics;
 using System.IO;

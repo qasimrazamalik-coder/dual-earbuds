@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - main window: custom title bar, navigation, tray icon, global shortcut.
+// Dual Earbuds - main window: custom title bar, navigation, tray icon, global shortcut.
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -57,7 +57,7 @@ namespace DualEarbuds
             brand.Children.Add(bt);
             var ver = new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(6, 1, 6, 1), VerticalAlignment = VerticalAlignment.Center };
             ver.SetResourceReference(Border.BackgroundProperty, "AccentSoft");
-            var vt = Ui.Text("PRO " + AppInfo.Version, 10.5, FontWeights.Bold, "Accent");
+            var vt = Ui.Text("v" + AppInfo.Version, 10.5, FontWeights.Bold, "Accent");
             ver.Child = vt;
             brand.Children.Add(ver);
             TitleBar.Children.Add(brand);

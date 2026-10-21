@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - the browser player page served to phones.
+// Dual Earbuds - the browser player page served to phones.
 using System;
 using System.IO;
 using System.Text;

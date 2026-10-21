@@ -27,8 +27,13 @@ reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own e
 - 📱 **Phone-to-phone.** Share your Android phone's music or YouTube with friends' phones (Android 10+).
 - 💻 **Laptop-to-laptop.** A second Windows laptop can listen and play to its own earbuds or speakers.
 - 🔗 **Join with a QR code or a link.** Open the link in any browser — phone, laptop, tablet or iPhone — and it plays, no install needed.
-- 🔒 **Private by design.** Local network only; every link has a secret key; devices that guess keys get locked out.
-- ⚡ **Low latency.** 10 ms audio packets and an adaptive buffer from 30 ms, plus per-device delay to line everyone up.
+- 🔒 **Private by design.** Local network only; every link has a secret key; devices that guess keys get locked out. Optional **room PIN** for Party mode.
+- ⚡ **In sync.** 10 ms audio packets, clock sync so every device plays the same moment, one-tap **earbud calibration**, and smooth recovery from dropped Wi-Fi packets.
+- 📡 **Finds each other.** Phones and laptops on the same Wi-Fi show up automatically; a hotspot helper for café and university Wi-Fi.
+- 🎚️ **Share everything or one app.** The whole laptop/phone, or only Spotify, YouTube, a game…
+- 🎙️ **Talk-over.** The host can speak to everyone (with mic noise cancelling); listeners can pause/skip if the host allows it.
+- 🧠 **Smart features (on-device, optional).** Smart EQ by app or by sound, dialogue boost and night mode, a smart buffer that learns your Wi-Fi, and per-person hearing profiles. No cloud, no account.
+- 🌗 **Light, dark or follow the system** on Windows and Android.
 - 🌙 **Keeps playing with the screen off** on Xiaomi, Redmi, POCO, Realme, OPPO, Samsung and others.
 - 🔋 **Shows earbuds battery** where the device reports it.
 - 🔄 **Updates itself** from GitHub releases, only when you say yes.
@@ -41,6 +46,10 @@ reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own e
 | ![Dual Earbuds Windows app home screen mirroring sound to two earbuds](docs/images/home-dark.png) | ![Phones page with QR code to connect phones over Wi-Fi](docs/images/phones-dark.png) |
 | **Settings** | **Light theme** |
 | ![Settings with updates and network options](docs/images/settings-dark.png) | ![Light theme](docs/images/home-light.png) |
+| **Party mode with room PIN** | **Smart features** |
+| ![Party mode with a room PIN and talk-over](docs/images/phones-pin-dark.png) | ![On-device smart features: noise cancelling, smart EQ, dialogue boost, smart buffer, hearing profiles](docs/images/settings-smart-light.png) |
+| **Laptop to laptop** | **Appearance** |
+| ![Listen to another laptop or phone](docs/images/listen-to-device-dark.png) | ![System, light or dark theme](docs/images/settings-appearance-light.png) |
 
 <details>
 <summary>Installer screens</summary>
@@ -100,7 +109,7 @@ No. Only the optional update check uses the internet.
 |---|---|---|
 | Windows app + installer | C# 5, WPF, WASAPI, .NET Framework 4.8 (built into Windows) | `powershell -File windows\build.ps1` |
 | Android app | Kotlin, Jetpack Compose, AudioTrack, AudioPlaybackCapture | `gradle -p android assembleRelease` |
-| Shared | [Link protocol v3](docs/protocol.md), [browser player](shared/web-player.html) | — |
+| Shared | [Link protocol v3](docs/protocol.md), [smart features](docs/smart-features.md), [browser player](shared/web-player.html) | — |
 
 CI builds, tests and publishes both apps on every tagged release.
 

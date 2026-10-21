@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - draws the app icon once (WPF) and exports it for the window, tray and .ico files.
+// Dual Earbuds - draws the app icon once (WPF) and exports it for the window, tray and .ico files.
 using System;
 using System.IO;
 using System.Windows;
@@ -15,23 +15,16 @@ namespace DualEarbuds
             var dv = new DrawingVisual();
             using (var dc = dv.RenderOpen())
             {
-                double r = px * 0.26;
-                var grad = new LinearGradientBrush(Color.FromRgb(0x14, 0xE0, 0xC2), Color.FromRgb(0x2F, 0x7B, 0xFF), 45);
-                dc.DrawRoundedRectangle(grad, null, new Rect(0, 0, px, px), r, r);
-                var geo = Geometry.Parse(Icons.LogoMark).Clone();
-                // fit the mark's real bounds into the tile with padding, centered
-                Rect bnd = geo.Bounds;
-                double pad = px * 0.2, scale = (px - pad * 2) / Math.Max(bnd.Width, bnd.Height);
-                var tg = new TransformGroup();
-                tg.Children.Add(new TranslateTransform(-bnd.X - bnd.Width / 2, -bnd.Y - bnd.Height / 2));
-                tg.Children.Add(new ScaleTransform(scale, scale));
-                tg.Children.Add(new TranslateTransform(px / 2.0, px / 2.0));
-                geo.Transform = tg;
-                var pen = new Pen(new SolidColorBrush(Color.FromRgb(0x04, 0x20, 0x1B)), Math.Max(1.2, px / 11.0))
-                {
-                    StartLineCap = PenLineCap.Round, EndLineCap = PenLineCap.Round, LineJoin = PenLineJoin.Round
-                };
-                dc.DrawGeometry(null, pen, geo);
+                double r = px * 0.24;
+                dc.DrawRoundedRectangle(new SolidColorBrush(Color.FromRgb(0x0B, 0x12, 0x20)), null, new Rect(0, 0, px, px), r, r);
+                // the 24x24 mark fills the tile minus a margin (smaller margin at tiny sizes so it stays readable)
+                double pad = px <= 24 ? px * 0.06 : px * 0.14, scale = (px - pad * 2) / 24.0;
+                dc.PushTransform(new TranslateTransform(pad, pad));
+                dc.PushTransform(new ScaleTransform(scale, scale));
+                for (int i = 0; i < Icons.Mark.Length; i++)
+                    dc.DrawGeometry(Icons.MarkBrush(Icons.Mark[i][0]), null, Geometry.Parse(Icons.Mark[i][1]));
+                dc.Pop();
+                dc.Pop();
             }
             var bmp = new RenderTargetBitmap(px, px, 96, 96, PixelFormats.Pbgra32);
             bmp.Render(dv);

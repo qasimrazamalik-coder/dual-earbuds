@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - phone link server (host side of docs/protocol.md, v3).
+// Dual Earbuds - phone link server (host side of docs/protocol.md, v3).
 // One TCP port serves the player page, /info, and a WebSocket that streams the laptop's sound.
 using System;
 using System.IO;

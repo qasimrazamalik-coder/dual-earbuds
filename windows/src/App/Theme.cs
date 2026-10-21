@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - colors, fonts and control styles (dark + light), built at runtime.
+// Dual Earbuds - colors, fonts and control styles (dark + light), built at runtime.
 using System;
 using System.Windows;
 using System.Windows.Markup;

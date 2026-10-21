@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - small UI building blocks (code-only WPF).
+// Dual Earbuds - small UI building blocks (code-only WPF).
 using System;
 using System.Windows;
 using System.Windows.Controls;
@@ -169,22 +169,16 @@ namespace DualEarbuds
             return img;
         }
 
-        // The app mark: two earbuds joined by a sound wave on a teal-blue tile.
+        // The app mark (assets/logo): a teal source dot with a teal and a blue arc, each ending in an earbud,
+        // on the dark brand tile. Drawn from the same 24x24 layers as the .ico, so every size matches.
         public static Border Logo(double size)
         {
-            var tile = new Border { Width = size, Height = size, CornerRadius = new CornerRadius(size * 0.28) };
-            tile.Background = new LinearGradientBrush(Color.FromRgb(0x14, 0xE0, 0xC2), Color.FromRgb(0x2F, 0x7B, 0xFF), 45);
-            var p = new Path
-            {
-                Data = Geometry.Parse(Icons.LogoMark),
-                Stroke = new SolidColorBrush(Color.FromRgb(0x04, 0x20, 0x1B)),
-                StrokeThickness = 2.2,
-                StrokeStartLineCap = PenLineCap.Round,
-                StrokeEndLineCap = PenLineCap.Round,
-                Stretch = Stretch.Uniform,
-                Margin = new Thickness(size * 0.2),
-            };
-            tile.Child = p;
+            var tile = new Border { Width = size, Height = size, CornerRadius = new CornerRadius(size * 0.24) };
+            tile.Background = new SolidColorBrush(Color.FromRgb(0x0B, 0x12, 0x20));
+            var canvas = new Canvas { Width = 24, Height = 24 };
+            for (int i = 0; i < Icons.Mark.Length; i++)
+                canvas.Children.Add(new Path { Data = Geometry.Parse(Icons.Mark[i][1]), Fill = Icons.MarkBrush(Icons.Mark[i][0]) });
+            tile.Child = new Viewbox { Child = canvas, Margin = new Thickness(size * 0.14) };
             return tile;
         }
     }
@@ -236,7 +230,20 @@ namespace DualEarbuds
         public const string Lock = "M18 8h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z";
         public const string Spark = "M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z";
         public const string Laptop = "M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9H4zm2 0v7h12V6zM2 17h20v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z";
-        public const string LogoMark = "M7 14a3 3 0 1 1 0-6v8 M17 10a3 3 0 1 1 0 6V8 M10 12h4";
+        // Logo layers from assets/logo/wpf-geometry.txt: { fill, path } in a 24x24 box, drawn in order.
+        public static readonly string[][] Mark =
+        {
+            new[] { "#3B82F6", "F1 M16.45,1.581 A10.941,10.941 0 0 1 19.87,19.177 A1.906,1.906 0 0 1 17.128,16.529 A7.129,7.129 0 0 0 14.9,5.063 A1.906,1.906 0 0 1 16.45,1.581 Z M14.547,17.853 A3.953,3.953 0 1 1 22.452,17.853 A3.953,3.953 0 1 1 14.547,17.853 Z" },
+            new[] { "#14E0C2", "F1 M4.13,19.177 A10.941,10.941 0 0 1 7.55,1.581 A1.906,1.906 0 0 1 9.1,5.063 A7.129,7.129 0 0 0 6.872,16.529 A1.906,1.906 0 0 1 4.13,19.177 Z M1.548,17.853 A3.953,3.953 0 1 1 9.453,17.853 A3.953,3.953 0 1 1 1.548,17.853 Z" },
+            new[] { "#14E0C2", "F1 M8.753,11.576 A3.247,3.247 0 1 1 15.247,11.576 A3.247,3.247 0 1 1 8.753,11.576 Z" },
+        };
+
+        public static Brush MarkBrush(string hex)
+        {
+            var b = (Brush)new BrushConverter().ConvertFrom(hex);
+            b.Freeze();
+            return b;
+        }
         public const string Minimize = "M0,5 L10,5";
         public const string Maximize = "M0.5,0.5 H9.5 V9.5 H0.5 Z";
         public const string Restore = "M2.5,2.5 H9.5 V9.5 H2.5 Z M0.5,7.5 V0.5 H7.5";

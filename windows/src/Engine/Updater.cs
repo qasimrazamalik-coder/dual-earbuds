@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - update check and download (GitHub releases, see "Updates" in docs/protocol.md).
+// Dual Earbuds - update check and download (GitHub releases, see "Updates" in docs/protocol.md).
 // Everything here blocks on the network: call it from a background thread, never the UI thread.
 using System;
 using System.Collections.Generic;

@@ -1,33 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Adaptive icon foreground: two earbuds with a sound wave between them, teal on navy.
-     108dp canvas; artwork stays inside the 66dp safe zone (21..87). -->
+<!-- Dual Earbuds adaptive-icon foreground. Mark fits inside the 66dp safe-zone circle (r = 33 at 54,54). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- Left earbud: round head + stem -->
+    <path
+        android:fillColor="#3B82F6"
+        android:pathData="M65.033 28.17 A27.125 27.125 0 0 1 73.512 71.793 A4.725 4.725 0 0 1 66.714 65.228 A17.675 17.675 0 0 0 61.189 36.803 A4.725 4.725 0 0 1 65.033 28.17 Z M60.313 68.51 A9.8 9.8 0 1 1 79.913 68.51 A9.8 9.8 0 1 1 60.313 68.51 Z" />
     <path
         android:fillColor="#14E0C2"
-        android:pathData="M36,34 a10,10 0 1,1 -0.01,0 Z" />
+        android:pathData="M34.488 71.793 A27.125 27.125 0 0 1 42.967 28.17 A4.725 4.725 0 0 1 46.811 36.803 A17.675 17.675 0 0 0 41.286 65.228 A4.725 4.725 0 0 1 34.488 71.793 Z M28.087 68.51 A9.8 9.8 0 1 1 47.687 68.51 A9.8 9.8 0 1 1 28.087 68.51 Z" />
     <path
         android:fillColor="#14E0C2"
-        android:pathData="M31,46 L41,46 L40,72 Q36,76 32,72 Z" />
-    <!-- Right earbud -->
-    <path
-        android:fillColor="#14E0C2"
-        android:pathData="M72,34 a10,10 0 1,1 -0.01,0 Z" />
-    <path
-        android:fillColor="#14E0C2"
-        android:pathData="M67,46 L77,46 L76,72 Q72,76 68,72 Z" />
-    <!-- Sound wave bars in the middle -->
-    <path
-        android:fillColor="#14E0C2"
-        android:pathData="M46,50 L49,50 L49,62 L46,62 Z" />
-    <path
-        android:fillColor="#14E0C2"
-        android:pathData="M52.5,44 L55.5,44 L55.5,68 L52.5,68 Z" />
-    <path
-        android:fillColor="#14E0C2"
-        android:pathData="M59,50 L62,50 L62,62 L59,62 Z" />
+        android:pathData="M45.95 52.95 A8.05 8.05 0 1 1 62.05 52.95 A8.05 8.05 0 1 1 45.95 52.95 Z" />
 </vector>

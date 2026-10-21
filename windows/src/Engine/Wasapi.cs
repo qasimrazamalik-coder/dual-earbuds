@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - Windows Core Audio (WASAPI) interop and helpers.
+// Dual Earbuds - Windows Core Audio (WASAPI) interop and helpers.
 using System;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;

@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - app logic, independent of the window (also drives screenshot/demo mode).
+// Dual Earbuds - app logic, independent of the window (also drives screenshot/demo mode).
 using System;
 using System.Collections.Generic;
 using System.Linq;

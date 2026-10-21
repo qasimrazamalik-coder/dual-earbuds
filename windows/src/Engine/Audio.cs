@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - audio engine.
+// Dual Earbuds - audio engine.
 // Captures what a Windows output device is playing (WASAPI loopback) and plays the same sound on
 // other output devices, each with its own delay and volume, and hands every packet to the phone link.
 using System;

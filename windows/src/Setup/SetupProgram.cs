@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - installer entry point.
+// Dual Earbuds - installer entry point.
 //   DualEarbuds-Setup.exe                      install wizard (or maintenance page if installed)
 //   DualEarbuds-Setup.exe --maintain           Modify / Repair / Uninstall page
 //   DualEarbuds-Setup.exe --uninstall          uninstall page

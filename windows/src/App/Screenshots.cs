@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - offscreen screenshots, demo GIF and a UI smoke test (demo data, no audio, no window).
+// Dual Earbuds - offscreen screenshots, demo GIF and a UI smoke test (demo data, no audio, no window).
 using System;
 using System.Collections.Generic;
 using System.IO;

@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - diagnostics report (what the user can send when something doesn't work).
+// Dual Earbuds - diagnostics report (what the user can send when something doesn't work).
 using System;
 using System.Globalization;
 using System.Text;
