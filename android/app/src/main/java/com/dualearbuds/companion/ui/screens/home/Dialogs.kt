@@ -31,6 +31,9 @@ import kotlinx.coroutines.delay
 /** One PIN policy for the whole app session: wrong PINs are never retried automatically. */
 internal object PinGate {
     val policy = PinPolicy()
+
+    /** The PIN error already acted on (so coming back to Home doesn't count or prompt twice). */
+    var handledError: Any? = null
 }
 
 /** Room PIN prompt (v3.1). Digits only; after 3 wrong PINs the user waits 30 s so the host never locks us out. */

@@ -155,6 +155,8 @@ fun HomeScreen(
     LaunchedEffect(player.error) {
         val e = player.error ?: return@LaunchedEffect
         val t = player.target ?: return@LaunchedEffect
+        if (PinGate.handledError === e) return@LaunchedEffect
+        PinGate.handledError = e
         when (e.kind) {
             ErrorKind.PIN_NEEDED -> {
                 pinWasWrong = false
