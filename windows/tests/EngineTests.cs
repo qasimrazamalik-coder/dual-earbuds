@@ -65,6 +65,8 @@ static class EngineTests
         Run("Calibration cross-correlation", TestCalibration);
         Run("Host v3.1: PIN, sync, clock, remote, talk, source, EQ", TestHostV31);
         Run("mDNS / DNS-SD messages", TestDiscovery);
+        Run("Talk-over ducking", TestTalkDuck);
+        Run("Diagnostics scrubbing", TestScrub);
         Run("Join by link: parsing", TestLinkParse);
         Run("Laptop to laptop: loopback host + listener", TestLoopbackListen);
 
@@ -1554,5 +1556,30 @@ static class EngineTests
             }
         }
         finally { h2.Stop(); }
+    }
+
+    static void TestTalkDuck()
+    {
+        var t = new TalkOver();
+        var buf = Sine(48000, 300, 480, 0.5);
+        var orig = (float[])buf.Clone();
+        t.MixInto(buf, 480);
+        Check(buf[77] == orig[77], "not talking: untouched");
+        t.SimulateForTest(true, 48000);
+        for (int i = 0; i < 20; i++) { buf = Sine(48000, 300, 480, 0.5); t.MixInto(buf, 480); }
+        double db = 20 * Math.Log10(Rms(buf, 0, 960) / Rms(orig, 0, 960));
+        Check(Math.Abs(db - (-12)) < 0.3, "music ducks by 12 dB (" + db.ToString("0.0") + ")");
+        t.SimulateForTest(false, 48000);
+        for (int i = 0; i < 20; i++) { buf = Sine(48000, 300, 480, 0.5); t.MixInto(buf, 480); }
+        Check(Math.Abs(Rms(buf, 0, 960) - Rms(orig, 0, 960)) < 1e-4, "back to full volume after talking");
+    }
+
+    static void TestScrub()
+    {
+        string text = "INFO joined http://192.168.1.16:8790/?k=Q7RK2MXD&p=4711 ok\nkey Q7RK2MXD and pin 4711 here\nws://x/ws?k=abcd2345&client=web";
+        string s = DiagReport.Scrub(text, new[] { "Q7RK2MXD", "4711", "ABCD2345" });
+        Check(!s.Contains("Q7RK2MXD") && !s.Contains("4711") && !s.ToUpperInvariant().Contains("ABCD2345"), "keys and PINs removed");
+        Check(s.Contains("k=") && s.Contains("192.168.1.16"), "the rest stays readable");
+        Check(DiagReport.Scrub("plain", null) == "plain", "nothing to scrub");
     }
 }
