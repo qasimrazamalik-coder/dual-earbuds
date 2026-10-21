@@ -1,161 +1,118 @@
-# Dual Earbuds Pro
+<div align="center">
 
-Play your laptop's sound on **two (or more) pairs of earbuds at the same time**, and stream it over Wi-Fi to phones so even more people can listen, each on their own earbuds.
+<img src="assets/logo/mark-128.png" width="96" alt="Dual Earbuds logo">
 
-![Home](docs/images/home-dark.png)
+# Dual Earbuds
 
-![Demo](docs/images/demo.gif)
+**Play one sound on two or more pairs of earbuds at once — from your Windows laptop or your Android phone.**
+
+Watch a movie together, share music on a trip, run a silent party. Free, open source, no account, no cloud.
+
+[Download for Windows](https://github.com/qasimrazamalik-coder/dual-earbuds/releases/latest/download/DualEarbuds-Setup.exe) ·
+[Download for Android](https://github.com/qasimrazamalik-coder/dual-earbuds/releases/latest/download/DualEarbuds.apk) ·
+[How it works](#how-it-works) · [FAQ](#faq)
+
+</div>
 
 ---
 
-## What it does
+## Why Dual Earbuds?
 
-| | |
-|---|---|
-| **Mirror to many outputs** | Captures what Windows is playing (WASAPI loopback) and plays it on every output you tick: Bluetooth earbuds, headphones, speakers. |
-| **Per-output delay and volume** | Delay 0–1000 ms (to line up earbuds that lag) and volume 0–150 % for each output. |
-| **Battery levels** | Shows the battery % Windows reports for each pair of Bluetooth earbuds. |
-| **Phone link** | Streams the sound over your Wi-Fi to phones. Scan the QR code, tap Start, listen on the earbuds paired to the phone. Up to 8 phones. Each link has a secret key; only phones with the link can connect. |
-| **Works in the background** | Lives near the clock. Closing the window keeps it running (you can change that). Ctrl + Alt + M starts or stops mirroring from anywhere. |
-| **Recovers by itself** | If the sound source disappears or an output drops, it keeps retrying and picks things up again. New earbuds appear in the list as soon as Windows sees them. |
-| **Diagnostics** | One click builds a report (devices, formats, errors, logs) you can copy when something doesn't work. |
-| **Dark and light themes** | Follows Windows, or pick one. |
-| **Proper installer** | Install, repair, modify and uninstall windows. No administrator rights needed. |
+Windows and most phones send stereo sound to **only one pair of Bluetooth earbuds at a time**.
+Dual Earbuds gets around that the simple way: it plays the sound on every output your laptop can
+reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own earbuds.
 
-Nothing leaves your network: no accounts, no cloud, no tracking.
+- 🎧 **Two, three, ten pairs.** Laptop earbuds + any number of phones (up to 16 in Party mode).
+- 🎬 **Works with Netflix, YouTube, Spotify, games** — anything your laptop plays.
+- 📱 **Phone-to-phone.** Share your Android phone's music or YouTube with friends' phones (Android 10+).
+- 🔒 **Private by design.** Local network only; every link has a secret key; devices that guess keys get locked out.
+- ⚡ **Low latency.** 10 ms audio packets and an adaptive buffer from 30 ms, plus per-device delay to line everyone up.
+- 🌙 **Keeps playing with the screen off** on Xiaomi, Redmi, POCO, Realme, OPPO, Samsung and others.
+- 🔋 **Shows earbuds battery** where the device reports it.
+- 🔄 **Updates itself** from GitHub releases, only when you say yes.
+- 🪶 **Lightweight.** Windows app under 1 MB, nothing extra to install (uses .NET Framework 4.8 built into Windows).
 
 ## Screenshots
 
-| Home | Phones |
+| Home | Phones & Party mode |
 |---|---|
-| ![](docs/images/home-dark.png) | ![](docs/images/phones-dark.png) |
-| **Settings** | **Diagnostics** |
-| ![](docs/images/settings-dark.png) | ![](docs/images/diagnostics-dark.png) |
-| **Light theme** | **About** |
-| ![](docs/images/home-light.png) | ![](docs/images/about-dark.png) |
+| ![Dual Earbuds Windows app home screen mirroring sound to two earbuds](docs/images/home-dark.png) | ![Phones page with QR code to connect phones over Wi-Fi](docs/images/phones-dark.png) |
+| **Settings** | **Light theme** |
+| ![Settings with updates and network options](docs/images/settings-dark.png) | ![Light theme](docs/images/home-light.png) |
 
-### Installer
+<details>
+<summary>Installer screens</summary>
 
-| Welcome | License | Options |
+| | | |
 |---|---|---|
-| ![](docs/images/setup-1-welcome.png) | ![](docs/images/setup-2-license.png) | ![](docs/images/setup-3-options.png) |
-| **Installing** | **Finished** | **Repair / Modify / Uninstall** |
-| ![](docs/images/setup-4-installing.png) | ![](docs/images/setup-5-finished.png) | ![](docs/images/setup-6-repair-modify-uninstall.png) |
-| **Modify** | **Uninstall** | **Removed** |
-| ![](docs/images/setup-7-modify.png) | ![](docs/images/setup-8-uninstall.png) | ![](docs/images/setup-9-removed.png) |
+| ![](docs/images/setup-1-welcome.png) | ![](docs/images/setup-3-options.png) | ![](docs/images/setup-6-repair-modify-uninstall.png) |
 
----
+</details>
 
-## Install
-
-1. Run **`DualEarbuds-Setup.exe`**.
-2. **Next** → accept the license → choose options → **Install**.
-   - *Let phones on my Wi-Fi connect* adds a firewall rule so phones can reach the laptop, at home and on public Wi-Fi; Windows asks for permission once. Only phones with the link's secret key can connect, and a device that tries many wrong keys is ignored for 5 minutes.
-3. Dual Earbuds opens. It also appears in the Start menu and near the clock.
-
-Installs to `%LOCALAPPDATA%\Programs\Dual Earbuds` for your Windows account only. Settings and logs live in `%LOCALAPPDATA%\DualEarbuds`.
-
-### Repair, change or uninstall
-
-- **Settings → Apps → Installed apps → Dual Earbuds → Modify / Uninstall**, or
-- run `DualEarbuds-Setup.exe` again: it shows **Repair**, **Modify** and **Uninstall**.
-
-Uninstall can keep or delete your settings and logs.
-
-### Silent install (for scripts)
+## How it works
 
 ```
-DualEarbuds-Setup.exe --silent [--dir "C:\path"] [--no-desktop] [--no-startmenu] [--startup] [--no-firewall]
-DualEarbuds-Setup.exe --silent --repair
-DualEarbuds-Setup.exe --silent --uninstall [--remove-data]
+             ┌───────────────── Wi-Fi / hotspot ─────────────────┐
+ Laptop ──► Dual Earbuds (Windows) ──► phone 1 ──► earbuds pair 2
+   │                                 └─► phone 2 ──► earbuds pair 3
+   └──► earbuds pair 1 (Bluetooth)        …up to 16 phones
 ```
 
----
+1. The Windows app captures what the laptop is playing (WASAPI loopback) and plays it on every output you tick.
+2. Phones scan a QR code and receive the same sound over the local network ([protocol](docs/protocol.md)).
+3. A per-device **Delay** lines up earbuds that lag; the phone's adaptive buffer keeps it smooth.
 
-## Step by step
+## Get started
 
-### Two pairs of earbuds on the laptop
+### Windows
+1. Download **[DualEarbuds-Setup.exe](https://github.com/qasimrazamalik-coder/dual-earbuds/releases/latest/download/DualEarbuds-Setup.exe)** and run it (no admin rights needed).
+2. Connect your earbuds in Windows Bluetooth settings, play something, tick the outputs, press **Start** (or **Ctrl + Alt + M**).
 
-1. Connect both pairs in **Windows Settings → Bluetooth & devices**.
-2. Play something on the laptop (it plays on the Windows default output, the *sound source*).
-3. In Dual Earbuds, on **Home**, turn on the switch next to the second pair.
-4. Press **Start mirroring** (or Ctrl + Alt + M).
-5. If one pair is behind the other, raise **Delay** on the pair that is *ahead* until they line up.
+### Android
+1. Download **[DualEarbuds.apk](https://github.com/qasimrazamalik-coder/dual-earbuds/releases/latest/download/DualEarbuds.apk)** on the phone and install it (allow "install unknown apps" once).
+2. Pair your earbuds with the phone, scan the QR code on the laptop's **Phones** page, tap **Start**.
 
-> **If the second pair says it can't be opened:** many laptop Bluetooth chips can only send stereo music to **one** Bluetooth device at a time. Windows refuses the second one (error `0x8889000F`). No software can get around that limit; use the **phone link** below for the second pair instead. A cheap USB Bluetooth adapter for the second pair also works, because it has its own radio.
-
-### A phone (and its earbuds) as the second listener
-
-1. Pair the second earbuds with the phone. Put the phone on the **same Wi-Fi** as the laptop.
-2. Open the **Phones** page in Dual Earbuds.
-3. Scan the QR code with the phone (Dual Earbuds Android app, or the camera to open it in Chrome).
-4. Tap **Start** on the phone.
-5. The phone's earbuds usually play a little behind the laptop's. Raise **Delay** on the laptop's earbuds (Home page) until they match. The phone shows its own delay too.
-
-With the **Android app**, playback keeps going with the screen off and in the background (including on Xiaomi, Redmi and Realme phones, after allowing the battery exemption the app asks for). The browser player works too, but phones may pause it when the screen turns off.
+### Party mode
+Turn on **Party mode** on the host (laptop or phone): up to 16 listeners, each with their own volume. Guests can join from the app or straight from the browser.
 
 ### Outside home (café, hotel, university Wi-Fi)
+It works on public Wi-Fi too. If a phone can't reach the laptop, that network blocks devices from seeing each other — use a **hotspot** (phone hotspot, or Windows **Mobile hotspot**). The sound goes directly between the devices and **doesn't use mobile data**.
 
-The phone link works on public Wi-Fi too. When you're on one, the **Phones** page says so.
+## FAQ
 
-![Public network note](docs/images/phones-public-network-dark.png) If the phone still can't open the link, that Wi-Fi is blocking devices from talking to each other. Use a hotspot instead:
+**Can Windows play to two Bluetooth earbuds at once by itself?**
+Most laptop Bluetooth chips send stereo music to only one device at a time (Windows error `0x8889000F` for the second). Dual Earbuds uses a phone, or a second USB Bluetooth adapter, for every extra pair.
 
-1. Turn on the **hotspot on the phone** and connect the laptop to it, **or** turn on **Mobile hotspot** on the laptop (Settings → Network & internet → Mobile hotspot) and connect the phone to it.
-2. Scan the QR code again (the laptop's address changes on a new network).
+**Does it work with Netflix?**
+Yes, when Netflix plays on the laptop. Netflix on an Android phone blocks other apps from capturing its sound, so phone-to-phone sharing can't include it — on Samsung phones use built-in **Dual Audio** (Quick panel → Media output → tick both earbuds) instead.
 
-The sound goes straight between the laptop and the phone, so it **doesn't use mobile data**.
+**Is there an iPhone app?**
+Not yet. iPhones can listen through the browser player today (it pauses when the screen turns off).
 
----
-
-## Troubleshooting
-
-| Problem | What to do |
-|---|---|
-| Second earbuds show *"Windows can only play to one Bluetooth stereo device"* | Hardware limit of the laptop's Bluetooth chip. Use the phone link, or a USB Bluetooth adapter for the second pair. |
-| Phone can't open the link | Same Wi-Fi? Some networks, especially public ones (cafés, hotels, universities), block devices from reaching each other ("client isolation") - use a hotspot instead (see *Outside home* below). Allow the firewall rule (Setup → Modify). |
-| *"Link expired"* on the phone | You pressed **New link** on the laptop. Scan the new QR code. |
-| Phone sound stutters | Move closer to the router, or raise the phone's buffer. 5 GHz Wi-Fi works best. |
-| Earbuds out of sync | Raise **Delay** on whichever plays first. |
-| Battery % doesn't show | Windows only reports battery for some earbuds. |
-| Anything else | **Diagnostics → Copy report**, and look at the logs folder. |
-
----
+**Does it need the internet?**
+No. Only the optional update check uses the internet.
 
 ## Build from source
 
-Only needs what ships with Windows (.NET Framework 4.8 C# compiler). No Visual Studio, no downloads.
+| Part | Stack | Build |
+|---|---|---|
+| Windows app + installer | C# 5, WPF, WASAPI, .NET Framework 4.8 (built into Windows) | `powershell -File windows\build.ps1` |
+| Android app | Kotlin, Jetpack Compose, AudioTrack, AudioPlaybackCapture | `gradle -p android assembleRelease` |
+| Shared | [Link protocol v3](docs/protocol.md), [browser player](shared/web-player.html) | — |
 
-```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1          # dist\DualEarbuds.exe + dist\DualEarbuds-Setup.exe
-powershell -ExecutionPolicy Bypass -File build.ps1 -Docs    # also renders docs\images (screenshots, demo GIF, installer screens)
-```
-
-The screenshots are rendered offscreen from demo data: no window opens and no sound plays.
-
-### Project layout
+CI builds, tests and publishes both apps on every tagged release.
 
 ```
-src/Engine/   audio engine (WASAPI capture + render), phone link server, web player, battery, QR code, settings, logs
-src/App/      WPF window, pages, tray, theme, icon, screenshot tool
-src/Setup/    installer: install / repair / modify / uninstall (UI + silent)
-tests/        engine tests (ring buffer, conversions, delay, settings, QR, HTTP + WebSocket server)
-PROTOCOL.md   the phone link protocol shared by the browser player and the Android app
+dual-earbuds/
+├── windows/   Windows app (src/Engine, src/App, src/Setup), tests, build script
+├── android/   Android app (app/) and phone-to-phone host module (host/)
+├── shared/    browser player page served by every host
+├── docs/      protocol, screenshots
+└── assets/    logo
 ```
-
-### Developer switches
-
-```
-DualEarbuds.exe --tray              start hidden near the clock
-DualEarbuds.exe --uitest out.txt    build every page offscreen with demo data and report layout problems
-DualEarbuds.exe --screenshots dir   render screenshots + demo.gif
-DualEarbuds.exe --battery out.txt   dump the battery levels Windows reports
-DualEarbuds-Setup.exe --test-root dir   run the installer inside a sandbox folder + private registry key (QA)
-```
-
-Set `DUALEARBUDS_DATA` to use a different settings/logs folder.
-
----
 
 ## License
 
-MIT © 2026 Qasim Raza Malik
+[MIT](LICENSE) © 2026 [Qasim Raza Malik](https://github.com/qasimrazamalik-coder) · Contact: iamqasimrazamalik@gmail.com
+
+<sub>Keywords: play audio on two bluetooth headphones windows, connect two earbuds to one laptop, share audio to multiple phones, dual audio android, silent disco app, listen together over wifi.</sub>
