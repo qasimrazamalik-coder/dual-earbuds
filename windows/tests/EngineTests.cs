@@ -63,6 +63,7 @@ static class EngineTests
         Run("Resampler", TestResampler);
         Run("Packet-loss concealment", TestConcealer);
         Run("Calibration cross-correlation", TestCalibration);
+        Run("Host v3.1: PIN, sync, clock, remote, talk, source, EQ", TestHostV31);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -1270,5 +1271,96 @@ static class EngineTests
         for (int i = 0; i < quiet.Length; i++) quiet[i] = (float)((rq.NextDouble() * 2 - 1) * 0.05);
         var none = Calibration.Measure(quiet, quiet.Length, rate, starts);
         Check(!none.Ok && none.Problem != null, "no clicks -> a clear problem, no number");
+    }
+
+    static string NextOfType(WsClient w, string type, int maxFrames)
+    {
+        for (int i = 0; i < maxFrames; i++)
+        {
+            string t = w.NextText(200);
+            if (t == null) return null;
+            if (t.Contains("\"type\":\"" + type + "\"")) return t;
+        }
+        return null;
+    }
+
+    static void TestHostV31()
+    {
+        Check(RoomPin.IsValid("0420") && RoomPin.IsValid("123456") && !RoomPin.IsValid("123") && !RoomPin.IsValid("12a4") && !RoomPin.IsValid(null), "PIN format 4-6 digits");
+        Check(RoomPin.IsValid(RoomPin.New()), "new PIN is valid");
+        Check(MediaKeys.IsAction("playpause") && MediaKeys.IsAction("voldown") && !MediaKeys.IsAction("shutdown"), "remote actions");
+        Check(PhoneLink.NormalizeClient("windows") == "windows" && PhoneLink.NormalizeClient("toaster") == "web", "client kinds");
+
+        int port = FreePort();
+        var link = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        link.Start();
+        try
+        {
+            link.Pin = "4711";
+            var info = MiniJson.ParseObject(Http(port, "GET /info?k=ABCD2345 HTTP/1.1").Split(new[] { "\r\n\r\n" }, StringSplitOptions.None)[1]);
+            Check(MiniJson.GetBool(info, "pin", false) && !MiniJson.GetBool(info, "remote", true) && MiniJson.GetString(info, "source", "") == "all", "/info: pin, remote, source");
+            Check(!link.Url("1.2.3.4").Contains("4711"), "the link never contains the PIN");
+            using (var noPin = WsClient.Open(port, "k=ABCD2345&name=A"))
+                Check(noPin.Handshake.StartsWith("HTTP/1.1 403"), "missing PIN -> 403");
+            using (var wrong = WsClient.Open(port, "k=ABCD2345&p=0000"))
+                Check(wrong.Handshake.StartsWith("HTTP/1.1 403"), "wrong PIN -> 403");
+            Check(Http(port, "GET /?k=ABCD2345 HTTP/1.1").StartsWith("HTTP/1.1 200"), "the page itself still opens (it asks for the PIN)");
+
+            link.RemoteControl = true;
+            link.SetSource("app", "Spotify");
+            link.SuggestedEq = "movie";
+            var pressed = new List<string>();
+            link.RemoteAction = (id, a) => { lock (pressed) pressed.Add(a); };
+            using (var w = WsClient.Open(port, "k=abcd2345&p=4711&client=windows&name=Laptop"))
+            {
+                Check(w.Handshake.StartsWith("HTTP/1.1 101"), "right PIN (key in lower case) -> joined");
+                var hello = MiniJson.ParseObject(w.NextText(5));
+                Check(MiniJson.GetInt(hello, "playoutMs", 0) == 120 && MiniJson.GetBool(hello, "remote", false) && MiniJson.GetString(hello, "app", "") == "Spotify", "hello: playoutMs, remote, source app");
+                Check(w.NextText(5) == "{\"type\":\"control\",\"eq\":\"movie\"}", "suggested EQ sent on join");
+                Check(WaitFor(() => link.Snapshot().Count == 1 && link.Snapshot()[0].Client == "windows", 1000), "listed as a Windows listener");
+
+                w.SendText("{\"type\":\"sync\",\"c\":1234.5}");
+                var sync = MiniJson.ParseObject(NextOfType(w, "sync", 20));
+                Check(MiniJson.GetString(sync, "c", null) == null && Math.Abs((double)sync["c"] - 1234.5) < 1e-9 && (double)sync["h"] >= 0, "sync reply echoes c and adds h");
+                Check(WaitFor(() => link.Snapshot()[0].Synced, 1000), "listener marked as synced");
+
+                link.SetMirroring(true, 48000);
+                var st = NextOfType(w, "state", 20);
+                Check(st != null && st.Contains("\"source\":\"app\"") && st.Contains("\"app\":\"Spotify\""), "state carries the source");
+                var buf = new float[480 * 2];
+                for (int i = 0; i < 30; i++) link.Broadcast(buf, 480, 48000);
+                var clock = NextOfType(w, "clock", 200);
+                Check(clock != null, "clock message every second");
+                if (clock != null)
+                {
+                    var cm = MiniJson.ParseObject(clock);
+                    Check((double)cm["seq"] >= 0 && (double)cm["seq"] < 30 && (double)cm["h"] >= 0, "clock: seq of a sent packet + capture time");
+                }
+
+                for (int i = 0; i < 12; i++) w.SendText("{\"type\":\"remote\",\"action\":\"next\"}");
+                w.SendText("{\"type\":\"remote\",\"action\":\"format-c\"}");
+                Check(WaitFor(() => { lock (pressed) return pressed.Count >= 5; }, 1500), "remote commands arrive");
+                Thread.Sleep(200);
+                lock (pressed) Check(pressed.Count == 5 && pressed.TrueForAll(a => a == "next"), "rate-limited to 5 per second, unknown actions dropped (" + pressed.Count + ")");
+                link.RemoteControl = false;
+                w.SendText("{\"type\":\"remote\",\"action\":\"prev\"}");
+                Thread.Sleep(300);
+                lock (pressed) Check(!pressed.Contains("prev"), "ignored when the setting is off");
+
+                link.Talking = true;
+                Check(NextOfType(w, "talk", 200) == "{\"type\":\"talk\",\"on\":true}", "talk message");
+                link.SuggestedEq = "bass";
+                Check(NextOfType(w, "control", 200) == "{\"type\":\"control\",\"eq\":\"bass\"}", "EQ suggestion to everyone");
+            }
+
+            // wrong PINs count toward the lockout
+            link.Pin = "123456";
+            for (int i = 0; i < 10; i++) using (var b = WsClient.Open(port, "k=ABCD2345&p=" + (100000 + i))) { }
+            bool blocked;
+            try { using (var b = WsClient.Open(port, "k=ABCD2345&p=123456")) blocked = !b.Handshake.StartsWith("HTTP/1.1 101"); }
+            catch { blocked = true; }
+            Check(blocked, "10 wrong PINs -> locked out, even with the right one");
+        }
+        finally { link.Stop(); }
     }
 }
