@@ -2,7 +2,17 @@
 # Touches no real Program Files, shortcuts or registry keys. Exit code 1 on any failure.
 $ErrorActionPreference = 'Continue'
 $root  = Split-Path -Parent $PSScriptRoot           # ...\windows
-$sb    = Join-Path $env:TEMP 'de-setup-sandbox'
+# %TEMP% can be an 8.3 short path (C:\Users\QASIMR~1\...); shortcuts store long paths, so expand it first.
+Add-Type -Namespace DeQa -Name Native -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+public static extern uint GetLongPathName(string shortPath, System.Text.StringBuilder longPath, uint size);
+'@
+function LongPath($p) {
+  $b = New-Object System.Text.StringBuilder 1024
+  if ([DeQa.Native]::GetLongPathName($p, $b, 1024) -gt 0) { return $b.ToString() }
+  return $p
+}
+$sb    = Join-Path (LongPath $env:TEMP) 'de-setup-sandbox'
 $setup = Join-Path $root 'dist\DualEarbuds-Setup.exe'
 if (Test-Path $sb) { Remove-Item $sb -Recurse -Force }
 Remove-Item 'HKCU:\Software\DualEarbudsSetupTest' -Recurse -Force -ErrorAction SilentlyContinue
@@ -24,7 +34,7 @@ Check 'setup copy for maintenance' (Test-Path "$sb\Programs\Dual Earbuds\DualEar
 Check 'desktop shortcut' (Test-Path "$sb\Desktop\Dual Earbuds.lnk")
 Check 'start menu shortcut' (Test-Path "$sb\StartMenu\Dual Earbuds.lnk")
 $lnk = (New-Object -ComObject WScript.Shell).CreateShortcut("$sb\Desktop\Dual Earbuds.lnk")
-Check 'shortcut target' ($lnk.TargetPath -eq $exe)
+Check 'shortcut target' ((LongPath $lnk.TargetPath) -eq (LongPath $exe))
 $u = Get-ItemProperty $uk -ErrorAction SilentlyContinue
 Check 'uninstall entry' ($u -ne $null)
 Check 'uninstall string' ($u.UninstallString -like '*--uninstall*')
@@ -40,6 +50,8 @@ Remove-Item $exe -Force
 Remove-Item "$sb\Desktop\Dual Earbuds.lnk" -Force
 Check 'repair exit 0' ((Run "--silent --repair --test-root `"$sb`"") -eq 0)
 Check 'exe restored' (Test-Path $exe)
+Check 'repair did not nest a folder' (-not (Test-Path "$sb\Programs\Dual Earbuds\Dual Earbuds"))
+Check 'setup copy kept' (Test-Path "$sb\Programs\Dual Earbuds\DualEarbuds-Setup.exe")
 Check 'shortcut restored' (Test-Path "$sb\Desktop\Dual Earbuds.lnk")
 Check 'startup option kept' ((Get-ItemProperty $rk -ErrorAction SilentlyContinue).DualEarbuds -like '*--tray*')
 

@@ -103,7 +103,7 @@ namespace DualEarbuds
     public static class Wasapi
     {
         public const uint STATE_ACTIVE = 1, CLSCTX_ALL = 23;
-        public const uint FLAG_LOOPBACK = 0x00020000, FLAG_AUTOCONVERT = 0x80000000, FLAG_SRC_QUALITY = 0x08000000;
+        public const uint FLAG_LOOPBACK = 0x00020000, FLAG_EVENTCALLBACK = 0x00040000, FLAG_AUTOCONVERT = 0x80000000, FLAG_SRC_QUALITY = 0x08000000;
         public const uint BUFFER_SILENT = 0x2;
         public static readonly Guid IID_AudioClient = new Guid("1CB9AD4C-DBFA-4c32-B178-C2F568A703B2");
         public static readonly Guid IID_Capture = new Guid("C8ADBD64-E71E-48a0-A4DE-185C395CD317");
@@ -207,6 +207,23 @@ namespace DualEarbuds
                 dev.GetId(out resolvedId);
                 Guid iid = IID_AudioClient;
                 Check(dev.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o), "Activate device");
+            }
+            finally { Release(dev); }
+            return (IAudioClient)o;
+        }
+
+        // The microphone: id == null means the Windows default recording device.
+        internal static IAudioClient OpenCaptureClient(IMMDeviceEnumerator en, string id, out string resolvedId)
+        {
+            IMMDevice dev;
+            if (id == null) Check(en.GetDefaultAudioEndpoint(EDataFlow.eCapture, ERole.eConsole, out dev), "Find the microphone");
+            else Check(en.GetDevice(id, out dev), "Open the microphone");
+            object o;
+            try
+            {
+                dev.GetId(out resolvedId);
+                Guid iid = IID_AudioClient;
+                Check(dev.Activate(ref iid, CLSCTX_ALL, IntPtr.Zero, out o), "Open the microphone");
             }
             finally { Release(dev); }
             return (IAudioClient)o;

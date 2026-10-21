@@ -1,4 +1,4 @@
-// Dual Earbuds Pro - phone link server (see PROTOCOL.md).
+// Dual Earbuds Pro - phone link server (host side of docs/protocol.md, v3).
 // One TCP port serves the player page, /info, and a WebSocket that streams the laptop's sound.
 using System;
 using System.IO;
@@ -25,8 +25,11 @@ namespace DualEarbuds
         public int Battery = -1;
         public int Volume = 100;
         public int BufferMs = 0;
+        public int Underruns = 0;
         public bool Playing;
         public int RttMs = -1;
+        public bool Synced;          // the listener asked for clock sync
+        public int RemoteCount;      // playback commands it sent
         public DateTime ConnectedAt;
         public long PacketsSent;
         public long PacketsDropped;
@@ -35,10 +38,16 @@ namespace DualEarbuds
     public class PhoneLink
     {
         public const int MaxClients = 8;
+        public const int MaxClientsParty = 16;   // Party mode
         public const int MaxHeaderBytes = 8192;
         public const int MaxClientMessage = 4096;
         public const int IdleTimeoutMs = 30000;
+        public const int PacketMs = 10;          // every audio packet carries exactly 10 ms
         public const int AudioQueueLimit = 60;   // ~600 ms of 10 ms packets
+        public const int MaxListenerVolume = 150;
+        // Kernel send buffer per listener. Kept small so a stalled phone's backlog stays in our queue
+        // (where old packets are dropped) instead of piling up as extra delay inside Windows.
+        public const int SocketSendBuffer = 32 * 1024;
 
         public readonly int Port;
         readonly IPAddress bindAddress;
@@ -106,9 +115,31 @@ namespace DualEarbuds
         readonly object lk = new object();
         readonly Stopwatch clock = Stopwatch.StartNew();
         volatile bool mirroring;
+        volatile bool party;
         volatile int rate;
+
+        // protocol v3.1
+        public const int DefaultPlayoutMs = 120;
+        public const int RemotePerSecond = 5;
+        volatile string pin;                 // null = no room PIN
+        volatile bool remoteControl;         // "Let listeners control playback"
+        volatile string source = "all", sourceApp;
+        volatile string suggestedEq;         // null = no suggestion
+        volatile bool talking;
+        public int PlayoutMs = DefaultPlayoutMs;
+        // (listener id, action) for an allowed remote command; runs on that listener's read thread
+        public Action<string, string> RemoteAction;
+        long clockH = -1;                    // host ms when packet clockSeq was captured
+        uint clockSeq;
         uint seq;
         long bytesSent;
+        int nextId;
+
+        // 10 ms packetizer: capture packets of any size are re-cut into exact 10 ms packets.
+        // A capture packet that is already 10 ms passes straight through without waiting.
+        readonly object packLk = new object();
+        float[] pack = new float[0];
+        int packFrames, packRate;
 
         public PhoneLink(int port, string linkKey) : this(port, linkKey, IPAddress.Any) { }
 
@@ -163,6 +194,165 @@ namespace DualEarbuds
             foreach (var c in arr) c.Close();
         }
 
+        // Party mode allows up to 16 listeners instead of 8. Switching it off keeps listeners already
+        // connected; only new ones are refused while there are 8 or more.
+        public bool Party
+        {
+            get { return party; }
+            set
+            {
+                if (party == value) return;
+                party = value;
+                SendTextAll(PartyMessage(value));
+                Log.Info("Party mode " + (value ? "on" : "off"));
+            }
+        }
+
+        public int Capacity { get { return party ? MaxClientsParty : MaxClients; } }
+
+        // Room PIN (Party mode): 4-6 digits, or null for none. Changing it disconnects nobody; new joins need it.
+        public string Pin
+        {
+            get { return pin; }
+            set { pin = RoomPin.IsValid(value) ? value : null; }
+        }
+
+        public bool RemoteControl { get { return remoteControl; } set { remoteControl = value; } }
+
+        // What the host shares: "all" (whole laptop) or "app" with the app's name. Announced in /info, hello
+        // and the state message.
+        public void SetSource(string kind, string app)
+        {
+            string k = kind == "app" ? "app" : "all";
+            string a = k == "app" ? Clip(app, 60, "an app") : null;
+            if (k == source && a == sourceApp) return;
+            source = k;
+            sourceApp = a;
+            SendTextAll(StateJson());
+        }
+
+        public string Source { get { return source; } }
+        public string SourceApp { get { return sourceApp; } }
+
+        // Suggest a listener EQ preset (flat|bass|voice|movie) to everyone, now and to new joiners; null clears it.
+        public string SuggestedEq
+        {
+            get { return suggestedEq; }
+            set
+            {
+                string v = EqPresets.IsValid(value) ? value : null;
+                suggestedEq = v;
+                if (v != null) SendTextAll(EqMessage(v));
+            }
+        }
+
+        public static string EqMessage(string preset) { return "{\"type\":\"control\",\"eq\":\"" + MiniJson.Escape(preset) + "\"}"; }
+
+        public bool Talking
+        {
+            get { return talking; }
+            set
+            {
+                if (talking == value) return;
+                talking = value;
+                SendTextAll(TalkMessage(value));
+            }
+        }
+
+        public static string TalkMessage(bool on) { return "{\"type\":\"talk\",\"on\":" + (on ? "true" : "false") + "}"; }
+
+        // In /info the app's name is "sourceApp" ("app" there already means "DualEarbuds"); in hello and state it is "app".
+        string SourceFields(bool forInfo)
+        {
+            return ",\"source\":\"" + source + "\"" + (sourceApp != null ? (forInfo ? ",\"sourceApp\":\"" : ",\"app\":\"") + MiniJson.Escape(sourceApp) + "\"" : "");
+        }
+
+        string StateJson()
+        {
+            return string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"state\",\"mirroring\":{0},\"rate\":{1}", mirroring ? "true" : "false", mirroring ? rate : 0) + SourceFields(false) + "}";
+        }
+
+        public static string PartyMessage(bool on) { return "{\"type\":\"party\",\"on\":" + (on ? "true" : "false") + "}"; }
+
+        public static string ControlMessage(int volume)
+        {
+            return "{\"type\":\"control\",\"volume\":" + ClampVolume(volume).ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        public const string KickReason = "Removed by the host";
+        public static string KickMessage(string reason)
+        {
+            return "{\"type\":\"kick\",\"reason\":\"" + MiniJson.Escape(reason ?? KickReason) + "\"}";
+        }
+
+        // client=web|android|windows (anything else counts as a browser)
+        public static string NormalizeClient(string c)
+        {
+            return c == "android" || c == "windows" ? c : "web";
+        }
+
+        public static int ClampVolume(int v) { return Math.Max(0, Math.Min(MaxListenerVolume, v)); }
+
+        public string InfoJson()
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "{{\"app\":\"DualEarbuds\",\"protocol\":{0},\"version\":\"{1}\",\"host\":\"{2}\",\"pc\":\"{3}\",\"rate\":{4},\"channels\":2,\"format\":\"s16le\",\"party\":{5},\"maxClients\":{6},\"pin\":{7},\"remote\":{8}",
+                AppInfo.Protocol, AppInfo.Version, AppInfo.Host, MiniJson.Escape(PcName), mirroring ? rate : 0, party ? "true" : "false", Capacity,
+                pin != null ? "true" : "false", remoteControl ? "true" : "false") + SourceFields(true) + "}";
+        }
+
+        public string HelloJson()
+        {
+            return string.Format(CultureInfo.InvariantCulture,
+                "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7}",
+                AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, AppInfo.Host, mirroring ? rate : 0, party ? "true" : "false",
+                PlayoutMs, remoteControl ? "true" : "false") + SourceFields(false) + "}";
+        }
+
+        public static string SyncReply(double c, long h)
+        {
+            return "{\"type\":\"sync\",\"c\":" + c.ToString("R", CultureInfo.InvariantCulture) + ",\"h\":" + h.ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        public static string ClockMessage(uint seq, long h)
+        {
+            return "{\"type\":\"clock\",\"seq\":" + seq.ToString(CultureInfo.InvariantCulture) + ",\"h\":" + h.ToString(CultureInfo.InvariantCulture) + "}";
+        }
+
+        PhoneConn Find(string id)
+        {
+            if (id == null) return null;
+            lock (lk) return conns.Find(c => !c.Closed && c.Id == id);
+        }
+
+        // Sets one listener's volume (0-150 %). The listener applies it and reports it back in its status.
+        public bool SetVolume(string id, int volume)
+        {
+            var c = Find(id);
+            if (c == null) return false;
+            int v = ClampVolume(volume);
+            c.SetVolumeLocal(v);
+            c.EnqueueControl(BuildTextFrame(ControlMessage(v)));
+            return true;
+        }
+
+        // Tells one listener it was removed (it must not reconnect by itself), then closes it.
+        public bool Kick(string id)
+        {
+            PhoneConn c;
+            lock (lk)
+            {
+                c = conns.Find(x => !x.Closed && x.Id == id);
+                if (c != null) conns.Remove(c);   // frees the slot right away
+            }
+            if (c == null) return false;
+            c.KickAndClose(BuildTextFrame(KickMessage(KickReason)));
+            Log.Info("Listener removed by the host: " + c.Remote + " (" + c.Name + ")");
+            return true;
+        }
+
+        internal string NewId() { return Interlocked.Increment(ref nextId).ToString(CultureInfo.InvariantCulture); }
+
         public int ClientCount
         {
             get { lock (lk) { conns.RemoveAll(c => c.Closed); return conns.Count; } }
@@ -183,7 +373,8 @@ namespace DualEarbuds
         {
             mirroring = on;
             if (newRate > 0) rate = newRate;
-            SendTextAll(string.Format(CultureInfo.InvariantCulture, "{{\"type\":\"state\",\"mirroring\":{0},\"rate\":{1}}}", on ? "true" : "false", on ? newRate : 0));
+            if (!on) Interlocked.Exchange(ref clockH, -1);
+            SendTextAll(StateJson());
         }
 
         public string Url(string host)
@@ -192,22 +383,65 @@ namespace DualEarbuds
         }
 
         // ---------------------------------------------------------------- audio out
+        public static int PacketFrames(int sampleRate) { return Math.Max(1, sampleRate * PacketMs / 1000); }
+
+        // Called by the capture thread with whatever WASAPI delivered (normally 10 ms). Sends exact 10 ms packets.
         public void Broadcast(float[] data, int frames, int sampleRate)
         {
             PhoneConn[] arr;
             lock (lk)
             {
-                if (conns.Count == 0) return;
+                if (conns.Count == 0) { lock (packLk) packFrames = 0; return; }
                 arr = conns.ToArray();
             }
+            if (sampleRate <= 0 || frames <= 0) return;
             rate = sampleRate;
-            byte[] msg = BuildAudioFrame(data, frames, sampleRate, seq++);
+            int per = PacketFrames(sampleRate);
+            lock (packLk)
+            {
+                if (packRate != sampleRate) { packRate = sampleRate; packFrames = 0; }
+                int offset = 0;
+                // fast path: nothing pending, so full 10 ms slices go out straight from the capture buffer
+                long now = NowMs;
+                while (packFrames == 0 && frames - offset >= per)
+                {
+                    NoteClock(seq, now);
+                    Send(arr, BuildAudioFrame(data, offset, per, sampleRate, seq++));
+                    offset += per;
+                }
+                while (offset < frames)
+                {
+                    if (pack.Length < per * 2) pack = new float[per * 2];
+                    int take = Math.Min(per - packFrames, frames - offset);
+                    Array.Copy(data, offset * 2, pack, packFrames * 2, take * 2);
+                    packFrames += take;
+                    offset += take;
+                    if (packFrames == per)
+                    {
+                        NoteClock(seq, now);
+                        Send(arr, BuildAudioFrame(pack, 0, per, sampleRate, seq++));
+                        packFrames = 0;
+                    }
+                }
+            }
+        }
+
+        // The newest packet's sequence number and when it was captured (for the clock message).
+        void NoteClock(uint s, long h) { clockSeq = s; Interlocked.Exchange(ref clockH, h); }
+
+        void Send(PhoneConn[] arr, byte[] msg)
+        {
             foreach (var c in arr) c.EnqueueAudio(msg);
             Interlocked.Add(ref bytesSent, (long)msg.Length * arr.Length);
         }
 
         // WebSocket binary frame: [rate int32][seq uint32][s16le stereo].
         public static byte[] BuildAudioFrame(float[] data, int frames, int sampleRate, uint sequence)
+        {
+            return BuildAudioFrame(data, 0, frames, sampleRate, sequence);
+        }
+
+        public static byte[] BuildAudioFrame(float[] data, int startFrame, int frames, int sampleRate, uint sequence)
         {
             int payload = 8 + frames * 4;
             int hdr = HeaderSize(payload);
@@ -216,7 +450,7 @@ namespace DualEarbuds
             int o = hdr;
             WriteInt32(f, o, sampleRate);
             WriteInt32(f, o + 4, unchecked((int)sequence));
-            SampleConvert.ToPcm16(data, frames, f, o + 8);
+            SampleConvert.ToPcm16(data, startFrame, frames, f, o + 8);
             return f;
         }
 
@@ -258,10 +492,16 @@ namespace DualEarbuds
         // ---------------------------------------------------------------- housekeeping
         void PingLoop()
         {
+            int tick = 0;
             while (!stopFlag)
             {
-                Thread.Sleep(2000);
+                Thread.Sleep(1000);
                 long now = NowMs;
+                long h;
+                uint cs;
+                lock (packLk) { cs = clockSeq; h = Interlocked.Read(ref clockH); }
+                if (h >= 0 && mirroring) SendTextAll(ClockMessage(cs, h));
+                if (++tick % 2 != 0) continue;
                 SendTextAll("{\"type\":\"ping\",\"t\":" + now.ToString(CultureInfo.InvariantCulture) + "}");
                 PhoneConn[] arr;
                 lock (lk) arr = conns.ToArray();
@@ -335,10 +575,19 @@ namespace DualEarbuds
                     string wsKey;
                     if (!headers.TryGetValue("Sec-WebSocket-Key", out wsKey)) { Respond(ns, "400 Bad Request", "text/plain", Encoding.ASCII.GetBytes("WebSocket only")); c.Close(); return; }
                     if (!authed) { Respond(ns, "403 Forbidden", "text/plain", Encoding.ASCII.GetBytes("Wrong link key")); c.Close(); return; }
+                    string roomPin = pin, givenPin;
+                    query.TryGetValue("p", out givenPin);
+                    if (roomPin != null && !RoomPin.Matches(roomPin, givenPin))
+                    {
+                        NoteBadKey(IpOf(c), "pin:" + (givenPin ?? ""));   // wrong PINs count toward the lockout
+                        Respond(ns, "403 Forbidden", "text/plain", Encoding.ASCII.GetBytes(string.IsNullOrEmpty(givenPin) ? "PIN required" : "Wrong PIN"));
+                        c.Close();
+                        return;
+                    }
                     string name, client;
                     query.TryGetValue("name", out name);
                     query.TryGetValue("client", out client);
-                    var conn = new PhoneConn(this, c, ns, Clip(name, 60, "Phone"), client == "android" ? "android" : "web");
+                    var conn = new PhoneConn(this, c, ns, Clip(name, 60, "Phone"), PhoneLink.NormalizeClient(client));
                     // Key, stop flag and phone limit are re-checked under the same lock that New link / Stop use,
                     // so a phone can't slip in with an old key or after the link stopped.
                     string refuse = null;
@@ -347,7 +596,7 @@ namespace DualEarbuds
                         conns.RemoveAll(x => x.Closed);
                         if (stopFlag) refuse = "503 Service Unavailable";
                         else if (!LinkKey.Matches(key, given)) refuse = "403 Forbidden";
-                        else if (conns.Count >= MaxClients) refuse = "503 Service Unavailable";
+                        else if (conns.Count >= Capacity) refuse = "503 Service Unavailable";
                         else conns.Add(conn);
                     }
                     if (refuse != null)
@@ -356,12 +605,14 @@ namespace DualEarbuds
                         c.Close();
                         return;
                     }
+                    try { c.SendBufferSize = SocketSendBuffer; } catch { }
                     byte[] resp = Encoding.ASCII.GetBytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + AcceptKey(wsKey) + "\r\n\r\n");
                     try { ns.Write(resp, 0, resp.Length); }
                     catch { lock (lk) conns.Remove(conn); c.Close(); return; }
-                    conn.EnqueueControl(BuildTextFrame(string.Format(CultureInfo.InvariantCulture,
-                        "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"rate\":{3}}}",
-                        AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, mirroring ? rate : 0)));
+                    conn.EnqueueControl(BuildTextFrame(HelloJson()));
+                    string eq = suggestedEq;
+                    if (eq != null) conn.EnqueueControl(BuildTextFrame(EqMessage(eq)));
+                    if (talking) conn.EnqueueControl(BuildTextFrame(TalkMessage(true)));
                     conn.Begin();
                     Log.Info("Phone connected: " + conn.Remote + " (" + conn.Name + ", " + conn.Client + ")");
                     return;
@@ -370,7 +621,7 @@ namespace DualEarbuds
                 if (path == "/" || path == "/index.html")
                 {
                     if (!authed) { Respond(ns, "403 Forbidden", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(WebPlayer.ForbiddenHtml)); c.Close(); return; }
-                    Respond(ns, "200 OK", "text/html; charset=utf-8", Encoding.UTF8.GetBytes(WebPlayer.Html));
+                    Respond(ns, "200 OK", "text/html; charset=utf-8", WebPlayer.HtmlBytes);
                     c.Close();
                     return;
                 }
@@ -378,10 +629,7 @@ namespace DualEarbuds
                 if (path == "/info")
                 {
                     if (!authed) { Respond(ns, "403 Forbidden", "application/json", Encoding.ASCII.GetBytes("{\"error\":\"key\"}")); c.Close(); return; }
-                    string json = string.Format(CultureInfo.InvariantCulture,
-                        "{{\"app\":\"DualEarbuds\",\"protocol\":{0},\"version\":\"{1}\",\"pc\":\"{2}\",\"rate\":{3},\"channels\":2,\"format\":\"s16le\"}}",
-                        AppInfo.Protocol, AppInfo.Version, MiniJson.Escape(PcName), mirroring ? rate : 0);
-                    Respond(ns, "200 OK", "application/json", Encoding.UTF8.GetBytes(json));
+                    Respond(ns, "200 OK", "application/json", Encoding.UTF8.GetBytes(InfoJson()));
                     c.Close();
                     return;
                 }
@@ -476,6 +724,23 @@ namespace DualEarbuds
                 if (d.TryGetValue("t", out tv) && tv is double && (double)tv >= 0)
                     c.SetRtt((int)Math.Min(int.MaxValue, Math.Max(0, NowMs - (double)tv)));
             }
+            else if (type == "sync")
+            {
+                object cv;
+                if (d.TryGetValue("c", out cv) && cv is double)
+                {
+                    c.MarkSynced();
+                    c.EnqueueControl(BuildTextFrame(SyncReply((double)cv, NowMs)));
+                }
+            }
+            else if (type == "remote")
+            {
+                string action = MiniJson.GetString(d, "action", "");
+                if (!remoteControl || !MediaKeys.IsAction(action)) return;
+                if (!c.AllowRemote(NowMs)) return;   // at most 5 per second per listener
+                var h = RemoteAction;
+                if (h != null) { try { h(c.Id, action); } catch (Exception ex) { Log.Warn("Remote control: " + ex.Message); } }
+            }
             else if (type == "status")
             {
                 string earb = MiniJson.GetString(d, "earbuds", null);
@@ -485,6 +750,7 @@ namespace DualEarbuds
                     MiniJson.GetInt(d, "battery", -1),
                     MiniJson.GetInt(d, "volume", -1),
                     MiniJson.GetInt(d, "bufferMs", -1),
+                    MiniJson.GetInt(d, "underruns", -1),
                     MiniJson.GetBool(d, "playing", false));
             }
         }
@@ -537,13 +803,15 @@ namespace DualEarbuds
         readonly PhoneInfo info = new PhoneInfo();
         int closed;
         long lastSeen;
+        volatile bool closeAfterControl;
+        readonly RateLimiter remoteLimit = new RateLimiter(PhoneLink.RemotePerSecond);
 
         public PhoneConn(PhoneLink owner, TcpClient t, NetworkStream s, string name, string client)
         {
             this.owner = owner;
             tcp = t;
             ns = s;
-            info.Id = Guid.NewGuid().ToString("N");
+            info.Id = owner.NewId();   // stable for the life of this connection
             info.Name = name;
             info.Client = client;
             try { info.Remote = ((IPEndPoint)t.Client.RemoteEndPoint).Address.ToString(); } catch { }
@@ -552,6 +820,7 @@ namespace DualEarbuds
         }
 
         public bool Closed { get { return closed != 0; } }
+        public string Id { get { return info.Id; } }
         public string Remote { get { return info.Remote; } }
         public string Name { get { return info.Name; } }
         public string Client { get { return info.Client; } }
@@ -570,15 +839,30 @@ namespace DualEarbuds
                 return new PhoneInfo
                 {
                     Id = info.Id, Name = info.Name, Client = info.Client, Remote = info.Remote, Earbuds = info.Earbuds,
-                    Battery = info.Battery, Volume = info.Volume, BufferMs = info.BufferMs, Playing = info.Playing,
-                    RttMs = info.RttMs, ConnectedAt = info.ConnectedAt, PacketsSent = info.PacketsSent, PacketsDropped = info.PacketsDropped
+                    Battery = info.Battery, Volume = info.Volume, BufferMs = info.BufferMs, Underruns = info.Underruns, Playing = info.Playing,
+                    RttMs = info.RttMs, ConnectedAt = info.ConnectedAt, PacketsSent = info.PacketsSent, PacketsDropped = info.PacketsDropped,
+                    Synced = info.Synced, RemoteCount = info.RemoteCount
                 };
             }
         }
 
         public void SetRtt(int ms) { lock (lk) info.RttMs = ms; }
 
-        public void UpdateStatus(string device, string earbuds, int battery, int volume, int bufferMs, bool playing)
+        public void MarkSynced() { lock (lk) info.Synced = true; }
+
+        public bool AllowRemote(long now)
+        {
+            lock (lk)
+            {
+                if (!remoteLimit.Allow(now)) return false;
+                info.RemoteCount++;
+                return true;
+            }
+        }
+
+        public void SetVolumeLocal(int volume) { lock (lk) info.Volume = volume; }
+
+        public void UpdateStatus(string device, string earbuds, int battery, int volume, int bufferMs, int underruns, bool playing)
         {
             lock (lk)
             {
@@ -587,13 +871,14 @@ namespace DualEarbuds
                 info.Battery = battery >= 0 && battery <= 100 ? battery : -1;
                 if (volume >= 0) info.Volume = Math.Min(150, volume);
                 if (bufferMs >= 0) info.BufferMs = Math.Min(5000, bufferMs);
+                if (underruns >= 0) info.Underruns = underruns;
                 info.Playing = playing;
             }
         }
 
         public void EnqueueAudio(byte[] frame)
         {
-            if (Closed) return;
+            if (Closed || closeAfterControl) return;
             lock (lk)
             {
                 audio.AddLast(frame);
@@ -605,9 +890,26 @@ namespace DualEarbuds
 
         public void EnqueueControl(byte[] frame)
         {
-            if (Closed) return;
+            if (Closed || closeAfterControl) return;
             lock (lk) control.Enqueue(frame);
             signal.Set();
+        }
+
+        // Sends this last message (and a close frame), then closes. Audio still queued is dropped.
+        public void KickAndClose(byte[] lastMessage)
+        {
+            if (Closed) return;
+            lock (lk)
+            {
+                audio.Clear();
+                control.Enqueue(lastMessage);
+                control.Enqueue(PhoneLink.BuildFrame(0x8, new byte[] { 0x03, 0xE8 }));   // close, code 1000
+                closeAfterControl = true;
+            }
+            signal.Set();
+            // a listener that stopped reading must not keep the socket open: close anyway after a moment
+            var t = new Thread(() => { Thread.Sleep(2000); Close(); }) { IsBackground = true, Name = "PhoneKick" };
+            t.Start();
         }
 
         void SendLoop()
@@ -620,13 +922,15 @@ namespace DualEarbuds
                     while (!Closed)
                     {
                         byte[] f = null;
+                        bool last = false;
                         lock (lk)
                         {
-                            if (control.Count > 0) f = control.Dequeue();
-                            else if (audio.Count > 0) { f = audio.First.Value; audio.RemoveFirst(); }
+                            if (control.Count > 0) { f = control.Dequeue(); last = closeAfterControl && control.Count == 0; }
+                            else if (audio.Count > 0 && !closeAfterControl) { f = audio.First.Value; audio.RemoveFirst(); }
                         }
                         if (f == null) break;
                         ns.Write(f, 0, f.Length);
+                        if (last) { ns.Flush(); Thread.Sleep(100); Close(); return; }
                     }
                 }
             }
@@ -697,7 +1001,7 @@ namespace DualEarbuds
         {
             if (Interlocked.Exchange(ref closed, 1) != 0) return;
             try { tcp.Close(); } catch { }
-            signal.Set();
+            try { signal.Set(); } catch { }
             Log.Info("Phone disconnected: " + info.Remote);
         }
     }

@@ -62,13 +62,18 @@ namespace DualEarbuds
         public volatile string Error;
         public volatile bool Running;
         public volatile int LastHResult;
+        public volatile OutputEffects Effects;   // EQ / hearing profile / dialogue boost, or null
+        // Listener sync mode: the queue length is steered from outside (Adjust), so the built-in drift
+        // limit doesn't throw away audio the clock sync wants to keep.
+        public volatile bool SyncMode;
         long sourceFrames;
         float peak;
 
         readonly int rate, cushion, driftLimit;
         readonly Ring ring;
         readonly object lk = new object();
-        int target, pendingSilence;
+        int target, pendingSilence, delayMs, bufferMs;
+        int underruns;
         bool primed;
         Thread thread;
         volatile bool stopFlag;
@@ -82,8 +87,14 @@ namespace DualEarbuds
             ring = new Ring(rate * 3);
             cushion = rate * 15 / 1000;
             driftLimit = rate * 80 / 1000;
-            target = cushion + Math.Max(0, delayMs) * rate / 1000;
+            this.delayMs = Math.Max(0, delayMs);
+            target = cushion + this.delayMs * rate / 1000;
         }
+
+        public int Rate { get { return rate; } }
+
+        // Times the device ran dry while playing (network listening counts these; mirroring ignores them).
+        public int Underruns { get { return Thread.VolatileRead(ref underruns); } }
 
         public long SourceFrames { get { return Interlocked.Read(ref sourceFrames); } }
         public float TakePeak() { float p = peak; peak = 0; return p; }
@@ -107,18 +118,35 @@ namespace DualEarbuds
         {
             lock (lk)
             {
-                int nt = cushion + Math.Max(0, ms) * rate / 1000;
-                int diff = nt - target;
-                target = nt;
-                if (!primed) return;
-                if (diff > 0) pendingSilence += diff;
-                else
-                {
-                    int d = -diff;
-                    int fromSil = Math.Min(d, pendingSilence);
-                    pendingSilence -= fromSil;
-                    ring.Discard(d - fromSil);
-                }
+                delayMs = Math.Max(0, ms);
+                Retarget();
+            }
+        }
+
+        // Extra jitter buffer for network listening (on top of the 15 ms cushion and the manual delay).
+        public void SetBufferMs(int ms)
+        {
+            lock (lk)
+            {
+                bufferMs = Math.Max(0, ms);
+                Retarget();
+            }
+        }
+
+        // Caller holds lk.
+        void Retarget()
+        {
+            int nt = cushion + (delayMs + bufferMs) * rate / 1000;
+            int diff = nt - target;
+            target = nt;
+            if (!primed) return;
+            if (diff > 0) pendingSilence += diff;
+            else
+            {
+                int d = -diff;
+                int fromSil = Math.Min(d, pendingSilence);
+                pendingSilence -= fromSil;
+                ring.Discard(d - fromSil);
             }
         }
 
@@ -137,7 +165,7 @@ namespace DualEarbuds
         {
             lock (lk)
             {
-                int excess = pendingSilence + ring.Count - (target + driftLimit);
+                int excess = SyncMode ? 0 : pendingSilence + ring.Count - (target + driftLimit);
                 if (excess > 0)
                 {
                     int fromSil = Math.Min(excess, pendingSilence);
@@ -163,8 +191,30 @@ namespace DualEarbuds
                     w += r;
                     Interlocked.Add(ref sourceFrames, r);
                 }
-                if (w == 0 && deviceEmpty) primed = false;
+                var fx = Effects;
+                if (fx != null && w > 0) fx.Process(dst, 0, w, rate);
+                if (w == 0 && deviceEmpty)
+                {
+                    if (primed) Interlocked.Increment(ref underruns);
+                    primed = false;
+                }
                 return w;
+            }
+        }
+
+        // Frames waiting to be played (silence still to insert + sound in the ring), excluding the device's own buffer.
+        public int QueuedFrames { get { lock (lk) return pendingSilence + ring.Count; } }
+
+        // frames > 0 inserts that much silence at the end of the queue's head; < 0 drops that much (silence first).
+        public void Adjust(int frames)
+        {
+            lock (lk)
+            {
+                if (frames > 0) { pendingSilence += frames; return; }
+                int d = -frames;
+                int fromSil = Math.Min(d, pendingSilence);
+                pendingSilence -= fromSil;
+                ring.Discard(d - fromSil);
             }
         }
 
@@ -229,22 +279,41 @@ namespace DualEarbuds
         }
     }
 
-    // The sound source: loopback capture of one output device.
+    public enum CaptureKind { Loopback, App, Microphone }
+
+    // A capture stream: loopback of one output device (the whole laptop), one app's sound (process loopback),
+    // or the default microphone (talk-over, calibration). Delivers stereo float on its own thread.
     public class LoopbackCapture
     {
         readonly string requestedId;
+        readonly CaptureKind kind;
+        readonly int appPid, wantRate;
         public volatile string DeviceId;
         public volatile int Rate;
         public volatile string Error;
         public volatile bool Running;
         public Action<float[], int> OnData;
+        // (data, frames, time of the first frame in 100 ns QPC units) - used by calibration
+        public Action<float[], int, long> OnDataTimed;
 
         float peak;
         Thread thread;
         volatile bool stopFlag;
         readonly ManualResetEvent ready = new ManualResetEvent(false);
 
-        public LoopbackCapture(string id) { requestedId = id; }
+        public LoopbackCapture(string id) : this(CaptureKind.Loopback, id, 0, 0) { }
+
+        // App: pid = the app's process (its children included); Microphone: rate = the rate to deliver.
+        public LoopbackCapture(CaptureKind kind, string id, int pid, int rate)
+        {
+            this.kind = kind;
+            requestedId = id;
+            appPid = pid;
+            wantRate = rate > 0 ? rate : 48000;
+        }
+
+        public CaptureKind Kind { get { return kind; } }
+        public int AppPid { get { return appPid; } }
 
         public float TakePeak() { float p = peak; peak = 0; return p; }
 
@@ -252,9 +321,10 @@ namespace DualEarbuds
         {
             thread = new Thread(Run);
             thread.IsBackground = true;
-            thread.Name = "Capture";
+            thread.Name = kind == CaptureKind.Microphone ? "Mic" : "Capture";
+            thread.SetApartmentState(ApartmentState.MTA);
             thread.Start();
-            ready.WaitOne(5000);
+            ready.WaitOne(6000);
             if (!Running && Error == null) Error = "Timed out opening the sound source";
         }
 
@@ -269,21 +339,47 @@ namespace DualEarbuds
             IMMDeviceEnumerator en = null;
             IAudioClient ac = null;
             IAudioCaptureClient cc = null;
+            IntPtr fmtMem = IntPtr.Zero;
+            AutoResetEvent wake = null;
             try
             {
-                en = Wasapi.NewEnumerator();
-                string rid;
-                ac = Wasapi.OpenClient(en, requestedId, out rid);
-                DeviceId = rid;
-                IntPtr mf;
-                Wasapi.Check(ac.GetMixFormat(out mf), "Read sound format");
                 AudioFormat f;
-                try
+                if (kind == CaptureKind.App)
                 {
-                    f = Wasapi.ReadFormat(mf);
-                    Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_LOOPBACK, 2000000, 0, mf, IntPtr.Zero), "Set up capture");
+                    // process loopback has no mix format: ask for float stereo and let Windows convert
+                    ac = AppAudio.ActivateProcessLoopback(appPid);
+                    DeviceId = "app:" + appPid;
+                    fmtMem = Wasapi.MakeFloatStereo(wantRate);
+                    f = Wasapi.ReadFormat(fmtMem);
+                    wake = new AutoResetEvent(false);
+                    Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_LOOPBACK | Wasapi.FLAG_EVENTCALLBACK | Wasapi.FLAG_AUTOCONVERT | Wasapi.FLAG_SRC_QUALITY, 2000000, 0, fmtMem, IntPtr.Zero), "Set up app capture");
+                    Wasapi.Check(ac.SetEventHandle(wake.SafeWaitHandle.DangerousGetHandle()), "Set up app capture");
                 }
-                finally { Marshal.FreeCoTaskMem(mf); }
+                else
+                {
+                    en = Wasapi.NewEnumerator();
+                    string rid;
+                    ac = kind == CaptureKind.Microphone ? Wasapi.OpenCaptureClient(en, requestedId, out rid) : Wasapi.OpenClient(en, requestedId, out rid);
+                    DeviceId = rid;
+                    if (kind == CaptureKind.Microphone)
+                    {
+                        // the mic is converted to the stream's rate and stereo by Windows
+                        fmtMem = Wasapi.MakeFloatStereo(wantRate);
+                        f = Wasapi.ReadFormat(fmtMem);
+                        Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_AUTOCONVERT | Wasapi.FLAG_SRC_QUALITY, 1000000, 0, fmtMem, IntPtr.Zero), "Set up microphone");
+                    }
+                    else
+                    {
+                        IntPtr mf;
+                        Wasapi.Check(ac.GetMixFormat(out mf), "Read sound format");
+                        try
+                        {
+                            f = Wasapi.ReadFormat(mf);
+                            Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_LOOPBACK, 2000000, 0, mf, IntPtr.Zero), "Set up capture");
+                        }
+                        finally { Marshal.FreeCoTaskMem(mf); }
+                    }
+                }
                 bool ok = f.IsFloat ? f.Bits == 32 : (f.Bits == 16 || f.Bits == 24 || f.Bits == 32);
                 if (!ok) throw new Exception("Unsupported sound format");
                 Rate = f.Rate;
@@ -299,15 +395,15 @@ namespace DualEarbuds
                 byte[] raw = new byte[0];
                 while (!stopFlag)
                 {
-                    Thread.Sleep(5);
+                    if (wake != null) wake.WaitOne(100); else Thread.Sleep(5);
                     uint packet;
                     Wasapi.Check(cc.GetNextPacketSize(out packet), "Read sound");
                     while (packet > 0 && !stopFlag)
                     {
                         IntPtr data;
                         uint frames, flags;
-                        ulong p1, p2;
-                        Wasapi.Check(cc.GetBuffer(out data, out frames, out flags, out p1, out p2), "Read sound");
+                        ulong p1, qpc;
+                        Wasapi.Check(cc.GetBuffer(out data, out frames, out flags, out p1, out qpc), "Read sound");
                         int fr = (int)frames;
                         if (outBuf.Length < fr * 2) outBuf = new float[fr * 2];
                         if ((flags & Wasapi.BUFFER_SILENT) != 0) Array.Clear(outBuf, 0, fr * 2);
@@ -326,6 +422,8 @@ namespace DualEarbuds
 
                         var cb = OnData;
                         if (cb != null) cb(outBuf, fr);
+                        var tcb = OnDataTimed;
+                        if (tcb != null) tcb(outBuf, fr, (long)qpc);
                         Wasapi.Check(cc.GetNextPacketSize(out packet), "Read sound");
                     }
                 }
@@ -334,7 +432,7 @@ namespace DualEarbuds
             catch (Exception ex)
             {
                 Error = Wasapi.Friendly(ex);
-                Log.Warn("Capture: " + ex.Message);
+                Log.Warn((kind == CaptureKind.Microphone ? "Microphone: " : "Capture: ") + ex.Message);
             }
             finally
             {
@@ -343,6 +441,8 @@ namespace DualEarbuds
                 Wasapi.Release(cc);
                 Wasapi.Release(ac);
                 Wasapi.Release(en);
+                if (fmtMem != IntPtr.Zero) Marshal.FreeCoTaskMem(fmtMem);
+                if (wake != null) wake.Close();
             }
         }
     }
@@ -449,8 +549,14 @@ namespace DualEarbuds
         // Float stereo -> little-endian signed 16-bit, written into dst at offset.
         public static void ToPcm16(float[] src, int frames, byte[] dst, int offset)
         {
+            ToPcm16(src, 0, frames, dst, offset);
+        }
+
+        public static void ToPcm16(float[] src, int startFrame, int frames, byte[] dst, int offset)
+        {
             int o = offset;
-            for (int i = 0; i < frames * 2; i++)
+            int end = (startFrame + frames) * 2;
+            for (int i = startFrame * 2; i < end; i++)
             {
                 float s = src[i];
                 if (s > 1f) s = 1f; else if (s < -1f) s = -1f;
@@ -469,6 +575,9 @@ namespace DualEarbuds
         LoopbackCapture cap;
 
         public volatile PhoneLink Phone;
+        public readonly TalkOver Talk = new TalkOver();
+        public volatile SoundClassifier Classifier;   // Smart EQ "by sound", or null
+        public CaptureKind SourceKind { get { var c = cap; return c == null ? CaptureKind.Loopback : c.Kind; } }
 
         public bool Running { get { return cap != null; } }
         public string SourceDeviceId { get { var c = cap; return c == null ? null : c.DeviceId; } }
@@ -486,10 +595,13 @@ namespace DualEarbuds
         }
 
         // sourceId == null: follow the Windows default output. Returns an error message or null.
-        public string Start(string sourceId)
+        public string Start(string sourceId) { return Start(sourceId, 0); }
+
+        // appPid > 0: share only that app (and its child processes) instead of the whole output.
+        public string Start(string sourceId, int appPid)
         {
             Stop();
-            var c = new LoopbackCapture(sourceId);
+            var c = appPid > 0 ? new LoopbackCapture(CaptureKind.App, null, appPid, 48000) : new LoopbackCapture(sourceId);
             c.OnData = Dispatch;
             c.Start();
             if (!c.Running)
@@ -507,6 +619,9 @@ namespace DualEarbuds
 
         void Dispatch(float[] data, int frames)
         {
+            Talk.MixInto(data, frames);
+            var cl = Classifier;
+            if (cl != null) cl.FeedStereo(data, frames);
             OutputStream[] arr;
             lock (lk) arr = outs.ToArray();
             foreach (var o in arr) o.Push(data, frames);

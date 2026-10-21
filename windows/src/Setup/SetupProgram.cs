@@ -2,12 +2,15 @@
 //   DualEarbuds-Setup.exe                      install wizard (or maintenance page if installed)
 //   DualEarbuds-Setup.exe --maintain           Modify / Repair / Uninstall page
 //   DualEarbuds-Setup.exe --uninstall          uninstall page
+//   DualEarbuds-Setup.exe --update             started by the app's updater: quiet upgrade keeping the installed
+//                                              options, then starts the app again (wizard if not installed)
 //   --silent                                   no UI: install (default), --repair or --uninstall
 //   --dir "C:\path"                            install folder (silent install)
 //   --no-desktop --no-startmenu --startup --no-firewall --remove-data
 //   --test-root "C:\tmp\x"                     QA: keep files, shortcuts and registry inside a sandbox
 //   --screenshots "C:\docs"                     render every installer screen to PNG (no window, installs nothing)
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -42,6 +45,8 @@ namespace DualEarbuds.Setup
             try
             {
                 byte[] payload = LoadPayload();
+                if (args.Contains("--update") && !args.Contains("--uninstall") && core.Installed() != null)
+                    return Update(core, payload, self);
                 if (silent)
                 {
                     core.Progress = s => Console.WriteLine(s);
@@ -64,7 +69,9 @@ namespace DualEarbuds.Setup
                 }
 
                 var app = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-                Theme.Apply(app.Resources, "dark");
+                Theme.Apply(app.Resources, "system");                 // light or dark like Windows, and follows it live
+                Theme.StartFollowingSystem(app.Resources);
+                app.Exit += (s, e) => Theme.StopFollowingSystem();
                 var mode = args.Contains("--uninstall") ? SetupMode.Uninstall : args.Contains("--maintain") ? SetupMode.Maintain : SetupMode.Install;
                 var win = new SetupWindow(core, payload, self, mode);
                 app.Run(win);
@@ -74,6 +81,23 @@ namespace DualEarbuds.Setup
             {
                 if (silent) { Console.Error.WriteLine("ERROR " + ex.Message); return 2; }
                 MessageBox.Show("Setup couldn't continue: " + ex.Message, "Dual Earbuds Setup", MessageBoxButton.OK, MessageBoxImage.Error);
+                return 2;
+            }
+        }
+
+        static int Update(SetupCore core, byte[] payload, string self)
+        {
+            try
+            {
+                string exe = core.Update(payload, self);
+                try { Process.Start(new ProcessStartInfo(exe) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exe) }); }
+                catch (Exception ex) { Console.Error.WriteLine("Could not start the app: " + ex.Message); }
+                return 0;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("Dual Earbuds couldn't be updated: " + ex.Message + "\n\nClose Dual Earbuds if it is still open, then run this installer again.",
+                                "Dual Earbuds Setup", MessageBoxButton.OK, MessageBoxImage.Error);
                 return 2;
             }
         }
