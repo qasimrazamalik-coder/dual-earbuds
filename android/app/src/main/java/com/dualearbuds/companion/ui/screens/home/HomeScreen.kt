@@ -6,36 +6,27 @@ import android.media.AudioManager
 import android.os.Build
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -43,7 +34,6 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -72,18 +62,30 @@ import com.dualearbuds.companion.net.discovery.target
 import com.dualearbuds.companion.power.BackgroundSettings
 import com.dualearbuds.companion.service.PlaybackController
 import com.dualearbuds.companion.service.PlayerStatus
+import com.dualearbuds.companion.setup.SetupChecks
+import com.dualearbuds.companion.setup.SetupFactsReader
 import com.dualearbuds.companion.ui.Permissions
 import com.dualearbuds.companion.ui.components.Banner
-import com.dualearbuds.companion.ui.components.NavCard
-import com.dualearbuds.companion.ui.components.SectionCard
+import com.dualearbuds.companion.ui.components.Hint
+import com.dualearbuds.companion.ui.components.Panel
+import com.dualearbuds.companion.ui.components.PanelBody
+import com.dualearbuds.companion.ui.components.PanelRow
+import com.dualearbuds.companion.ui.components.QuietButton
+import com.dualearbuds.companion.ui.components.ScopeMath
+import com.dualearbuds.companion.ui.components.Section
 import com.dualearbuds.companion.ui.components.Segmented
+import com.dualearbuds.companion.ui.components.SliderRow
+import com.dualearbuds.companion.ui.components.StatusChip
+import com.dualearbuds.companion.ui.components.StatusDot
+import com.dualearbuds.companion.ui.components.Tone
+import com.dualearbuds.companion.ui.components.TopBar
+import com.dualearbuds.companion.ui.components.PanelDivider
 import com.dualearbuds.companion.ui.theme.AppTheme
 import com.journeyapps.barcodescanner.ScanContract
 import com.journeyapps.barcodescanner.ScanOptions
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.Locale
 import kotlin.math.roundToInt
 
 /** Result of checking a pasted/scanned link (GET /info) before joining. */
@@ -111,13 +113,13 @@ private fun showSystemVolumePanel(context: Context) {
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     onOpenGuide: () -> Unit,
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
-    onShareThisPhone: () -> Unit
+    onShareThisPhone: () -> Unit,
+    onOpenSetup: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -134,12 +136,11 @@ fun HomeScreen(
 
     var linkText by rememberSaveable { mutableStateOf(Prefs.lastLink) }
     var check by remember { mutableStateOf<CheckState>(CheckState.None) }
-    var batteryOk by remember { mutableStateOf(BackgroundSettings.isIgnoringBatteryOptimizations(context)) }
     var pinFor by remember { mutableStateOf<PendingJoin?>(null) }
     var pinWasWrong by remember { mutableStateOf(false) }
     var needLink by remember { mutableStateOf<DiscoveredHost?>(null) }
     var showBatteryOffer by remember { mutableStateOf(false) }
-    var pendingStart by remember { mutableStateOf<LinkTarget?>(null) }
+    var setupTick by remember { mutableIntStateOf(0) }
 
     // Nearby search only while Home is visible.
     DisposableEffect(Unit) {
@@ -147,8 +148,12 @@ fun HomeScreen(
         onDispose { NsdBrowser.stop() }
     }
     LifecycleEventEffect(Lifecycle.Event.ON_RESUME) {
-        batteryOk = BackgroundSettings.isIgnoringBatteryOptimizations(context)
         EarbudsMonitor.refresh()
+        setupTick++
+    }
+    // Setup check summary for the status chip (shown only when something needs attention).
+    val setupChip = remember(setupTick, earbuds, latencies, player.target, player.powerSave) {
+        SetupChecks.chipText(SetupChecks.evaluate(SetupFactsReader.read(context)))
     }
 
     // Errors that need the user: a PIN prompt; a wrong PIN counts once towards the local cool-down.
@@ -170,7 +175,7 @@ fun HomeScreen(
             else -> Unit
         }
     }
-    // First real playback: PIN accepted; offer the battery exemption once (light, never on first launch).
+    // First real playback: PIN accepted; offer the Setup check once (never on first launch, never up front).
     LaunchedEffect(player.status) {
         if (player.status == PlayerStatus.PLAYING) {
             PinGate.policy.onAccepted()
@@ -181,31 +186,11 @@ fun HomeScreen(
         }
     }
 
-    // Notifications (Android 13+) are asked once, at the first Start, so the player shows its controls.
-    val startPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { _ ->
-        EarbudsMonitor.refresh()
-        pendingStart?.let { PlaybackController.start(context, it) }
-        pendingStart = null
-    }
-
+    /** Playback needs no runtime permission, so nothing is asked here; Setup check asks with reasons. */
     fun start(target: LinkTarget) {
         check = CheckState.None
         linkText = target.withoutPin().toLink()
-        val perms = mutableListOf<String>()
-        if (Permissions.needsNotifications(context) && !Prefs.askedNotifications) {
-            Prefs.askedNotifications = true
-            perms += Manifest.permission.POST_NOTIFICATIONS
-        }
-        if (Permissions.needsBluetooth(context) && !Prefs.askedBluetooth) {
-            Prefs.askedBluetooth = true
-            perms += Manifest.permission.BLUETOOTH_CONNECT
-        }
-        if (perms.isEmpty()) {
-            PlaybackController.start(context, target)
-        } else {
-            pendingStart = target
-            startPermissionLauncher.launch(perms.toTypedArray())
-        }
+        PlaybackController.start(context, target)
     }
 
     fun join(target: LinkTarget, name: String, pinRequired: Boolean) {
@@ -265,6 +250,7 @@ fun HomeScreen(
     }
     val bluetoothPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
         EarbudsMonitor.refresh()
+        setupTick++
     }
 
     fun launchScanner() {
@@ -290,41 +276,27 @@ fun HomeScreen(
         }
     }
 
-    fun onStartStop() {
-        if (player.running) {
-            PlaybackController.stop(context)
-        } else {
-            checkAndJoin(linkText)
-        }
+    val live = player.status == PlayerStatus.PLAYING && !player.userMuted
+    val readout = when {
+        player.running && player.status != PlayerStatus.CONNECTING ->
+            ScopeMath.readout(player.rate, player.playoutMs, player.transport, player.synced, player.syncErrorMs, player.targetMs)
+        player.running -> "connecting"
+        else -> "idle"
     }
 
     Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
+        containerColor = AppTheme.colors.bg,
         topBar = {
-            TopAppBar(
-                title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            painterResource(R.drawable.ic_earbuds),
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.size(26.dp)
-                        )
-                        Spacer(Modifier.width(10.dp))
-                        Text("Dual Earbuds", style = MaterialTheme.typography.headlineSmall)
-                    }
-                },
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(painterResource(R.drawable.ic_settings), contentDescription = "Settings")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground,
-                    actionIconContentColor = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            )
+            TopBar(title = "Dual Earbuds", readout = readout, live = live) {
+                IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        painterResource(R.drawable.ic_settings),
+                        contentDescription = "Settings",
+                        tint = AppTheme.colors.muted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+            }
         }
     ) { padding ->
         Column(
@@ -332,27 +304,23 @@ fun HomeScreen(
                 .fillMaxSize()
                 .padding(padding)
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp)
+                .padding(horizontal = 16.dp)
         ) {
-            if (!batteryOk && Prefs.batteryOffered) {
-                Banner(
-                    text = "Android may stop the sound when the screen is off. Tap to set up “Keep running in background”.",
-                    color = AppTheme.colors.warning,
-                    icon = rememberVectorPainter(Icons.Filled.Warning),
-                    onClick = onOpenGuide
+            val chip = setupChip
+            if (chip != null) {
+                StatusChip(Tone.WARN, chip, modifier = Modifier.padding(top = 12.dp), onClick = onOpenSetup)
+            }
+
+            if (player.status != PlayerStatus.IDLE) {
+                NowPlayingSection(
+                    player = player,
+                    onStop = { PlaybackController.stop(context) },
+                    onRetry = { checkAndJoin(linkText) },
+                    onEnterPin = { player.target?.let { pinFor = PendingJoin(it.withoutPin(), player.pcName) } }
                 )
             }
 
-            PlayerCard(
-                player = player,
-                onStartStop = { onStartStop() },
-                onEnterPin = {
-                    player.target?.let { pinFor = PendingJoin(it.withoutPin(), player.pcName) }
-                }
-            )
-
-            JoinCard(
+            JoinSection(
                 enabled = !player.running,
                 nearby = nearby,
                 searching = searching,
@@ -377,11 +345,12 @@ fun HomeScreen(
                 checkLine = { CheckLine(check) }
             )
 
-            EarbudsCard(
+            EarbudsSection(
                 earbuds = earbuds,
                 calibratedMs = if (earbuds.connected) latencies[earbuds.name] else null,
                 onAllowBluetooth = {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        Prefs.askedBluetooth = true
                         bluetoothPermissionLauncher.launch(Manifest.permission.BLUETOOTH_CONNECT)
                     }
                 },
@@ -389,45 +358,53 @@ fun HomeScreen(
                 onCalibrate = onOpenCalibration
             )
 
-            SectionCard(title = "Sound", icon = painterResource(R.drawable.ic_volume_up)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Volume", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                    Text("$volume%", style = MaterialTheme.typography.titleSmall, color = AppTheme.colors.accentText)
+            Section("Sound") {
+                Panel {
+                    PanelBody {
+                        SliderRow(
+                            label = "Volume",
+                            valueText = "$volume%",
+                            value = volume.toFloat(),
+                            onValueChange = { PlaybackController.setVolume((it / 5f).roundToInt() * 5) },
+                            valueRange = 0f..Prefs.MAX_VOLUME.toFloat(),
+                            hint = if (volume > 100) "Above 100% can distort loud sounds." else null,
+                            valueColor = if (volume > 100) AppTheme.colors.warn else androidx.compose.ui.graphics.Color.Unspecified
+                        )
+                    }
+                    PanelDivider()
+                    PanelBody {
+                        Text("Equalizer", style = MaterialTheme.typography.bodyMedium, color = AppTheme.colors.text)
+                        val options = listOf("auto" to "Auto") + EqPreset.entries.map { it.wire to it.label }
+                        Segmented(
+                            options = options,
+                            selected = eqManual?.wire ?: "auto",
+                            onSelect = { w -> SoundSettings.setEqManual(EqPreset.fromWire(w)) }
+                        )
+                        Hint(
+                            if (eqManual == null) {
+                                "Auto follows the host or Smart EQ" + if (player.running) ", now ${player.eqInUse.label}" else ""
+                            } else {
+                                "Your choice stays until you pick Auto."
+                            }
+                        )
+                    }
+                    PanelDivider()
+                    PanelRow("Phone media volume", value = "system", onClick = { showSystemVolumePanel(context) })
                 }
-                Slider(
-                    value = volume.toFloat(),
-                    onValueChange = { PlaybackController.setVolume((it / 5f).roundToInt() * 5) },
-                    valueRange = 0f..Prefs.MAX_VOLUME.toFloat()
-                )
-                if (volume > 100) {
-                    Text("Above 100% can distort loud sounds.", style = MaterialTheme.typography.bodySmall, color = AppTheme.colors.warning)
-                }
-                Text("Equalizer", style = MaterialTheme.typography.titleSmall)
-                val options = listOf("auto" to "Auto") + EqPreset.entries.map { it.wire to it.label }
-                Segmented(
-                    options = options,
-                    selected = eqManual?.wire ?: "auto",
-                    onSelect = { w -> SoundSettings.setEqManual(EqPreset.fromWire(w)) }
-                )
-                Text(
-                    if (eqManual == null) {
-                        "Auto uses the host's suggestion or Smart EQ" + if (player.running) " · now ${player.eqInUse.label}" else ""
-                    } else {
-                        "Your choice stays until you pick Auto."
-                    },
-                    style = MaterialTheme.typography.bodySmall,
-                    color = AppTheme.colors.textDim
-                )
-                OutlinedButton(onClick = { showSystemVolumePanel(context) }) { Text("Phone media volume") }
             }
 
-            NavCard(
-                icon = painterResource(R.drawable.ic_share),
-                title = "Share this phone",
-                subtitle = "Send this phone's sound to other listeners",
-                onClick = onShareThisPhone
-            )
-            Spacer(Modifier.height(24.dp))
+            Section("This phone as host") {
+                Panel {
+                    PanelRow(
+                        "Share this phone",
+                        subtitle = "Send this phone's sound to other phones, in sync",
+                        leading = painterResource(R.drawable.ic_share),
+                        chevron = true,
+                        onClick = onShareThisPhone
+                    )
+                }
+            }
+            Spacer(Modifier.height(32.dp))
         }
     }
 
@@ -460,7 +437,7 @@ fun HomeScreen(
         BatteryOfferDialog(
             onOpenGuide = {
                 showBatteryOffer = false
-                onOpenGuide()
+                onOpenSetup()
             },
             onDismiss = { showBatteryOffer = false }
         )
@@ -469,18 +446,19 @@ fun HomeScreen(
 
 @Composable
 private fun CheckLine(check: CheckState) {
+    val c = AppTheme.colors
     when (check) {
         CheckState.None -> Unit
         CheckState.Checking -> Row(verticalAlignment = Alignment.CenterVertically) {
-            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-            Spacer(Modifier.width(10.dp))
-            Text("Checking the link…", style = MaterialTheme.typography.bodyMedium)
+            CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 1.5.dp, color = c.muted)
+            Spacer(Modifier.width(8.dp))
+            Text("Checking the link…", style = MaterialTheme.typography.bodySmall, color = c.muted)
         }
         is CheckState.Found -> Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.CheckCircle, contentDescription = null, tint = AppTheme.colors.accentText, modifier = Modifier.size(18.dp))
-            Spacer(Modifier.width(8.dp))
-            val rateText = if (check.rate > 0) String.format(Locale.US, "%.1f kHz", check.rate / 1000.0) else "not sharing sound yet"
-            Text("Found ${check.name} · $rateText", style = MaterialTheme.typography.bodyMedium)
+            StatusDot(Tone.GOOD)
+            Spacer(Modifier.width(6.dp))
+            val rateText = if (check.rate > 0) ScopeMath.kHz(check.rate) else "not sharing sound yet"
+            Text("Found ${check.name}, $rateText", style = MaterialTheme.typography.bodySmall, color = c.text)
         }
         is CheckState.Problem -> Banner(text = check.message)
     }

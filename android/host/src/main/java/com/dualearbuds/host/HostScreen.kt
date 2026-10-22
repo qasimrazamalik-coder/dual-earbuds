@@ -64,7 +64,11 @@ import kotlinx.coroutines.withContext
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HostScreen(onBack: () -> Unit) {
+fun HostScreen(
+    onBack: () -> Unit,
+    @Suppress("UNUSED_PARAMETER") localOutputLatencyMs: Int? = null,
+    @Suppress("UNUSED_PARAMETER") onCalibrate: (() -> Unit)? = null
+) {
     val context = LocalContext.current
     val state by HostController.state.collectAsStateWithLifecycle()
     val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
