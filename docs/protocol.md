@@ -167,6 +167,8 @@ All optional; a listener or host that does not know them ignores them.
 - Listeners report what they need in `status`: `"needMs":<jitterP99 + outputLatency + 10>` and how far they are
   from the deadline: `"syncErrMs":<int, + = late>` (drives the host's sync scope)
   (jitter p99 over the last 30 s of packet arrivals; outputLatency calibrated or from the platform).
+  A listener may add its own fixed costs (e.g. its minimum buffer, half the round trip); overstating is safe,
+  understating causes late packets.
 - The host sets `P = clamp(max(needMs of listeners in sync mode, host local need), 40, 400)` where host local need =
   the slowest *ticked* local output's latency (+ the Windows mixer buffer). It announces
   `{"type":"playout","ms":P}` when P changes; increases apply at once, decreases at most 5 ms per second
