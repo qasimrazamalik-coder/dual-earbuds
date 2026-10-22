@@ -137,10 +137,12 @@ namespace DualEarbuds
             if (phone == null) sb.AppendLine("Phone link off");
             else
             {
+                sb.AppendLine("Deadline P " + phone.PlayoutMs + " ms (local need " + phone.LocalNeedMs + " ms) · UDP " + (phone.UdpAvailable ? "on, " + phone.UdpDatagramsSent + " datagrams" : "off"));
                 sb.AppendLine("Port " + phone.Port + " · party " + (phone.Party ? "on" : "off") + " (max " + phone.Capacity + ") · PIN " + (phone.Pin != null ? "on" : "off") + " · remote " + (phone.RemoteControl ? "on" : "off"));
                 foreach (var p in phone.Snapshot())
-                    sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "  #{0} {1} ({2}) earbuds='{3}' battery={4} volume={5}% rtt={6}ms buffer={7}ms underruns={8} synced={9} sent={10} dropped={11}",
-                        p.Id, p.Name, p.Client, p.Earbuds, p.Battery, p.Volume, p.RttMs, p.BufferMs, p.Underruns, p.Synced, p.PacketsSent, p.PacketsDropped));
+                    sb.AppendLine(string.Format(CultureInfo.InvariantCulture, "  #{0} {1} ({2}) earbuds='{3}' battery={4} volume={5}% rtt={6}ms buffer={7}ms underruns={8} synced={9} sent={10} dropped={11} via={12} need={13}ms syncErr={14}",
+                        p.Id, p.Name, p.Client, p.Earbuds, p.Battery, p.Volume, p.RttMs, p.BufferMs, p.Underruns, p.Synced, p.PacketsSent, p.PacketsDropped,
+                        p.Transport, p.NeedMs, p.OffsetMs == int.MinValue ? "-" : p.OffsetMs.ToString(CultureInfo.InvariantCulture)));
             }
             if (listen != null)
             {
@@ -148,6 +150,7 @@ namespace DualEarbuds
                 sb.AppendLine("== Listening to another device ==");
                 sb.AppendLine("State " + listen.State + " · host '" + listen.HostName + "' · synced " + listen.Synced + " · rtt " + listen.RttMs.ToString("0.0", CultureInfo.InvariantCulture) +
                               " ms · buffer " + listen.Buffer.TargetMs + " ms · packets " + listen.Packets + " · lost " + listen.Lost + " · concealed " + listen.Concealed + " · underruns " + listen.Underruns);
+                sb.AppendLine("Host " + listen.HostKind + " · via " + listen.Transport + " (udp " + listen.UdpPackets + ", recovered " + listen.UdpRecovered + ", ws " + listen.WsPackets + ") · P " + listen.PlayoutMs + " ms · needs " + listen.NeedMs + " ms · rejoins " + listen.Rejoins);
             }
             sb.AppendLine();
             sb.AppendLine("== Last 200 log lines ==");

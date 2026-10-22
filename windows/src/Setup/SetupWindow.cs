@@ -56,17 +56,21 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
             root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
             // side panel
-            var side = new Border { Padding = new Thickness(26, 30, 22, 26) };
-            side.Background = new LinearGradientBrush(Color.FromRgb(0x0E, 0x2A, 0x3A), Color.FromRgb(0x0B, 0x12, 0x20), 90);
+            // side rail: flat Surface with a hairline, like the app's navigation (no gradient)
+            var side = new Border { Padding = new Thickness(20, 20, 18, 20), BorderThickness = new Thickness(0, 0, 1, 0) };
+            side.SetResourceReference(Border.BackgroundProperty, "Surface");
+            side.SetResourceReference(Border.BorderBrushProperty, "Line");
             var sideStack = new DockPanel { LastChildFill = false };
             var brand = new StackPanel();
-            brand.Children.Add(Ui.Logo(56));
-            var bt = new TextBlock { Text = "Dual Earbuds", FontFamily = Theme.Display, FontSize = 22, FontWeight = FontWeights.SemiBold, Foreground = Brushes.White, Margin = new Thickness(0, 16, 0, 2) };
+            brand.Children.Add(Ui.Logo(36));
+            var bt = Ui.Text("Dual Earbuds", 15, FontWeights.SemiBold, "Text");
+            bt.Margin = new Thickness(0, 14, 0, 2);
             brand.Children.Add(bt);
-            brand.Children.Add(new TextBlock { Text = "Version " + AppInfo.Version, Foreground = new SolidColorBrush(Color.FromRgb(0x8F, 0xA3, 0xBF)), FontSize = 13 });
+            brand.Children.Add(Ui.Mono("setup " + AppInfo.Version, 12, "Muted"));
             DockPanel.SetDock(brand, Dock.Top);
             sideStack.Children.Add(brand);
-            stepText = new TextBlock { Foreground = new SolidColorBrush(Color.FromRgb(0x14, 0xE0, 0xC2)), FontSize = 13, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap };
+            stepText = Ui.Mono("", 12, "Muted");
+            stepText.TextWrapping = TextWrapping.Wrap;
             DockPanel.SetDock(stepText, Dock.Bottom);
             sideStack.Children.Add(stepText);
             side.Child = sideStack;
@@ -101,11 +105,11 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
         static StackPanel PageStack(string title, string text)
         {
             var sp = new StackPanel { Margin = new Thickness(0, 6, 12, 0) };
-            sp.Children.Add(Ui.Heading(title, 26));
+            sp.Children.Add(Ui.Heading(title, 20));
             if (text != null)
             {
-                var t = Ui.Text(text, 14, FontWeights.Normal, "Muted");
-                t.Margin = new Thickness(0, 8, 0, 18);
+                var t = Ui.Text(text, 13, FontWeights.Normal, "Muted");
+                t.Margin = new Thickness(0, 6, 0, 18);
                 sp.Children.Add(t);
             }
             return sp;
@@ -114,24 +118,24 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
         void Buttons(params Button[] buttons)
         {
             footer.Children.Clear();
-            foreach (var b in buttons) { b.Margin = new Thickness(8, 0, 0, 0); b.MinWidth = 110; footer.Children.Add(b); }
+            foreach (var b in buttons) { b.Margin = new Thickness(8, 0, 0, 0); b.MinWidth = 96; footer.Children.Add(b); }
         }
 
         void ShowWelcome()
         {
-            stepText.Text = "Step 1 of 4 · Welcome";
-            var sp = PageStack("Welcome", "This installs Dual Earbuds " + AppInfo.Version + " for your Windows account. It lets you play your laptop's sound on two (or more) pairs of earbuds at once - and stream to a phone over Wi-Fi.");
-            sp.Children.Add(Ui.Text("No administrator rights needed. Takes a few seconds.", 13.5, FontWeights.Normal, "Text"));
+            stepText.Text = "1 of 4 \u00b7 welcome";
+            var sp = PageStack("Install Dual Earbuds " + AppInfo.Version, "Plays this laptop's sound on several pairs of earbuds at once: its own, and those of phones and laptops on the same Wi-Fi.");
+            sp.Children.Add(Ui.Text("For your Windows account only. No administrator rights; takes a few seconds.", 13, FontWeights.Normal, "Text"));
             body.Content = sp;
             Buttons(Ui.Button("Cancel", "Ghost", (s, e) => Close()), Ui.Button("Next", "Primary", (s, e) => ShowLicense()));
         }
 
         void ShowLicense()
         {
-            stepText.Text = "Step 2 of 4 · License";
+            stepText.Text = "2 of 4 \u00b7 license";
             var sp = PageStack("License", null);
             sp.Children.Add(new FrameworkElement { Height = 10 });
-            var box = new TextBox { Text = License, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, Height = 230, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, FontSize = 12.5 };
+            var box = new TextBox { Text = License, IsReadOnly = true, TextWrapping = TextWrapping.Wrap, Height = 240, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, FontSize = 12, FontFamily = Theme.Mono, VerticalContentAlignment = VerticalAlignment.Top };
             sp.Children.Add(box);
             var agree = Ui.Switch("I accept the license", false);
             agree.Margin = new Thickness(0, 14, 0, 0);
@@ -146,17 +150,17 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 
         void ShowOptions(InstalledInfo modify)
         {
-            stepText.Text = modify == null ? "Step 3 of 4 · Options" : "Modify";
+            stepText.Text = modify == null ? "3 of 4 \u00b7 options" : "modify";
             options = modify != null ? modify.Options : new InstallOptions { Folder = core.DefaultFolder };
             if (modify != null) { options.Folder = modify.Folder; options.Launch = false; }
             var sp = PageStack(modify == null ? "Choose options" : "Change options", null);
             sp.Children.Add(new FrameworkElement { Height = 10 });
 
-            sp.Children.Add(Ui.Text("Install folder", 12.5, FontWeights.SemiBold, "Muted"));
+            sp.Children.Add(Ui.Text("Install folder", 12, FontWeights.SemiBold, "Text"));
             var folderRow = new Grid { Margin = new Thickness(0, 6, 0, 16) };
             folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             folderRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var folder = new TextBox { Text = options.Folder, IsEnabled = modify == null };
+            var folder = new TextBox { Text = options.Folder, IsEnabled = modify == null, FontFamily = Theme.Mono, FontSize = 12 };
             var browse = Ui.Button("Browse", "Ghost", (s, e) =>
             {
                 using (var dlg = new System.Windows.Forms.FolderBrowserDialog { Description = "Choose where to install Dual Earbuds", SelectedPath = folder.Text })
@@ -172,7 +176,7 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
             var desk = Option(sp, "Desktop shortcut", options.DesktopShortcut);
             var start = Option(sp, "Start menu shortcut", options.StartMenuShortcut);
             var boot = Option(sp, "Run when Windows starts (quietly, in the tray)", options.RunAtStartup);
-            var fw = Option(sp, "Let phones on my Wi-Fi connect (Windows asks once)", modify == null && options.FirewallRule);
+            var fw = Option(sp, "Let devices on my Wi-Fi listen: firewall rule for TCP and UDP (Windows asks once)", modify == null && options.FirewallRule);
             CheckBox launch = null;
             if (modify == null) launch = Option(sp, "Open Dual Earbuds when setup finishes", true);
             body.Content = sp;
@@ -209,34 +213,54 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
         {
             if (info == null) info = core.Installed();
             if (info == null) { ShowWelcome(); return; }
-            stepText.Text = "Installed: " + (info.Version ?? "?");
+            stepText.Text = "installed " + (info.Version ?? "?");
             string versionNote = info.Version == AppInfo.Version
                 ? "Dual Earbuds " + info.Version + " is installed in " + info.Folder + "."
                 : "Dual Earbuds " + (info.Version ?? "?") + " is installed. This setup has version " + AppInfo.Version + ".";
             var sp = PageStack("Dual Earbuds is installed", versionNote);
-            sp.Children.Add(Choice(info.Version == AppInfo.Version ? "Repair" : "Update", "Put back the app files, shortcuts and settings if something is broken or missing.", () =>
+            // one panel, one row per action (no card per item)
+            var panel = new StackPanel();
+            panel.Children.Add(Choice(info.Version == AppInfo.Version ? "Repair" : "Update", "Put back the app files, shortcuts and settings.", () =>
                 RunTask("Repairing", () => core.Repair(payload, selfPath), info.Version == AppInfo.Version ? "Repaired" : "Updated", false)));
-            sp.Children.Add(Choice("Modify", "Change shortcuts, startup and firewall options.", () => ShowOptions(info)));
-            sp.Children.Add(Choice("Uninstall", "Remove Dual Earbuds from this PC.", () => ShowUninstall(info)));
+            panel.Children.Add(Hairline());
+            panel.Children.Add(Choice("Modify", "Change shortcuts, startup and the firewall rule.", () => ShowOptions(info)));
+            panel.Children.Add(Hairline());
+            panel.Children.Add(Choice("Uninstall", "Remove Dual Earbuds from this PC.", () => ShowUninstall(info)));
+            var frame = new Border { CornerRadius = new CornerRadius(8), BorderThickness = new Thickness(1), Child = panel };
+            frame.SetResourceReference(Border.BackgroundProperty, "Surface");
+            frame.SetResourceReference(Border.BorderBrushProperty, "Line");
+            sp.Children.Add(frame);
             body.Content = sp;
             Buttons(Ui.Button("Close", "Ghost", (s, e) => Close()));
         }
 
+        static Border Hairline()
+        {
+            var b = new Border { Height = 1 };
+            b.SetResourceReference(Border.BackgroundProperty, "Line");
+            return b;
+        }
+
+        // A clickable row: title + one muted line, a chevron on the right.
         Border Choice(string title, string text, Action click)
         {
-            var g = new StackPanel();
-            g.Children.Add(Ui.Heading(title, 16));
-            var t = Ui.Text(text, 13, FontWeights.Normal, "Muted");
-            t.Margin = new Thickness(0, 3, 0, 0);
-            g.Children.Add(t);
-            var card = Ui.Card(g);
-            card.Padding = new Thickness(18, 12, 18, 12);
-            card.Margin = new Thickness(0, 0, 0, 10);
-            card.Cursor = System.Windows.Input.Cursors.Hand;
-            card.MouseEnter += (s, e) => card.SetResourceReference(Border.BorderBrushProperty, "Accent");
-            card.MouseLeave += (s, e) => card.SetResourceReference(Border.BorderBrushProperty, "Line");
-            card.MouseLeftButtonUp += (s, e) => click();
-            return card;
+            var g = new Grid();
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var left = new StackPanel();
+            left.Children.Add(Ui.Text(title, 14, FontWeights.Normal, "Text"));
+            var t = Ui.Text(text, 12, FontWeights.Normal, "Muted");
+            t.Margin = new Thickness(0, 2, 0, 0);
+            left.Children.Add(t);
+            g.Children.Add(left);
+            var chev = Ui.Icon("M9 6l6 6-6 6", 12, "Muted", true);
+            Grid.SetColumn(chev, 1);
+            g.Children.Add(chev);
+            var row = new Border { Padding = new Thickness(16, 12, 16, 12), Child = g, Background = Brushes.Transparent, Cursor = System.Windows.Input.Cursors.Hand };
+            row.MouseEnter += (s, e) => row.SetResourceReference(Border.BackgroundProperty, "Hover");
+            row.MouseLeave += (s, e) => row.Background = Brushes.Transparent;
+            row.MouseLeftButtonUp += (s, e) => click();
+            return row;
         }
 
         void ShowUninstall() { ShowUninstall(null); }
@@ -251,13 +275,13 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
                 Buttons(Ui.Button("Close", "Primary", (s, e) => Close()));
                 return;
             }
-            stepText.Text = "Uninstall";
-            var sp = PageStack("Uninstall Dual Earbuds", "This removes the app, its shortcuts and its startup entry from " + info.Folder + ".");
-            var keep = Ui.Switch("Also delete my settings and logs", false);
-            keep.FontSize = 13.5;
+            stepText.Text = "uninstall";
+            var sp = PageStack("Uninstall Dual Earbuds", "Removes the app, its shortcuts, its startup entry and its firewall rule from " + info.Folder + ".");
+            var keep = Ui.Switch("Also delete settings, calibrations and logs", false);
+            keep.FontSize = 13;
             sp.Children.Add(keep);
             body.Content = sp;
-            Buttons(Ui.Button("Cancel", "Ghost", (s, e) => Close()),
+            Buttons(Ui.Button("Cancel", "Quiet", (s, e) => Close()),
                     Ui.Button("Uninstall", "Primary", (s, e) => RunTask("Uninstalling", () => core.Uninstall(keep.IsChecked == true), "Dual Earbuds was removed", false)));
         }
 
@@ -280,14 +304,15 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
 
         TextBlock ProgressPage(string title)
         {
-            stepText.Text = title + "...";
-            var sp = PageStack(title + "...", null);
+            stepText.Text = title.ToLowerInvariant();
+            var sp = PageStack(title, null);
             sp.Children.Add(new FrameworkElement { Height = 14 });
-            var bar = new ProgressBar { IsIndeterminate = true, Height = 6, BorderThickness = new Thickness(0) };
+            var bar = new ProgressBar { IsIndeterminate = true, Height = 2, BorderThickness = new Thickness(0) };
             bar.SetResourceReference(ForegroundProperty, "Accent");
             bar.SetResourceReference(BackgroundProperty, "Line");
             sp.Children.Add(bar);
-            var log = Ui.Text("", 13, FontWeights.Normal, "Muted");
+            var log = Ui.Mono("", 12, "Muted");
+            log.TextWrapping = TextWrapping.Wrap;
             log.Margin = new Thickness(0, 16, 0, 0);
             sp.Children.Add(log);
             body.Content = sp;
@@ -301,13 +326,13 @@ THE SOFTWARE IS PROVIDED ""AS IS"", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMP
             if (error != null)
             {
                 ExitCode = 1;
-                stepText.Text = "Something went wrong";
-                body.Content = PageStack("That didn't work", error.Message + "\n\nClose any open Dual Earbuds window and try again.");
+                stepText.Text = "failed";
+                body.Content = PageStack("Setup didn't finish", error.Message + "\n\nClose any open Dual Earbuds window and try again.");
                 Buttons(Ui.Button("Close", "Primary", (s, e) => Close()));
                 return;
             }
-            stepText.Text = "Finished";
-            body.Content = PageStack(doneTitle, doneTitle.StartsWith("Dual Earbuds was removed") ? "Thanks for trying Dual Earbuds." : "You'll find Dual Earbuds in the Start menu and near the clock while it runs.");
+            stepText.Text = "done";
+            body.Content = PageStack(doneTitle, doneTitle.StartsWith("Dual Earbuds was removed") ? "Your settings stay unless you chose to delete them." : "Dual Earbuds is in the Start menu, and near the clock while it runs.");
             Buttons(Ui.Button("Finish", "Primary", (s, e) =>
             {
                 if (launchAfter && options != null) Launch(Path.Combine(options.Folder, SetupCore.AppExe));

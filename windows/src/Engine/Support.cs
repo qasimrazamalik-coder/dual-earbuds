@@ -130,6 +130,7 @@ namespace DualEarbuds
         public string HostPort;   // "ip:port"
         public string Key;
         public string Name = "";
+        public string Kind = "windows";   // "android" = a phone that shares
         public string Link { get { return "http://" + HostPort + "/?k=" + Key; } }
     }
 
@@ -178,6 +179,7 @@ namespace DualEarbuds
         public List<RecentHost> Recent = new List<RecentHost>();
         public List<string> ListenOutputs = new List<string>();
         public const int MaxRecent = 5;
+        public const double OldDeviceBufferMs = 35;   // see "latency" in Load
 
         static readonly string[] NoiseValues = { "off", "light", "strong" }, SmartEqValues = { "off", "app", "sound", "both" },
                                  DialogueValues = { "off", "light", "strong", "night" }, BufferValues = { "smart", "steady", "manual" };
@@ -185,10 +187,12 @@ namespace DualEarbuds
         static bool OneOf(string v, string[] set) { return Array.IndexOf(set, v) >= 0; }
 
         // Most recent first, no duplicates (same address), at most 5.
-        public void AddRecent(string hostPort, string key, string name)
+        public void AddRecent(string hostPort, string key, string name) { AddRecent(hostPort, key, name, "windows"); }
+
+        public void AddRecent(string hostPort, string key, string name, string kind)
         {
             Recent.RemoveAll(r => string.Equals(r.HostPort, hostPort, StringComparison.OrdinalIgnoreCase));
-            Recent.Insert(0, new RecentHost { HostPort = hostPort, Key = key.ToUpperInvariant(), Name = Clean(name) });
+            Recent.Insert(0, new RecentHost { HostPort = hostPort, Key = key.ToUpperInvariant(), Name = Clean(name), Kind = kind == "android" ? "android" : "windows" });
             while (Recent.Count > MaxRecent) Recent.RemoveAt(Recent.Count - 1);
         }
 
@@ -263,8 +267,14 @@ namespace DualEarbuds
                                 if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out bm)) s.BufferMs = JitterBuffer.Clamp(bm);
                                 break;
                             case "latency":
+                                // before 3.2 a calibration also counted the ~35 ms the device buffer holds
                                 double lat;
-                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && lat >= 0 && lat <= 1000) s.LatencyByName[v] = lat;
+                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && lat >= 0 && lat <= 1000 && !s.LatencyByName.ContainsKey(v))
+                                    s.LatencyByName[v] = Math.Max(1, lat - OldDeviceBufferMs);
+                                break;
+                            case "latency2":
+                                double lat2;
+                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat2) && lat2 >= 0 && lat2 <= 1000) s.LatencyByName[v] = lat2;
                                 break;
                             case "profile":
                                 var hp = HearingProfile.Parse(v);
@@ -272,7 +282,7 @@ namespace DualEarbuds
                                 break;
                             case "recent":
                                 if (p.Length >= 3 && DualEarbuds.LinkKey.IsValid(p[2]) && s.Recent.Count < MaxRecent)
-                                    s.Recent.Add(new RecentHost { HostPort = v, Key = p[2].ToUpperInvariant(), Name = p.Length >= 4 ? p[3] : "" });
+                                    s.Recent.Add(new RecentHost { HostPort = v, Key = p[2].ToUpperInvariant(), Name = p.Length >= 4 ? p[3] : "", Kind = p.Length >= 5 && p[4] == "android" ? "android" : "windows" });
                                 break;
                             case "listenout": if (v.Length > 0 && !s.ListenOutputs.Contains(v)) s.ListenOutputs.Add(v); break;
                             case "outfx":
@@ -341,9 +351,9 @@ namespace DualEarbuds
                 lines.Add("buffer\t" + Buffer);
                 lines.Add("bufferms\t" + BufferMs.ToString(CultureInfo.InvariantCulture));
                 foreach (var kv in LatencyByName)
-                    lines.Add("latency\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
+                    lines.Add("latency2\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
                 foreach (var hp in Profiles) lines.Add("profile\t" + hp.Serialize());
-                foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name));
+                foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name) + "\t" + r.Kind);
                 foreach (var id in ListenOutputs) lines.Add("listenout\t" + id);
                 foreach (var kv in Outs)
                 {

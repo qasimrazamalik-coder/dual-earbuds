@@ -1,7 +1,9 @@
-// Dual Earbuds - pages.
+// Dual Earbuds - pages, built from the "instrument" kit (Kit.cs): a header bar above (MainView), then
+// sections with a hairline, rows inside panels, one primary action per view.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Threading;
 using System.Windows;
@@ -16,92 +18,21 @@ namespace DualEarbuds
     public interface IPage
     {
         FrameworkElement Root { get; }
-        void Rebuild();   // device or phone list changed
+        void Rebuild();   // device or listener list changed
         void Refresh();   // states changed
-        void Animate();   // ~20 times a second (meters)
+        void Animate();   // ~20 times a second (meters, scopes)
     }
 
+    // Small helpers kept from the first design; they now produce the kit's look.
     static class PageKit
     {
-        public static StackPanel Column()
-        {
-            return new StackPanel { Margin = new Thickness(28, 8, 28, 28), MaxWidth = 980, HorizontalAlignment = HorizontalAlignment.Stretch };
-        }
+        public static FrameworkElement Divider() { return new RowPanel.Divider(); }
 
-        public static StackPanel Header(string title, string subtitle)
-        {
-            var sp = new StackPanel { Margin = new Thickness(0, 4, 0, 18) };
-            sp.Children.Add(Ui.Heading(title, 28));
-            var s = Ui.Text(subtitle, 14, FontWeights.Normal, "Muted");
-            s.Margin = new Thickness(0, 4, 0, 0);
-            sp.Children.Add(s);
-            return sp;
-        }
+        public static Border Segmented(string group, string[] labels, int selected, Action<int> onPick) { return Kit.Segmented(group, labels, selected, onPick); }
 
-        public static TextBlock Section(string text)
-        {
-            var t = Ui.Text(text.ToUpperInvariant(), 12, FontWeights.SemiBold, "Muted");
-            t.Margin = new Thickness(4, 22, 0, 10);
-            return t;
-        }
+        public static Border Segmented(string group, string[] labels, int selected, Action<int> onPick, out RadioButton[] buttons) { return Kit.Segmented(group, labels, selected, onPick, out buttons); }
 
-        public static Grid Row(string title, string description, FrameworkElement control)
-        {
-            var g = new Grid { Margin = new Thickness(0, 6, 0, 6) };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 20, 0) };
-            left.Children.Add(Ui.Text(title, 14, FontWeights.SemiBold, "Text"));
-            if (!string.IsNullOrEmpty(description))
-            {
-                var d = Ui.Text(description, 12.5, FontWeights.Normal, "Muted");
-                d.Margin = new Thickness(0, 2, 0, 0);
-                left.Children.Add(d);
-            }
-            control.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(control, 1);
-            g.Children.Add(left);
-            g.Children.Add(control);
-            return g;
-        }
-
-        public static Border Divider()
-        {
-            var b = new Border { Height = 1, Margin = new Thickness(0, 8, 0, 8) };
-            b.SetResourceReference(Border.BackgroundProperty, "Line");
-            return b;
-        }
-
-        public static Border Segmented(string group, string[] labels, int selected, Action<int> onPick)
-        {
-            var sp = new StackPanel { Orientation = Orientation.Horizontal };
-            for (int i = 0; i < labels.Length; i++)
-            {
-                int idx = i;
-                var r = new RadioButton { Content = labels[i], GroupName = group, IsChecked = i == selected };
-                r.SetResourceReference(FrameworkElement.StyleProperty, "Segment");
-                r.Checked += (s, e) => onPick(idx);
-                sp.Children.Add(r);
-            }
-            var b = new Border { CornerRadius = new CornerRadius(10), Padding = new Thickness(2), Child = sp };
-            b.SetResourceReference(Border.BackgroundProperty, "Surface2");
-            return b;
-        }
-
-        // Segmented choice that also hands back its buttons (to disable or re-check one later).
-        public static Border Segmented(string group, string[] labels, int selected, Action<int> onPick, out RadioButton[] buttons)
-        {
-            var b = Segmented(group, labels, selected, onPick);
-            var sp = (StackPanel)b.Child;
-            buttons = new RadioButton[sp.Children.Count];
-            for (int i = 0; i < buttons.Length; i++) buttons[i] = (RadioButton)sp.Children[i];
-            return b;
-        }
-
-        public static ComboBox Combo(double width)
-        {
-            return new ComboBox { Width = width, Height = 34, FontSize = 13, VerticalAlignment = VerticalAlignment.Center };
-        }
+        public static ComboBox Combo(double width) { return Kit.Combo(width); }
 
         public static void SelectTag(ComboBox c, string tag)
         {
@@ -115,185 +46,157 @@ namespace DualEarbuds
             return it == null ? null : it.Tag as string;
         }
 
-        // A tinted note card: icon + title + text (+ optional button underneath).
-        public static Border Note(string icon, string brush, string title, string text, Button action, out TextBlock titleBlock, out TextBlock textBlock)
-        {
-            var g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var ic = Ui.Icon(icon, 22, brush, false);
-            ic.Margin = new Thickness(0, 2, 14, 0);
-            ic.VerticalAlignment = VerticalAlignment.Top;
-            g.Children.Add(ic);
-            var body = new StackPanel();
-            titleBlock = Ui.Heading(title, 15);
-            body.Children.Add(titleBlock);
-            textBlock = Ui.Text(text, 13, FontWeights.Normal, "Muted");
-            textBlock.Margin = new Thickness(0, 4, 0, 0);
-            body.Children.Add(textBlock);
-            if (action != null) { action.HorizontalAlignment = HorizontalAlignment.Left; action.Margin = new Thickness(0, 12, 0, 0); body.Children.Add(action); }
-            Grid.SetColumn(body, 1);
-            g.Children.Add(body);
-            var card = Ui.Card(g);
-            card.SetResourceReference(Border.BorderBrushProperty, brush);
-            return card;
-        }
-
         public static void OpenFolder(string dir)
         {
             try { Directory.CreateDirectory(dir); Process.Start("explorer.exe", "\"" + dir + "\""); }
             catch (Exception ex) { Log.Warn("Open folder: " + ex.Message); }
         }
+
+        // The state block at the top of a view: one 20 px headline, one muted line, an action on the right.
+        public static Grid StateRow(out TextBlock headline, out TextBlock line, out Ellipse dot, FrameworkElement action)
+        {
+            var g = new Grid { Margin = new Thickness(16, 14, 16, 14) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            var top = new StackPanel { Orientation = Orientation.Horizontal };
+            dot = new Ellipse { Width = 8, Height = 8, Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
+            top.Children.Add(dot);
+            headline = Ui.Text("", 20, FontWeights.SemiBold, "Text");
+            headline.TextWrapping = TextWrapping.NoWrap;
+            headline.TextTrimming = TextTrimming.CharacterEllipsis;
+            top.Children.Add(headline);
+            left.Children.Add(top);
+            line = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            line.Margin = new Thickness(18, 4, 0, 0);
+            left.Children.Add(line);
+            g.Children.Add(left);
+            if (action != null)
+            {
+                action.VerticalAlignment = VerticalAlignment.Center;
+                action.Margin = new Thickness(16, 0, 0, 0);
+                Grid.SetColumn(action, 1);
+                g.Children.Add(action);
+            }
+            return g;
+        }
+
+        public static UIElement EmptyRow(string text)
+        {
+            var t = Ui.Text(text, 13, FontWeights.Normal, "Muted");
+            t.Margin = new Thickness(16, 16, 16, 16);
+            return t;
+        }
     }
 
     // ---------------------------------------------------------------------- Home
-    class OutputCard
+    // One local output: its ear row (switch, name, mono detail, sync scope) and, while it is on, one line of
+    // adjustments (Delay, Volume, EQ, hearing profile).
+    class OutputRow
     {
-        public readonly Border Root;
+        public readonly StackPanel Root = new StackPanel();
         readonly OutputVm vm;
         readonly Controller ctl;
+        readonly EarRow ear;
         readonly CheckBox sw;
-        readonly TextBlock name, chipText, delayVal, volVal, error;
-        readonly Ellipse chipDot;
         readonly StackPanel battery;
-        readonly TextBlock batteryText;
-        readonly Path batteryIcon, deviceIcon;
-        readonly Meter meter;
+        readonly TextBlock batteryText, error, note, delayVal, volVal;
+        readonly Path batteryIcon;
         readonly Slider delay, volume;
         readonly Button test, calibrate;
         readonly ComboBox eq, hearing;
-        readonly TextBlock syncText, note;
+        readonly WrapPanel adjust;
+        readonly Meter meter;
         string comboSig;
         bool updating;
 
         public string Id { get { return vm.Id; } }
 
-        public OutputCard(OutputVm vm, Controller ctl)
+        public OutputRow(OutputVm vm, Controller ctl)
         {
             this.vm = vm;
             this.ctl = ctl;
-            var root = new StackPanel();
-
-            var top = new Grid();
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
+            ear = new EarRow(vm.Name.StartsWith("Speaker", StringComparison.OrdinalIgnoreCase) ? Icons.Speaker : Icons.Headphones, vm.Name);
             sw = Ui.Switch("", vm.Enabled);
             sw.Checked += (s, e) => { if (!updating) ctl.SetEnabled(vm, true); };
             sw.Unchecked += (s, e) => { if (!updating) ctl.SetEnabled(vm, false); };
-            top.Children.Add(sw);
-
-            var nameRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(6, 0, 12, 0), VerticalAlignment = VerticalAlignment.Center };
-            deviceIcon = Ui.Icon(vm.Name.StartsWith("Speaker", StringComparison.OrdinalIgnoreCase) ? Icons.Speaker : Icons.Headphones, 18, "Muted", false);
-            deviceIcon.Margin = new Thickness(0, 0, 10, 0);
-            name = Ui.Heading(vm.Name, 16);
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.TextWrapping = TextWrapping.NoWrap;
-            nameRow.Children.Add(deviceIcon);
-            nameRow.Children.Add(name);
-            Grid.SetColumn(nameRow, 1);
-            top.Children.Add(nameRow);
-
+            ear.Lead.Children.Add(sw);
+            var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             battery = Ui.Battery(out batteryText, out batteryIcon);
-            battery.Margin = new Thickness(0, 0, 12, 0);
-            Grid.SetColumn(battery, 2);
-            top.Children.Add(battery);
+            battery.Margin = new Thickness(0, 0, 8, 0);
+            right.Children.Add(battery);
+            test = Kit.Quiet("Test", (s, e) => ctl.Test(vm));
+            test.ToolTip = "Play a short beep on this output";
+            right.Children.Add(test);
+            calibrate = Kit.Quiet("Calibrate", (s, e) => Calibrate());
+            calibrate.ToolTip = "Measure this output's delay with the laptop microphone";
+            var forget = new MenuItem { Header = "Forget the measurement" };
+            forget.Click += (s, e) => { ctl.ForgetCalibration(vm); note.Visibility = Visibility.Collapsed; Refresh(); };
+            calibrate.ContextMenu = new ContextMenu();
+            calibrate.ContextMenu.Items.Add(forget);
+            right.Children.Add(calibrate);
+            ear.Extra.Children.Add(right);
+            Root.Children.Add(ear.Root);
+            meter = new Meter { Height = 2, Margin = new Thickness(62, -6, 16, 6), Opacity = 0.9 };
+            Root.Children.Add(meter);
 
-            var chip = Ui.Chip(vm.State, Ui.KindBrush(vm.Kind), out chipText, out chipDot);
-            chip.Margin = new Thickness(0, 0, 10, 0);
-            Grid.SetColumn(chip, 3);
-            top.Children.Add(chip);
-
-            test = Ui.Button("Test", "Ghost", (s, e) => ctl.Test(vm));
-            test.ToolTip = "Play a short beep on this device";
-            Grid.SetColumn(test, 4);
-            top.Children.Add(test);
-            root.Children.Add(top);
-
-            meter = new Meter { Margin = new Thickness(0, 14, 0, 12) };
-            root.Children.Add(meter);
-
-            var sliders = new Grid();
-            sliders.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            sliders.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(28) });
-            sliders.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            // adjustments: fixed widths so every row lines up; they wrap on a narrow window
+            adjust = new WrapPanel { Margin = new Thickness(62, 0, 16, 8) };
             var d = Ui.LabeledSlider("Delay", 0, 500, vm.DelayMs, " ms", out delay, out delayVal);
-            var v = Ui.LabeledSlider("Volume", 0, 150, vm.Volume, "%", out volume, out volVal);
-            delay.ToolTip = "Raise this on the pair that plays ahead until both match";
+            d.Width = 230;
+            d.Margin = new Thickness(0, 0, 24, 4);
+            delay.ToolTip = "Extra delay on top of the shared deadline. Usually 0: calibrate instead.";
             delay.ValueChanged += (s, e) =>
             {
                 int ms = (int)(Math.Round(delay.Value / 5) * 5);
                 delayVal.Text = ms + " ms";
                 if (!updating) ctl.SetDelay(vm, ms);
             };
+            adjust.Children.Add(d);
+            var v = Ui.LabeledSlider("Volume", 0, 150, vm.Volume, "%", out volume, out volVal);
+            v.Width = 230;
+            v.Margin = new Thickness(0, 0, 24, 4);
             volume.ValueChanged += (s, e) =>
             {
                 int vol = (int)Math.Round(volume.Value);
                 volVal.Text = vol + "%";
                 if (!updating) ctl.SetVolume(vm, vol);
             };
-            Grid.SetColumn(v, 2);
-            sliders.Children.Add(d);
-            sliders.Children.Add(v);
-            root.Children.Add(sliders);
-
-            // sound shaping + auto-sync
-            var tools = new Grid { Margin = new Thickness(0, 12, 0, 0) };
-            for (int i = 0; i < 5; i++) tools.ColumnDefinitions.Add(new ColumnDefinition { Width = i == 2 ? new GridLength(1, GridUnitType.Star) : GridLength.Auto });
-            eq = PageKit.Combo(150);
+            adjust.Children.Add(v);
+            eq = Kit.Combo(128);
+            eq.Margin = new Thickness(0, 0, 8, 4);
             eq.ToolTip = "Equalizer for this output";
             eq.SelectionChanged += (s, e) => { if (!updating) { string t = PageKit.Tag(eq); if (t != null) ctl.SetOutputEq(vm, t); } };
-            tools.Children.Add(eq);
-            hearing = PageKit.Combo(170);
-            hearing.Margin = new Thickness(8, 0, 0, 0);
-            hearing.ToolTip = "Hearing profile for the person wearing these";
+            adjust.Children.Add(eq);
+            hearing = Kit.Combo(150);
+            hearing.Margin = new Thickness(0, 0, 0, 4);
+            hearing.ToolTip = "Hearing profile of the person wearing these";
             hearing.SelectionChanged += (s, e) => { if (!updating) ctl.SetOutputProfile(vm, PageKit.Tag(hearing) ?? ""); };
-            Grid.SetColumn(hearing, 1);
-            tools.Children.Add(hearing);
-            syncText = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            syncText.VerticalAlignment = VerticalAlignment.Center;
-            syncText.TextAlignment = TextAlignment.Right;
-            syncText.Margin = new Thickness(12, 0, 10, 0);
-            Grid.SetColumn(syncText, 3);
-            tools.Children.Add(syncText);
-            calibrate = Ui.Button("Auto-sync", "Ghost", (s, e) => Calibrate());
-            calibrate.ToolTip = "Measure this output's delay with the laptop microphone, so every pair plays in step";
-            var forget = new MenuItem { Header = "Forget the measurement" };
-            forget.Click += (s, e) => { ctl.ForgetCalibration(vm); note.Visibility = Visibility.Collapsed; Refresh(); };
-            calibrate.ContextMenu = new ContextMenu();
-            calibrate.ContextMenu.Items.Add(forget);
-            Grid.SetColumn(calibrate, 4);
-            tools.Children.Add(calibrate);
-            root.Children.Add(tools);
-            note = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            note.Margin = new Thickness(0, 8, 0, 0);
+            adjust.Children.Add(hearing);
+            Root.Children.Add(adjust);
+
+            note = Ui.Text("", 12, FontWeights.Normal, "Muted");
+            note.Margin = new Thickness(62, 0, 16, 12);
             note.Visibility = Visibility.Collapsed;
-            root.Children.Add(note);
-
-            error = Ui.Text("", 12.5, FontWeights.Normal, "Bad");
-            error.Margin = new Thickness(0, 10, 0, 0);
+            Root.Children.Add(note);
+            error = Ui.Text("", 12, FontWeights.Normal, "Bad");
+            error.Margin = new Thickness(62, 0, 16, 12);
             error.Visibility = Visibility.Collapsed;
-            root.Children.Add(error);
-
-            Root = Ui.Card(root);
-            Root.Margin = new Thickness(0, 0, 0, 12);
+            Root.Children.Add(error);
             Refresh();
         }
 
         void Calibrate()
         {
-            var r = MessageBox.Show("Hold one earbud of " + vm.Name + " right against the laptop's microphone, in a quiet room.\n\n" +
-                                    "Press OK and keep it still: 8 clicks play over about 7 seconds. Dual Earbuds measures how late this output plays and lines it up with the others.",
-                                    "Auto-sync", MessageBoxButton.OKCancel, MessageBoxImage.Information);
+            var r = MessageBox.Show("Hold one earbud of " + vm.Name + " against the laptop's microphone, in a quiet room.\n\n" +
+                                    "Press OK and keep it still. 8 clicks play over about 7 seconds; the measured delay lines this pair up with every other ear.",
+                                    "Calibrate", MessageBoxButton.OKCancel, MessageBoxImage.Information);
             if (r != MessageBoxResult.OK) return;
             note.Visibility = Visibility.Collapsed;
             ctl.Calibrate(vm, res =>
             {
                 note.Text = res.Ok ? "Measured " + Math.Round(res.LatencyMs) + " ms (" + res.Agreeing + " of 8 clicks agreed)." : res.Problem;
-                note.SetResourceReference(TextBlock.ForegroundProperty, res.Ok ? "Good" : "Warn");
+                note.SetResourceReference(TextBlock.ForegroundProperty, res.Ok ? "Muted" : "Warn");
                 note.Visibility = Visibility.Visible;
                 Refresh();
             });
@@ -307,10 +210,10 @@ namespace DualEarbuds
             if (sig == comboSig) return;
             comboSig = sig;
             eq.Items.Clear();
-            if (ctl.SmartEqOn) eq.Items.Add(new ComboBoxItem { Content = "EQ: Auto", Tag = "auto" });
-            for (int i = 0; i < EqPresets.Names.Length; i++) eq.Items.Add(new ComboBoxItem { Content = "EQ: " + EqPresets.Labels[i], Tag = EqPresets.Names[i] });
+            if (ctl.SmartEqOn) eq.Items.Add(new ComboBoxItem { Content = "EQ auto", Tag = "auto" });
+            for (int i = 0; i < EqPresets.Names.Length; i++) eq.Items.Add(new ComboBoxItem { Content = "EQ " + EqPresets.Labels[i].ToLowerInvariant(), Tag = EqPresets.Names[i] });
             hearing.Items.Clear();
-            hearing.Items.Add(new ComboBoxItem { Content = "Hearing: none", Tag = "" });
+            hearing.Items.Add(new ComboBoxItem { Content = "No hearing profile", Tag = "" });
             foreach (var p in profiles) hearing.Items.Add(new ComboBoxItem { Content = "Hearing: " + p.Name, Tag = p.Name });
             hearing.Visibility = profiles.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
         }
@@ -322,32 +225,117 @@ namespace DualEarbuds
             var os = ctl.Settings.For(vm.Id);
             PageKit.SelectTag(eq, os.EqAuto && ctl.SmartEqOn ? "auto" : os.Eq);
             PageKit.SelectTag(hearing, os.Profile);
-            eq.IsEnabled = !vm.IsSource;
-            hearing.IsEnabled = !vm.IsSource;
-            calibrate.IsEnabled = !vm.IsSource && !vm.Calibrating;
-            calibrate.Content = vm.Calibrating ? "Listening..." : "Auto-sync";
-            string auto = os.EqAuto && ctl.SmartEqOn ? " · Auto EQ: " + Cap(vm.Effects.EffectivePreset) : "";
-            syncText.Text = vm.IsSource ? "" : vm.Calibrating ? "Listening for the clicks..." :
-                (vm.LatencyMs > 0 ? "In sync · " + Math.Round(vm.LatencyMs) + " ms" + (vm.ExtraDelayMs > 0 ? " (+" + vm.ExtraDelayMs + " ms)" : "") : "Not measured") + auto;
+            bool active = vm.Enabled && !vm.IsSource;
             sw.IsChecked = vm.Enabled;
             sw.IsEnabled = !vm.IsSource;
-            sw.ToolTip = vm.IsSource ? "This is where the sound comes from" : null;
-            name.Text = vm.Name;
-            Ui.SetChip(chipText, chipDot, vm.State, Ui.KindBrush(vm.Kind));
-            Ui.SetBattery(battery, batteryText, batteryIcon, vm.Battery);
-            bool active = vm.Enabled && !vm.IsSource;
-            delay.IsEnabled = active;
-            volume.IsEnabled = active;
+            sw.ToolTip = vm.IsSource ? "The sound comes from here" : null;
+            calibrate.IsEnabled = !vm.IsSource && !vm.Calibrating;
+            calibrate.Content = vm.Calibrating ? "Listening" : vm.LatencyMeasured ? "Recalibrate" : "Calibrate";
             test.IsEnabled = !vm.IsSource;
-            Root.Opacity = vm.Enabled || vm.IsSource ? 1.0 : 0.72;
+            Ui.SetBattery(battery, batteryText, batteryIcon, vm.Battery);
+            adjust.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
+            meter.Visibility = vm.Kind == StateKind.Playing || vm.IsSource ? Visibility.Visible : Visibility.Hidden;
+            string sub;
+            if (vm.IsSource) sub = "source · plays without delay";
+            else if (vm.Calibrating) sub = "listening for the clicks";
+            else
+            {
+                string lat = vm.LatencyMeasured ? Kit.Ms(vm.LatencyMs) + " measured" : "~" + Kit.Ms(vm.EffectiveLatencyMs) + " estimated";
+                string state = vm.Kind == StateKind.Playing ? "playing" : vm.State.ToLowerInvariant();
+                sub = state + " · " + lat + (active ? " · +" + vm.ExtraDelayMs + " ms to P" : "") + (vm.DelayMs > 0 ? " · delay " + vm.DelayMs + " ms" : "") +
+                      (os.EqAuto && ctl.SmartEqOn && active ? " · EQ " + vm.Effects.EffectivePreset : "");
+            }
+            ear.Update(vm.Name, sub, ctl.LocalOffsetMs(vm));
+            ear.Dim(!vm.Enabled && !vm.IsSource);
             if (vm.Error != null) { error.Text = vm.Error; error.Visibility = Visibility.Visible; }
             else error.Visibility = Visibility.Collapsed;
             updating = false;
         }
 
         public void Animate() { meter.Level = vm.IsSource ? ctl.Level : vm.Level; }
+    }
 
-        static string Cap(string s) { return string.IsNullOrEmpty(s) ? "" : char.ToUpperInvariant(s[0]) + s.Substring(1); }
+    // A remote listener as an ear (Home shows it read-only; Listeners adds volume and Remove).
+    class ListenerRow
+    {
+        public readonly StackPanel Root = new StackPanel();
+        public readonly string Id;
+        readonly EarRow ear;
+        readonly StackPanel bat, controls;
+        readonly TextBlock batText, volVal;
+        readonly Path batIcon;
+        readonly Slider volume;
+        readonly bool editable;
+        DateTime userChangedAt = DateTime.MinValue;
+        bool updating;
+
+        public ListenerRow(PhoneInfo p, Controller ctl, Action<string> remove, bool editable)
+        {
+            Id = p.Id;
+            this.editable = editable;
+            ear = new EarRow(IconFor(p), p.Name);
+            var right = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            bat = Ui.Battery(out batText, out batIcon);
+            bat.Margin = new Thickness(0, 0, 8, 0);
+            right.Children.Add(bat);
+            controls = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(62, -4, 16, 12) };
+            if (editable)
+            {
+                var removeBtn = Kit.Quiet("Remove", (s, e) => remove(Id));
+                removeBtn.ToolTip = "Disconnect this listener. It won't rejoin by itself.";
+                right.Children.Add(removeBtn);
+                // Party mode: a volume per listener, on its own line so every row lines up
+                var vs = Ui.LabeledSlider("Volume", 0, PhoneLink.MaxListenerVolume, p.Volume, "%", out volume, out volVal);
+                vs.Width = 230;
+                volume.ToolTip = "This listener's volume (sent to the device)";
+                volume.ValueChanged += (s, e) =>
+                {
+                    int v = (int)Math.Round(volume.Value);
+                    volVal.Text = v + "%";
+                    if (updating) return;
+                    userChangedAt = DateTime.Now;
+                    ctl.SetPhoneVolume(Id, v);
+                };
+                controls.Children.Add(vs);
+            }
+            ear.Extra.Children.Add(right);
+            Root.Children.Add(ear.Root);
+            if (editable) Root.Children.Add(controls);
+            Update(p, ctl.Party);
+        }
+
+        public static string IconFor(PhoneInfo p) { return p.Client == "windows" ? Icons.Laptop : p.Client == "android" ? Icons.Phone : Icons.Globe; }
+
+        public static string Describe(PhoneInfo p, bool withVolume)
+        {
+            var parts = new List<string>();
+            parts.Add(p.Client == "android" ? "phone" : p.Client == "windows" ? "laptop" : "browser");
+            parts.Add(p.Transport == "udp" ? "UDP" : "WebSocket");
+            if (p.RttMs >= 0) parts.Add("rtt " + p.RttMs + " ms");
+            if (p.NeedMs > 0) parts.Add("needs " + p.NeedMs + " ms");
+            else if (p.BufferMs > 0) parts.Add("buffer " + p.BufferMs + " ms");
+            if (!p.Synced) parts.Add("not synced");
+            if (p.Underruns > 0) parts.Add(p.Underruns + (p.Underruns == 1 ? " dropout" : " dropouts"));
+            if (!string.IsNullOrEmpty(p.Earbuds)) parts.Add(p.Earbuds);
+            if (withVolume && p.Volume != 100) parts.Add("vol " + p.Volume + "%");
+            return string.Join(" · ", parts.ToArray());
+        }
+
+        public void Update(PhoneInfo p, bool party)
+        {
+            updating = true;
+            ear.SetIcon(IconFor(p));
+            ear.Update(p.Name, Describe(p, !(editable && party)), Controller.PhoneOffsetMs(p));
+            Ui.SetBattery(bat, batText, batIcon, p.Battery);
+            if (editable)
+            {
+                // volume only in Party mode; Remove always
+                controls.Visibility = party ? Visibility.Visible : Visibility.Collapsed;
+                bool dragging = volume.IsMouseCaptureWithin || (DateTime.Now - userChangedAt).TotalSeconds < 3;
+                if (!dragging && Math.Abs(volume.Value - p.Volume) >= 1) volume.Value = p.Volume;
+            }
+            updating = false;
+        }
     }
 
     class HomePage : IPage
@@ -356,15 +344,16 @@ namespace DualEarbuds
         readonly Action<string> navigate;
         readonly StackPanel root;
         readonly Button startBtn;
-        readonly TextBlock statusText, heroTitle, phonesText;
+        readonly TextBlock headline, statusLine, outCount, lisCount;
         readonly Ellipse statusDot;
         readonly Meter heroMeter;
         readonly ComboBox source, apps;
-        readonly Grid appRow;
+        readonly Grid appRow, sourceRow;
         readonly TextBlock appNote;
         readonly RadioButton[] modeButtons;
-        readonly StackPanel cards;
-        readonly List<OutputCard> cardList = new List<OutputCard>();
+        readonly RowPanel outputs = new RowPanel(), listeners = new RowPanel();
+        readonly List<OutputRow> outRows = new List<OutputRow>();
+        readonly Dictionary<string, ListenerRow> lisRows = new Dictionary<string, ListenerRow>();
         bool suppress;
 
         public FrameworkElement Root { get { return root; } }
@@ -373,32 +362,26 @@ namespace DualEarbuds
         {
             this.ctl = ctl;
             this.navigate = navigate;
-            root = PageKit.Column();
-            root.Children.Add(PageKit.Header("Home", "Play your laptop's sound on two (or more) pairs of earbuds at once."));
+            root = Kit.Page();
 
-            // hero
-            var hero = new Grid();
-            hero.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            hero.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var left = new StackPanel { Margin = new Thickness(0, 0, 24, 0) };
-            var titleRow = new StackPanel { Orientation = Orientation.Horizontal };
-            statusDot = new Ellipse { Width = 10, Height = 10, Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
-            heroTitle = Ui.Heading("Stopped", 22);
-            titleRow.Children.Add(statusDot);
-            titleRow.Children.Add(heroTitle);
-            left.Children.Add(titleRow);
-            statusText = Ui.Text("", 13.5, FontWeights.Normal, "Muted");
-            statusText.Margin = new Thickness(0, 6, 0, 14);
-            left.Children.Add(statusText);
-            heroMeter = new Meter { Height = 8, Margin = new Thickness(0, 0, 0, 16) };
-            left.Children.Add(heroMeter);
-            var srcHead = new Grid { Margin = new Thickness(0, 0, 0, 8) };
-            srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            srcHead.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var srcLabel = Ui.Text("Sound comes from", 12.5, FontWeights.SemiBold, "Muted");
-            srcLabel.VerticalAlignment = VerticalAlignment.Center;
-            srcHead.Children.Add(srcLabel);
-            var modeSeg = PageKit.Segmented("srcmode", new[] { "Whole laptop", "One app only" }, ctl.Settings.SourceMode == "app" && ctl.AppSupported ? 1 : 0, i =>
+            // state
+            var state = new RowPanel();
+            startBtn = Kit.Primary("Start sharing", (s, e) => ctl.Toggle());
+            startBtn.MinWidth = 120;
+            startBtn.ToolTip = "Ctrl + Alt + M";
+            var top = PageKit.StateRow(out headline, out statusLine, out statusDot, startBtn);
+            var stateBody = new StackPanel();
+            stateBody.Children.Add(top);
+            heroMeter = new Meter { Margin = new Thickness(34, -4, 16, 14) };
+            stateBody.Children.Add(heroMeter);
+            state.Add(stateBody);
+            state.Root.Margin = new Thickness(0, 20, 0, 0);
+            root.Children.Add(state.Root);
+
+            // source
+            root.Children.Add(Kit.Section("Source"));
+            var src = new RowPanel();
+            var modeSeg = Kit.Segmented("srcmode", new[] { "Whole laptop", "One app" }, ctl.Settings.SourceMode == "app" && ctl.AppSupported ? 1 : 0, i =>
             {
                 if (suppress) return;
                 if (i == 1) { ctl.RefreshApps(FillApps); ctl.SetSourceMode("app", null); }
@@ -406,79 +389,39 @@ namespace DualEarbuds
                 Refresh();
             }, out modeButtons);
             if (!ctl.AppSupported) { modeButtons[1].IsEnabled = false; modeButtons[1].ToolTip = AppAudio.WhyNot; }
-            Grid.SetColumn(modeSeg, 1);
-            srcHead.Children.Add(modeSeg);
-            left.Children.Add(srcHead);
-            appRow = new Grid { Visibility = Visibility.Collapsed };
-            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            appRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            apps = new ComboBox();
-            apps.SelectionChanged += (s, e) =>
-            {
-                if (suppress) return;
-                string t = PageKit.Tag(apps);
-                if (!string.IsNullOrEmpty(t) && t != ctl.Settings.SourceApp) ctl.SetSourceMode("app", t);
-            };
-            appRow.Children.Add(apps);
-            var refreshApps = new Button { Content = Ui.Icon(Icons.Refresh, 16, "Muted", false), ToolTip = "Look again for apps playing sound", Margin = new Thickness(8, 0, 0, 0), Width = 40, Height = 40 };
-            refreshApps.SetResourceReference(FrameworkElement.StyleProperty, "Ghost");
-            refreshApps.Padding = new Thickness(0);
-            refreshApps.Click += (s, e) => ctl.RefreshApps(FillApps);
-            Grid.SetColumn(refreshApps, 1);
-            appRow.Children.Add(refreshApps);
-            left.Children.Add(appRow);
-            appNote = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            appNote.Margin = new Thickness(0, 6, 0, 0);
-            appNote.Visibility = Visibility.Collapsed;
-            source = new ComboBox();
+            src.Add(Kit.Row("Share", null, modeSeg));
+            source = Kit.Combo(340);
             source.SelectionChanged += (s, e) =>
             {
                 if (suppress) return;
                 var it = source.SelectedItem as ComboBoxItem;
                 ctl.SetSource(it == null ? "" : (string)it.Tag);
             };
-            left.Children.Add(source);
-            left.Children.Add(appNote);
-            hero.Children.Add(left);
+            sourceRow = Kit.Row("From", "What this output plays is captured. It plays without the shared delay.", source);
+            src.Add(sourceRow);
+            var appCtl = new StackPanel { Orientation = Orientation.Horizontal };
+            apps = Kit.Combo(300);
+            apps.SelectionChanged += (s, e) =>
+            {
+                if (suppress) return;
+                string t = PageKit.Tag(apps);
+                if (!string.IsNullOrEmpty(t) && t != ctl.Settings.SourceApp) ctl.SetSourceMode("app", t);
+            };
+            appCtl.Children.Add(apps);
+            var refreshApps = Kit.IconButton(Icons.Refresh, "Look again for apps playing sound", (s, e) => ctl.RefreshApps(FillApps));
+            refreshApps.Margin = new Thickness(4, 0, 0, 0);
+            appCtl.Children.Add(refreshApps);
+            appRow = Kit.Row("App", "", appCtl, out appNote);
+            src.Add(appRow);
+            root.Children.Add(src.Root);
 
-            var right = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            startBtn = Ui.Button("Start mirroring", "Primary", (s, e) => ctl.Toggle());
-            startBtn.Width = 200;
-            startBtn.Height = 54;
-            startBtn.FontSize = 16;
-            right.Children.Add(startBtn);
-            var hint = Ui.Text("Shortcut: Ctrl + Alt + M", 12, FontWeights.Normal, "Muted");
-            hint.TextAlignment = TextAlignment.Center;
-            hint.Margin = new Thickness(0, 10, 0, 0);
-            right.Children.Add(hint);
-            Grid.SetColumn(right, 1);
-            hero.Children.Add(right);
-            root.Children.Add(Ui.Card(hero));
+            // outputs
+            root.Children.Add(Kit.Section("Outputs", out outCount, null));
+            root.Children.Add(outputs.Root);
 
-            root.Children.Add(PageKit.Section("Play on"));
-            cards = new StackPanel();
-            root.Children.Add(cards);
-
-            // phones summary
-            var ph = new Grid();
-            ph.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            ph.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            ph.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var phIcon = Ui.Icon(Icons.Phone, 22, "Accent", false);
-            phIcon.Margin = new Thickness(0, 0, 16, 0);
-            ph.Children.Add(phIcon);
-            var phText = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            phText.Children.Add(Ui.Heading("Earbuds your laptop can't reach?", 15));
-            phonesText = Ui.Text("", 13, FontWeights.Normal, "Muted");
-            phonesText.Margin = new Thickness(0, 3, 0, 0);
-            phText.Children.Add(phonesText);
-            Grid.SetColumn(phText, 1);
-            ph.Children.Add(phText);
-            var phBtn = Ui.Button("Phone link", "Ghost", (s, e) => navigate("phones"));
-            Grid.SetColumn(phBtn, 2);
-            ph.Children.Add(phBtn);
-            root.Children.Add(PageKit.Section("Phones"));
-            root.Children.Add(Ui.Card(ph));
+            // listeners
+            root.Children.Add(Kit.Section("Listeners", out lisCount, Kit.Quiet("Link and QR code", (s, e) => navigate("phones"))));
+            root.Children.Add(listeners.Root);
 
             Rebuild();
             if (ctl.Settings.SourceMode == "app" && ctl.AppSupported) ctl.RefreshApps(FillApps);
@@ -498,11 +441,11 @@ namespace DualEarbuds
             }
             if (!found && cur != "")
             {
-                var it = new ComboBoxItem { Content = AppAudio.Pretty(cur) + "  · not playing now", Tag = cur };
+                var it = new ComboBoxItem { Content = AppAudio.Pretty(cur) + "  · not playing", Tag = cur };
                 apps.Items.Insert(0, it);
                 apps.SelectedItem = it;
             }
-            if (apps.Items.Count == 0) apps.Items.Add(new ComboBoxItem { Content = "No app is playing sound - play something, then press refresh", Tag = "", IsEnabled = false });
+            if (apps.Items.Count == 0) apps.Items.Add(new ComboBoxItem { Content = "No app plays sound. Play something, then refresh.", Tag = "", IsEnabled = false });
             suppress = false;
             Refresh();
         }
@@ -511,7 +454,7 @@ namespace DualEarbuds
         {
             suppress = true;
             source.Items.Clear();
-            var def = new ComboBoxItem { Content = "Windows default output  (now: " + ctl.NameOf(ctl.DefaultId) + ")", Tag = "" };
+            var def = new ComboBoxItem { Content = "Windows default (" + ctl.NameOf(ctl.DefaultId) + ")", Tag = "" };
             source.Items.Add(def);
             source.SelectedItem = def;
             foreach (var o in ctl.Outputs)
@@ -522,148 +465,79 @@ namespace DualEarbuds
             }
             suppress = false;
 
-            cards.Children.Clear();
-            cardList.Clear();
+            outputs.Clear();
+            outRows.Clear();
             foreach (var o in ctl.Outputs)
             {
-                var c = new OutputCard(o, ctl);
-                cardList.Add(c);
-                cards.Children.Add(c.Root);
+                var r = new OutputRow(o, ctl);
+                outRows.Add(r);
+                outputs.Add(r.Root);
             }
             if (ctl.Outputs.Count <= 1)
-            {
-                var t = Ui.Text("No other earbuds found. Connect them in Windows Bluetooth settings - they appear here by themselves. If Windows can only play to one pair, use the phone link below.", 13.5, FontWeights.Normal, "Muted");
-                cards.Children.Add(Ui.Card(t));
-            }
+                outputs.Add(PageKit.EmptyRow("No other earbuds on this laptop. Pair them in Windows Bluetooth settings and they appear here. If Windows plays to only one pair, the second pair can listen through a phone."));
+            RebuildListeners();
             Refresh();
+        }
+
+        void RebuildListeners()
+        {
+            listeners.Clear();
+            lisRows.Clear();
+            foreach (var p in ctl.Phones)
+            {
+                var r = new ListenerRow(p, ctl, null, false);
+                lisRows[p.Id ?? ""] = r;
+                listeners.Add(r.Root);
+            }
+            if (ctl.Phones.Count == 0) listeners.Add(PageKit.EmptyRow(ctl.Settings.PhoneLink ? "No one is listening. Phones, laptops and browsers join with the link on the Listeners page." : "The link is off, so no one can listen."));
         }
 
         public void Refresh()
         {
             bool on = ctl.Running || ctl.WantRunning;
-            startBtn.Content = on ? "Stop mirroring" : "Start mirroring";
+            startBtn.Content = on ? "Stop sharing" : "Start sharing";
             startBtn.SetResourceReference(FrameworkElement.StyleProperty, on ? "Ghost" : "Primary");
-            startBtn.FontSize = 16;
-            heroTitle.Text = ctl.Listening ? "Listening to " + ctl.ListenHostName : ctl.Running ? (ctl.Settings.SourceMode == "app" && ctl.AppSupported && ctl.Settings.SourceApp != "" ? "Mirroring " + ctl.SourceDescription : "Mirroring") : (ctl.WantRunning ? "Waiting for sound source" : "Stopped");
+            startBtn.IsEnabled = !ctl.Listening;
+            int ears = ctl.EarCount;
+            headline.Text = ctl.Listening ? "Listening to " + ctl.ListenHostName
+                : ctl.Running ? (ears == 0 ? "Sharing, no ears yet" : "Sharing to " + ears + (ears == 1 ? " ear" : " ears"))
+                : ctl.WantRunning ? "Waiting for sound" : "Not sharing";
+            statusDot.SetResourceReference(Shape.FillProperty, ctl.Running ? (ctl.StatusKind == StateKind.Problem ? "Warn" : "Accent") : ctl.WantRunning ? "Warn" : "Muted");
+            statusLine.Text = ctl.Listening ? "This laptop plays another device's sound. Stop listening on the Listen page to share again." : ctl.StatusText;
+
             bool appMode = ctl.Settings.SourceMode == "app" && ctl.AppSupported;
             suppress = true;
             modeButtons[appMode ? 1 : 0].IsChecked = true;
             suppress = false;
-            source.Visibility = appMode ? Visibility.Collapsed : Visibility.Visible;
+            sourceRow.Visibility = appMode ? Visibility.Collapsed : Visibility.Visible;
             appRow.Visibility = appMode ? Visibility.Visible : Visibility.Collapsed;
             string note = !ctl.AppSupported ? AppAudio.WhyNot
-                : appMode && ctl.Settings.SourceApp == "" ? "Pick the app to share. Until then the whole laptop is shared."
-                : appMode ? "Only " + ctl.SourceDescription + " is shared (with its child windows and tabs). Other sounds - calls, notifications - stay on this laptop." : null;
-            appNote.Text = note ?? "";
-            appNote.Visibility = note == null || (!appMode && ctl.AppSupported) ? Visibility.Collapsed : Visibility.Visible;
-            string key = Ui.KindBrush(ctl.StatusKind);
-            statusDot.SetResourceReference(Shape.FillProperty, ctl.Running ? (ctl.StatusKind == StateKind.Problem ? "Warn" : "Good") : key);
-            statusText.Text = ctl.StatusText;
-            foreach (var c in cardList) c.Refresh();
-            int n = ctl.Phones.Count;
-            phonesText.Text = n > 0
-                ? n + (n == 1 ? " phone is" : " phones are") + " listening over Wi-Fi."
-                : "Pair them with your phone and stream over Wi-Fi - no cables, no extra hardware.";
+                : ctl.Settings.SourceApp == "" ? "Pick the app. Until then the whole laptop is shared."
+                : "Only " + ctl.SourceDescription + " is shared, with its child windows. Calls and notifications stay here.";
+            appNote.Text = note;
+            appNote.Visibility = Visibility.Visible;
+
+            int onCount = 0, total = 0;
+            foreach (var o in ctl.Outputs) { if (o.IsSource) continue; total++; if (o.Enabled) onCount++; }
+            outCount.Text = onCount + " of " + total + " on";
+            foreach (var r in outRows) r.Refresh();
+
+            // listener rows are kept by id and updated in place
+            bool same = ctl.Phones.Count == lisRows.Count;
+            if (same) foreach (var p in ctl.Phones) if (!lisRows.ContainsKey(p.Id ?? "")) { same = false; break; }
+            if (!same) RebuildListeners();
+            else foreach (var p in ctl.Phones) lisRows[p.Id ?? ""].Update(p, ctl.Party);
+            lisCount.Text = ctl.Phones.Count + (ctl.Phones.Count > 0 ? " · P " + ctl.PlayoutMs + " ms" : "");
         }
 
         public void Animate()
         {
             heroMeter.Level = ctl.Level;
-            foreach (var c in cardList) c.Animate();
+            foreach (var r in outRows) r.Animate();
         }
     }
 
-    // ---------------------------------------------------------------------- Phones
-    // One connected phone. Cards are kept by listener id and updated in place, so a volume slider being
-    // dragged is never rebuilt under the mouse when the phone reports back.
-    class ListenerCard
-    {
-        public readonly Border Root;
-        public readonly string Id;
-        readonly TextBlock name, detail, volVal;
-        readonly StackPanel bat;
-        readonly TextBlock batText;
-        readonly Path batIcon;
-        readonly Grid controls;
-        readonly Slider volume;
-        DateTime userChangedAt = DateTime.MinValue;
-        bool updating;
-
-        public ListenerCard(PhoneInfo p, Controller ctl, Action<string> remove)
-        {
-            Id = p.Id;
-            var root = new StackPanel();
-            var top = new Grid();
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var ic = Ui.Icon(Icons.Phone, 22, "Accent", false);
-            ic.Margin = new Thickness(0, 0, 14, 0);
-            top.Children.Add(ic);
-            var mid = new StackPanel();
-            name = Ui.Heading(p.Name, 15);
-            name.TextTrimming = TextTrimming.CharacterEllipsis;
-            name.TextWrapping = TextWrapping.NoWrap;
-            mid.Children.Add(name);
-            detail = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            detail.Margin = new Thickness(0, 3, 0, 0);
-            mid.Children.Add(detail);
-            Grid.SetColumn(mid, 1);
-            top.Children.Add(mid);
-            bat = Ui.Battery(out batText, out batIcon);
-            bat.Margin = new Thickness(12, 0, 0, 0);
-            Grid.SetColumn(bat, 2);
-            top.Children.Add(bat);
-            root.Children.Add(top);
-
-            // party mode: per-listener volume + remove
-            controls = new Grid { Margin = new Thickness(36, 14, 0, 0) };
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var vs = Ui.LabeledSlider("Volume", 0, PhoneLink.MaxListenerVolume, p.Volume, "%", out volume, out volVal);
-            volume.ToolTip = "This listener's volume (sent to the phone)";
-            volume.ValueChanged += (s, e) =>
-            {
-                int v = (int)Math.Round(volume.Value);
-                volVal.Text = v + "%";
-                if (updating) return;
-                userChangedAt = DateTime.Now;
-                ctl.SetPhoneVolume(Id, v);
-            };
-            controls.Children.Add(vs);
-            var removeBtn = Ui.Button("Remove", "Ghost", (s, e) => remove(Id));
-            removeBtn.ToolTip = "Disconnect this phone. It won't reconnect by itself.";
-            removeBtn.Margin = new Thickness(16, 0, 0, 0);
-            removeBtn.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(removeBtn, 1);
-            controls.Children.Add(removeBtn);
-            root.Children.Add(controls);
-
-            Root = Ui.Card(root);
-            Root.Margin = new Thickness(0, 0, 0, 10);
-            Update(p, ctl.Party);
-        }
-
-        public void Update(PhoneInfo p, bool party)
-        {
-            updating = true;
-            name.Text = p.Name;
-            detail.Text = (p.Client == "android" ? "Android app" : p.Client == "windows" ? "Windows laptop" : "Browser") +
-                          (string.IsNullOrEmpty(p.Earbuds) ? "" : " · " + p.Earbuds) +
-                          (p.RttMs >= 0 ? " · " + p.RttMs + " ms" : "") +
-                          (p.Synced ? " · in step" : "") +
-                          (p.BufferMs > 0 ? " · buffer " + p.BufferMs + " ms" : "") +
-                          (p.Underruns > 0 ? " · " + p.Underruns + (p.Underruns == 1 ? " dropout" : " dropouts") : "") +
-                          (party ? "" : " · volume " + p.Volume + "%");
-            Ui.SetBattery(bat, batText, batIcon, p.Battery);
-            controls.Visibility = party ? Visibility.Visible : Visibility.Collapsed;
-            // don't fight the user: their own change wins until the phone has had time to report it back
-            bool dragging = volume.IsMouseCaptureWithin || (DateTime.Now - userChangedAt).TotalSeconds < 3;
-            if (!dragging && Math.Abs(volume.Value - p.Volume) >= 1) volume.Value = p.Volume;
-            updating = false;
-        }
-    }
-
+    // ---------------------------------------------------------------------- Listeners (the link)
     class PhonesPage : IPage
     {
         readonly Controller ctl;
@@ -671,246 +545,191 @@ namespace DualEarbuds
         readonly ColumnDefinition qrColumn;
         readonly Border qrHost;
         readonly TextBox link;
-        readonly TextBlock qrHint, linkState, listTitle, partyCount;
-        readonly StackPanel partyHead;
+        readonly TextBlock linkState, listCount, pinBig, talkHint, hotTitle, hotText;
+        readonly StackPanel pinShow;
         readonly CheckBox enable, party, pinSwitch, remoteSw;
         readonly TextBox port, pinBox;
-        readonly Grid pinRow;
-        readonly StackPanel pinShow;
-        readonly TextBlock pinBig, hotTitle, hotText, talkState, talkHint;
-        readonly Border hotspot, talkCard;
+        readonly Grid pinRow, talkRow;
+        readonly Border hotspot;
         readonly Button talkBtn;
         readonly ComboBox suggest;
-        bool talkHeld;
-        readonly StackPanel phoneList;
-        readonly Border emptyCard;
-        readonly Dictionary<string, ListenerCard> cards = new Dictionary<string, ListenerCard>();
+        readonly RowPanel list = new RowPanel();
+        readonly Dictionary<string, ListenerRow> rows = new Dictionary<string, ListenerRow>();
+        UIElement empty;
+        bool built, talkHeld;
         string shownUrl = "\0";
         bool shownParty;
         bool updating;
 
-        const double QrNormal = 240, QrParty = 320;
+        const double QrNormal = 216, QrParty = 264;
 
         public FrameworkElement Root { get { return root; } }
 
         public PhonesPage(Controller ctl)
         {
             this.ctl = ctl;
-            root = PageKit.Column();
-            root.Children.Add(PageKit.Header("Phones", "Stream your laptop's sound over Wi-Fi to a phone, and listen with the earbuds paired to it."));
+            root = Kit.Page();
 
-            var grid = new Grid();
-            qrColumn = new ColumnDefinition { Width = new GridLength(320) };
+            var grid = new Grid { Margin = new Thickness(0, 20, 0, 0) };
+            qrColumn = new ColumnDefinition { Width = new GridLength(268) };
             grid.ColumnDefinitions.Add(qrColumn);
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(20) });
             grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            // QR card
-            var qrCol = new StackPanel();
-            partyHead = new StackPanel { Margin = new Thickness(0, 0, 0, 16), Visibility = Visibility.Collapsed };
-            var badgeRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center };
-            var badge = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(10, 3, 10, 3), VerticalAlignment = VerticalAlignment.Center };
-            badge.SetResourceReference(Border.BackgroundProperty, "Accent");
-            var bt = Ui.Text("PARTY MODE", 11, FontWeights.Bold, "AccentInk");
-            bt.TextWrapping = TextWrapping.NoWrap;
-            badge.Child = bt;
-            badgeRow.Children.Add(badge);
-            partyCount = Ui.Text("", 13, FontWeights.SemiBold, "Text");
-            partyCount.Margin = new Thickness(10, 0, 0, 0);
-            partyCount.VerticalAlignment = VerticalAlignment.Center;
-            partyCount.TextWrapping = TextWrapping.NoWrap;
-            badgeRow.Children.Add(partyCount);
-            partyHead.Children.Add(badgeRow);
-            var ph = Ui.Heading("Scan to join", 22);
-            ph.HorizontalAlignment = HorizontalAlignment.Center;
-            ph.Margin = new Thickness(0, 12, 0, 0);
-            partyHead.Children.Add(ph);
-            var ps = Ui.Text("Up to 16 listeners, each with their own earbuds.", 13, FontWeights.Normal, "Muted");
-            ps.TextAlignment = TextAlignment.Center;
-            partyHead.Children.Add(ps);
-            qrCol.Children.Add(partyHead);
-            pinShow = new StackPanel { Margin = new Thickness(0, 0, 0, 16), Visibility = Visibility.Collapsed, HorizontalAlignment = HorizontalAlignment.Center };
-            var pinCap = Ui.Text("ROOM PIN", 11.5, FontWeights.Bold, "Muted");
-            pinCap.HorizontalAlignment = HorizontalAlignment.Center;
-            pinShow.Children.Add(pinCap);
-            pinBig = Ui.Heading("", 46);
-            pinBig.HorizontalAlignment = HorizontalAlignment.Center;
-            pinBig.FontFamily = Theme.Mono;
-            pinBig.SetResourceReference(TextBlock.ForegroundProperty, "Accent");
-            pinShow.Children.Add(pinBig);
-            var pinTell = Ui.Text("Tell guests this PIN out loud. It is not in the QR code or the link.", 12.5, FontWeights.Normal, "Muted");
-            pinTell.TextAlignment = TextAlignment.Center;
-            pinTell.MaxWidth = 300;
-            pinShow.Children.Add(pinTell);
-            qrCol.Children.Add(pinShow);
-
-            qrHost = new Border { Width = QrNormal, Height = QrNormal, CornerRadius = new CornerRadius(16), HorizontalAlignment = HorizontalAlignment.Center, Padding = new Thickness(6) };
+            // the link: QR, the URL in mono, Copy link (the one primary action here)
+            var qrCol = new StackPanel { Margin = new Thickness(16) };
+            var cap = Ui.Text("Scan or open the link", 12, FontWeights.SemiBold, "Text");
+            cap.Margin = new Thickness(0, 0, 0, 10);
+            qrCol.Children.Add(cap);
+            qrHost = new Border { Width = QrNormal, Height = QrNormal, CornerRadius = new CornerRadius(6), HorizontalAlignment = HorizontalAlignment.Left, Padding = new Thickness(4) };
             qrHost.SetResourceReference(Border.BackgroundProperty, "QrBg");
             qrCol.Children.Add(qrHost);
-            qrHint = Ui.Text("Scan with the Dual Earbuds Android app or your phone's camera.", 12.5, FontWeights.Normal, "Muted");
-            qrHint.TextAlignment = TextAlignment.Center;
-            qrHint.Margin = new Thickness(0, 14, 0, 12);
-            qrCol.Children.Add(qrHint);
-            link = new TextBox { IsReadOnly = true, FontFamily = Theme.Mono, FontSize = 12.5, TextWrapping = TextWrapping.Wrap };
+            link = new TextBox { IsReadOnly = true, FontFamily = Theme.Mono, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(0, 12, 0, 0) };
             qrCol.Children.Add(link);
-            var btns = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Center, Margin = new Thickness(0, 12, 0, 0) };
-            var copy = Ui.Button("Copy link", "Ghost", (s, e) => { try { if (!string.IsNullOrEmpty(link.Text)) Clipboard.SetText(link.Text); } catch { } });
-            copy.Margin = new Thickness(0, 0, 8, 0);
-            var reset = Ui.Button("New link", "Ghost", (s, e) =>
+            var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
+            var copy = Kit.Primary("Copy link", (s, e) => { try { if (!string.IsNullOrEmpty(link.Text)) Clipboard.SetText(link.Text); } catch { } });
+            btns.Children.Add(copy);
+            var reset = Kit.Quiet("New link", (s, e) =>
             {
-                var r = MessageBox.Show("Make a new link? Phones using the old link are disconnected and need to scan again.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Question);
+                var r = MessageBox.Show("Make a new link? Everyone on the old link is disconnected and has to join again.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Question);
                 if (r == MessageBoxResult.OK) { ctl.ResetLinkKey(); Rebuild(); }
             });
-            reset.ToolTip = "Creates a new secret key - use it if someone else has your link";
-            btns.Children.Add(copy);
+            reset.ToolTip = "A new secret key, for when someone else has your link";
+            reset.Margin = new Thickness(6, 0, 0, 0);
             btns.Children.Add(reset);
             qrCol.Children.Add(btns);
-            var qrCard = Ui.Card(qrCol);
-            qrCard.VerticalAlignment = VerticalAlignment.Top;
-            grid.Children.Add(qrCard);
+            pinShow = new StackPanel { Margin = new Thickness(0, 16, 0, 0), Visibility = Visibility.Collapsed };
+            pinShow.Children.Add(Ui.Text("Room PIN", 12, FontWeights.SemiBold, "Text"));
+            pinBig = Ui.Mono("", 30, "Text");
+            pinBig.FontWeight = FontWeights.SemiBold;
+            pinShow.Children.Add(pinBig);
+            pinShow.Children.Add(Kit.Hint("Say it out loud. It isn't in the link or the QR code."));
+            qrCol.Children.Add(pinShow);
+            var qrPanel = new RowPanel();
+            qrPanel.Add(qrCol);
+            qrPanel.Root.VerticalAlignment = VerticalAlignment.Top;
+            grid.Children.Add(qrPanel.Root);
 
-            // right column
             var right = new StackPanel();
-
-            // hotspot help: on public networks, or when no phone joined within 60 s. The app changes no system setting.
-            var hotBtn = Ui.Button("Open Mobile hotspot settings", "Ghost", (s1, e1) => Controller.OpenHotspotSettings());
-            hotspot = PageKit.Note(Icons.Wifi, "Warn", "", "", hotBtn, out hotTitle, out hotText);
-            hotspot.Margin = new Thickness(0, 0, 0, 14);
+            // hotspot help: on public networks, or when no one joined within 60 s. The app changes no system setting.
+            var hotPanel = new RowPanel();
+            var hotBody = new StackPanel { Margin = new Thickness(16, 12, 16, 12) };
+            var ht = new StackPanel { Orientation = Orientation.Horizontal };
+            var hd = new Ellipse { Width = 6, Height = 6, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            hd.SetResourceReference(Shape.FillProperty, "Warn");
+            ht.Children.Add(hd);
+            hotTitle = Ui.Text("", 14, FontWeights.SemiBold, "Text");
+            ht.Children.Add(hotTitle);
+            hotBody.Children.Add(ht);
+            hotText = Kit.Hint("");
+            hotText.Margin = new Thickness(14, 4, 0, 8);
+            hotBody.Children.Add(hotText);
+            var hotBtn = Kit.Secondary("Mobile hotspot settings", (s1, e1) => Controller.OpenHotspotSettings());
+            hotBtn.HorizontalAlignment = HorizontalAlignment.Left;
+            hotBtn.Margin = new Thickness(14, 0, 0, 0);
+            hotBody.Children.Add(hotBtn);
+            hotPanel.Add(hotBody);
+            hotspot = hotPanel.Root;
+            hotspot.Margin = new Thickness(0, 0, 0, 4);
             hotspot.Visibility = Visibility.Collapsed;
             right.Children.Add(hotspot);
 
-            var settingsCard = new StackPanel();
+            var listHead = Kit.Section("Listening", out listCount, null);
+            listHead.Margin = new Thickness(0, 0, 0, 8);
+            right.Children.Add(listHead);
+            right.Children.Add(list.Root);
+
+            right.Children.Add(Kit.Section("Link"));
+            var set = new RowPanel();
             enable = Ui.Switch("", ctl.Settings.PhoneLink);
             enable.Checked += (s, e) => { if (!updating) { ctl.SetPhoneLink(true); Rebuild(); } };
             enable.Unchecked += (s, e) => { if (!updating) { ctl.SetPhoneLink(false); Rebuild(); } };
-            settingsCard.Children.Add(PageKit.Row("Phone link", "Lets phones on the same Wi-Fi or hotspot listen - at home or on public Wi-Fi. Each link has a secret key, so only phones with the link can connect.", enable));
-            settingsCard.Children.Add(PageKit.Divider());
+            set.Add(Kit.Row("Let devices listen", "Phones, laptops and browsers on this Wi-Fi or hotspot. The link's secret key keeps others out.", enable));
             party = Ui.Switch("", ctl.Party);
             party.Checked += (s, e) => { if (!updating) { ctl.SetParty(true); Rebuild(); } };
             party.Unchecked += (s, e) => { if (!updating) { ctl.SetParty(false); Rebuild(); } };
-            settingsCard.Children.Add(PageKit.Row("Party mode", "Up to 16 listeners instead of 8, with a big QR code to scan and a volume control for each phone.", party));
+            set.Add(Kit.Row("Party mode", "16 listeners instead of 8, a bigger QR code and a volume per listener.", party));
             pinSwitch = Ui.Switch("", ctl.Settings.PinOn);
             pinSwitch.Checked += (s1, e1) => { if (!updating) { ctl.SetPinOn(true); Refresh(); } };
             pinSwitch.Unchecked += (s1, e1) => { if (!updating) { ctl.SetPinOn(false); Refresh(); } };
             var pinCtl = new StackPanel { Orientation = Orientation.Horizontal };
-            pinBox = new TextBox { Width = 84, FontFamily = Theme.Mono, MaxLength = 6, Text = ctl.Settings.Pin, ToolTip = "4 to 6 digits" };
+            pinBox = new TextBox { Width = 76, FontFamily = Theme.Mono, MaxLength = 6, Text = ctl.Settings.Pin, ToolTip = "4 to 6 digits" };
             pinBox.KeyDown += (s1, e1) => { if (e1.Key == Key.Enter) ApplyPin(); };
-            var pinApply = Ui.Button("Set", "Ghost", (s1, e1) => ApplyPin());
-            pinApply.Margin = new Thickness(6, 0, 0, 0);
-            var pinNew = Ui.Button("New PIN", "Ghost", (s1, e1) => { ctl.NewPin(); pinBox.Text = ctl.Settings.Pin; Refresh(); });
-            pinNew.Margin = new Thickness(6, 0, 12, 0);
             pinCtl.Children.Add(pinBox);
+            var pinApply = Kit.Quiet("Set", (s1, e1) => ApplyPin());
+            pinApply.Margin = new Thickness(4, 0, 0, 0);
             pinCtl.Children.Add(pinApply);
+            var pinNew = Kit.Quiet("New", (s1, e1) => { ctl.NewPin(); pinBox.Text = ctl.Settings.Pin; Refresh(); });
+            pinNew.Margin = new Thickness(0, 0, 12, 0);
             pinCtl.Children.Add(pinNew);
             pinCtl.Children.Add(pinSwitch);
-            pinRow = PageKit.Row("Require PIN", "Guests also type a 4-6 digit PIN. Wrong guesses lock that device out for a while.", pinCtl);
-            pinRow.Margin = new Thickness(0, 10, 0, 6);
-            settingsCard.Children.Add(pinRow);
-            settingsCard.Children.Add(PageKit.Divider());
+            pinRow = Kit.Row("Require a PIN", "Guests also type a 4-6 digit PIN. Wrong guesses lock that device out for 5 minutes.", pinCtl);
+            set.Add(pinRow);
             var portRow = new StackPanel { Orientation = Orientation.Horizontal };
-            port = new TextBox { Width = 90, Text = ctl.Settings.PhonePort.ToString(), FontFamily = Theme.Mono };
-            var apply = Ui.Button("Apply", "Ghost", (s, e) => ApplyPort());
-            apply.Margin = new Thickness(8, 0, 0, 0);
+            port = new TextBox { Width = 76, Text = ctl.Settings.PhonePort.ToString(CultureInfo.InvariantCulture), FontFamily = Theme.Mono };
             port.KeyDown += (s, e) => { if (e.Key == Key.Enter) ApplyPort(); };
             portRow.Children.Add(port);
+            var apply = Kit.Quiet("Apply", (s, e) => ApplyPort());
+            apply.Margin = new Thickness(4, 0, 0, 0);
             portRow.Children.Add(apply);
-            settingsCard.Children.Add(PageKit.Row("Port", "Change only if another app already uses this port.", portRow));
-            linkState = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            linkState.Margin = new Thickness(0, 6, 0, 0);
-            settingsCard.Children.Add(linkState);
-            right.Children.Add(Ui.Card(settingsCard));
+            TextBlock portHint;
+            set.Add(Kit.Row("Port", "", portRow, out portHint));
+            linkState = portHint;
+            remoteSw = Ui.Switch("", ctl.Settings.RemoteControl);
+            remoteSw.Checked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(true); };
+            remoteSw.Unchecked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(false); };
+            set.Add(Kit.Row("Listeners control playback", "Play/pause, next, previous and volume from their device press the media keys here.", remoteSw));
+            suggest = Kit.Combo(150);
+            suggest.Items.Add(new ComboBoxItem { Content = "No suggestion", Tag = "" });
+            for (int i = 0; i < EqPresets.Names.Length; i++) suggest.Items.Add(new ComboBoxItem { Content = EqPresets.Labels[i], Tag = EqPresets.Names[i] });
+            PageKit.SelectTag(suggest, ctl.Settings.SuggestEq);
+            suggest.SelectionChanged += (s1, e1) => { if (!updating) ctl.SetSuggestEq(PageKit.Tag(suggest)); };
+            set.Add(Kit.Row("Suggest an EQ", "Listeners see it and choose whether to use it.", suggest));
+            right.Children.Add(set.Root);
 
             // talk-over
-            var talkBody = new StackPanel();
-            var talkTop = new Grid();
-            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            talkTop.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var micIc = Ui.Icon(Icons.Mic, 22, "Accent", false);
-            micIc.Margin = new Thickness(0, 0, 14, 0);
-            talkTop.Children.Add(micIc);
-            var tt = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-            tt.Children.Add(Ui.Heading("Talk to everyone", 15));
-            talkState = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            talkState.Margin = new Thickness(0, 3, 0, 0);
-            tt.Children.Add(talkState);
-            Grid.SetColumn(tt, 1);
-            talkTop.Children.Add(tt);
-            talkBtn = Ui.Button("Hold to talk", "Primary", null);
-            talkBtn.MinWidth = 150;
-            talkBtn.PreviewMouseLeftButtonDown += (s1, e1) => { if (ctl.Settings.TalkMode == "hold") { talkHeld = true; talkBtn.CaptureMouse(); ctl.SetTalking(true); e1.Handled = true; Refresh(); } };
-            talkBtn.PreviewMouseLeftButtonUp += (s1, e1) => { if (talkHeld) { talkHeld = false; talkBtn.ReleaseMouseCapture(); ctl.SetTalking(false); e1.Handled = true; Refresh(); } };
-            talkBtn.LostMouseCapture += (s1, e1) => { if (talkHeld) { talkHeld = false; ctl.SetTalking(false); Refresh(); } };
-            // mouse presses in hold mode are handled above; this is a tap in toggle mode, or the keyboard (Space/Enter) in either
-            talkBtn.Click += (s1, e1) => { ctl.SetTalking(!ctl.Talking); Refresh(); };
-            Grid.SetColumn(talkBtn, 2);
-            talkTop.Children.Add(talkBtn);
-            talkBody.Children.Add(talkTop);
-            var talkMode = PageKit.Segmented("talkmode", new[] { "Hold to talk", "Tap to start / stop" }, ctl.Settings.TalkMode == "toggle" ? 1 : 0, i =>
+            right.Children.Add(Kit.Section("Talk over the sound"));
+            var talk = new RowPanel();
+            var talkCtl = new StackPanel { Orientation = Orientation.Horizontal };
+            var talkMode = Kit.Segmented("talkmode", new[] { "Hold", "Tap" }, ctl.Settings.TalkMode == "toggle" ? 1 : 0, i =>
             {
                 if (ctl.Talking) ctl.SetTalking(false);
                 ctl.Settings.TalkMode = i == 1 ? "toggle" : "hold";
                 ctl.MarkDirty();
                 Refresh();
             });
-            var modeRow = PageKit.Row("Button", null, talkMode);
-            modeRow.Margin = new Thickness(36, 12, 0, 0);
-            talkBody.Children.Add(modeRow);
-            talkHint = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            talkHint.Margin = new Thickness(36, 6, 0, 0);
-            talkBody.Children.Add(talkHint);
-            talkCard = Ui.Card(talkBody);
-            talkCard.Margin = new Thickness(0, 14, 0, 0);
-            right.Children.Add(talkCard);
+            talkMode.Margin = new Thickness(0, 0, 8, 0);
+            talkCtl.Children.Add(talkMode);
+            talkBtn = Kit.Secondary("Hold to talk", null);
+            talkBtn.MinWidth = 110;
+            talkBtn.PreviewMouseLeftButtonDown += (s1, e1) => { if (ctl.Settings.TalkMode == "hold") { talkHeld = true; talkBtn.CaptureMouse(); ctl.SetTalking(true); e1.Handled = true; Refresh(); } };
+            talkBtn.PreviewMouseLeftButtonUp += (s1, e1) => { if (talkHeld) { talkHeld = false; talkBtn.ReleaseMouseCapture(); ctl.SetTalking(false); e1.Handled = true; Refresh(); } };
+            talkBtn.LostMouseCapture += (s1, e1) => { if (talkHeld) { talkHeld = false; ctl.SetTalking(false); Refresh(); } };
+            // mouse presses in hold mode are handled above; this is a tap in toggle mode, or Space/Enter in either
+            talkBtn.Click += (s1, e1) => { ctl.SetTalking(!ctl.Talking); Refresh(); };
+            talkCtl.Children.Add(talkBtn);
+            talkRow = Kit.Row("Microphone", "", talkCtl, out talkHint);
+            talk.Add(talkRow);
+            right.Children.Add(talk.Root);
 
-            // what listeners may do / get
-            var lo = new StackPanel();
-            remoteSw = Ui.Switch("", ctl.Settings.RemoteControl);
-            remoteSw.Checked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(true); };
-            remoteSw.Unchecked += (s1, e1) => { if (!updating) ctl.SetRemoteControl(false); };
-            lo.Children.Add(PageKit.Row("Let listeners control playback", "Play/pause, next, previous and volume from their phone or laptop press the media keys here. Off by default.", remoteSw));
-            lo.Children.Add(PageKit.Divider());
-            suggest = PageKit.Combo(150);
-            suggest.Items.Add(new ComboBoxItem { Content = "No suggestion", Tag = "" });
-            for (int i = 0; i < EqPresets.Names.Length; i++) suggest.Items.Add(new ComboBoxItem { Content = EqPresets.Labels[i], Tag = EqPresets.Names[i] });
-            PageKit.SelectTag(suggest, ctl.Settings.SuggestEq);
-            suggest.SelectionChanged += (s1, e1) => { if (!updating) ctl.SetSuggestEq(PageKit.Tag(suggest)); };
-            lo.Children.Add(PageKit.Row("Suggest an EQ", "Listeners see the suggestion and choose whether to use it - handy for a movie night.", suggest));
-            var loCard = Ui.Card(lo);
-            loCard.Margin = new Thickness(0, 14, 0, 0);
-            right.Children.Add(loCard);
-
-            listTitle = PageKit.Section("Connected phones");
-            right.Children.Add(listTitle);
-            phoneList = new StackPanel();
-            emptyCard = Ui.Card(Ui.Text("No phones connected yet.", 13.5, FontWeights.Normal, "Muted"));
-            emptyCard.Margin = new Thickness(0, 0, 0, 10);
-            right.Children.Add(phoneList);
-
-            right.Children.Add(PageKit.Section("How to connect"));
-            var steps = new StackPanel();
+            right.Children.Add(Kit.Section("How to join"));
+            var steps = new RowPanel();
             string[] s3 = {
-                "Pair your second earbuds with your phone, and connect the phone to the same Wi-Fi as this laptop.",
-                "Scan the QR code with the Dual Earbuds Android app (best: keeps playing with the screen off), or with the camera to open it in Chrome.",
-                "Tap Start on the phone. If the phone's earbuds play behind the laptop's, raise Delay on the laptop's earbuds on the Home page." };
+                "Connect the device to the same Wi-Fi as this laptop, or to its hotspot.",
+                "Scan the QR code with the Dual Earbuds app (keeps playing with the screen off) or the camera, or open the link in any browser.",
+                "Press Start on the device. It joins the shared deadline by itself; calibrate laptop earbuds on Home for exact sync." };
             for (int i = 0; i < s3.Length; i++)
             {
-                var row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
+                var row = new Grid { Margin = new Thickness(16, 10, 16, 10) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(24) });
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                var num = new Border { Width = 24, Height = 24, CornerRadius = new CornerRadius(12), VerticalAlignment = VerticalAlignment.Top };
-                num.SetResourceReference(Border.BackgroundProperty, "AccentSoft");
-                var nt = Ui.Text((i + 1).ToString(), 12, FontWeights.Bold, "Accent");
-                nt.HorizontalAlignment = HorizontalAlignment.Center;
-                nt.VerticalAlignment = VerticalAlignment.Center;
-                num.Child = nt;
-                var st = Ui.Text(s3[i], 13.5, FontWeights.Normal, "Text");
+                row.Children.Add(Ui.Mono((i + 1).ToString(CultureInfo.InvariantCulture), 12, "Muted"));
+                var st = Ui.Text(s3[i], 13, FontWeights.Normal, "Text");
                 Grid.SetColumn(st, 1);
-                row.Children.Add(num);
                 row.Children.Add(st);
-                steps.Children.Add(row);
+                steps.Add(row);
             }
-            right.Children.Add(Ui.Card(steps));
+            right.Children.Add(steps.Root);
             Grid.SetColumn(right, 2);
             grid.Children.Add(right);
             root.Children.Add(grid);
@@ -932,8 +751,8 @@ namespace DualEarbuds
             int p;
             if (!int.TryParse(port.Text.Trim(), out p) || !ctl.SetPort(p))
             {
-                MessageBox.Show("Use a port number between 1024 and 65535.", "Dual Earbuds", MessageBoxButton.OK, MessageBoxImage.Warning);
-                port.Text = ctl.Settings.PhonePort.ToString();
+                MessageBox.Show("Use a port between 1024 and 65535.", "Dual Earbuds", MessageBoxButton.OK, MessageBoxImage.Warning);
+                port.Text = ctl.Settings.PhonePort.ToString(CultureInfo.InvariantCulture);
             }
             Refresh();
         }
@@ -944,38 +763,44 @@ namespace DualEarbuds
             Rebuild();
         }
 
-        // Syncs the listener cards with the connected phones (adds, updates in place, removes).
+        // Keeps the listener rows in step with who is connected (adds, updates in place, removes),
+        // so a volume slider being dragged is never rebuilt under the mouse.
         public void Rebuild()
         {
             bool partyOn = ctl.Party;
             var seen = new HashSet<string>();
-            int index = 0;
-            foreach (var p in ctl.Phones)
+            bool order = built && ctl.Phones.Count == rows.Count;
+            built = true;
+            foreach (var p in ctl.Phones) if (!rows.ContainsKey(p.Id ?? "")) order = false;
+            if (!order)
             {
-                string id = p.Id ?? ("#" + index);
-                seen.Add(id);
-                ListenerCard c;
-                if (!cards.TryGetValue(id, out c)) { c = new ListenerCard(p, ctl, Remove); cards[id] = c; }
-                else c.Update(p, partyOn);
-                // keep the on-screen order the same as the phone list
-                int at = phoneList.Children.IndexOf(c.Root);
-                if (at != index)
+                list.Clear();
+                var keep = new Dictionary<string, ListenerRow>();
+                foreach (var p in ctl.Phones)
                 {
-                    if (at >= 0) phoneList.Children.RemoveAt(at);
-                    phoneList.Children.Insert(Math.Min(index, phoneList.Children.Count), c.Root);
+                    string id = p.Id ?? "";
+                    ListenerRow r;
+                    if (!rows.TryGetValue(id, out r)) r = new ListenerRow(p, ctl, Remove, true);
+                    else r.Update(p, partyOn);
+                    keep[id] = r;
+                    list.Add(r.Root);
                 }
-                index++;
+                rows.Clear();
+                foreach (var kv in keep) rows[kv.Key] = kv.Value;
+                if (ctl.Phones.Count == 0)
+                {
+                    empty = PageKit.EmptyRow(ctl.Settings.PhoneLink ? "No one is listening yet. Scan the QR code or open the link on the device." : "The link is off.");
+                    list.Add(empty);
+                }
             }
-            var gone = new List<string>();
-            foreach (var kv in cards) if (!seen.Contains(kv.Key)) gone.Add(kv.Key);
-            foreach (var id in gone) { phoneList.Children.Remove(cards[id].Root); cards.Remove(id); }
-            phoneList.Children.Remove(emptyCard);
-            if (ctl.Phones.Count == 0) phoneList.Children.Add(emptyCard);
+            else foreach (var p in ctl.Phones) rows[p.Id ?? ""].Update(p, partyOn);
             Refresh();
         }
 
         public void Refresh()
         {
+            ListenerRow lr;
+            foreach (var p in ctl.Phones) if (rows.TryGetValue(p.Id ?? "", out lr)) lr.Update(p, ctl.Party);
             updating = true;
             enable.IsChecked = ctl.Settings.PhoneLink;
             party.IsChecked = ctl.Party;
@@ -991,20 +816,17 @@ namespace DualEarbuds
             pinBig.Text = pinOn ? ctl.Settings.Pin : "";
 
             bool hold = ctl.Settings.TalkMode != "toggle";
-            talkBtn.Content = ctl.Talking ? (hold ? "Talking..." : "Stop talking") : (hold ? "Hold to talk" : "Talk");
-            talkBtn.SetResourceReference(FrameworkElement.StyleProperty, ctl.Talking ? "Ghost" : "Primary");
-            talkState.Text = ctl.TalkError ?? (ctl.Talking ? "Your microphone is mixed in; the music is 12 dB quieter." : ctl.Running ? "Mixes your microphone into what everyone hears." : "Start mirroring on Home first.");
-            talkState.SetResourceReference(TextBlock.ForegroundProperty, ctl.TalkError != null ? "Warn" : ctl.Talking ? "Good" : "Muted");
+            talkBtn.Content = ctl.Talking ? (hold ? "Talking" : "Stop talking") : (hold ? "Hold to talk" : "Talk");
+            talkHint.Text = ctl.TalkError ?? (ctl.Talking ? "Your microphone is mixed in; the sound is 12 dB lower." : ctl.Running ? "Mixes your voice into what everyone hears. Noise cancelling: " + ctl.Settings.Noise + "." : "Start sharing on Home first.");
+            talkHint.SetResourceReference(TextBlock.ForegroundProperty, ctl.TalkError != null ? "Warn" : "Muted");
             talkBtn.IsEnabled = ctl.Running || ctl.Talking;
-            talkHint.Text = "Mic noise cancelling: " + (ctl.Settings.Noise == "off" ? "off" : ctl.Settings.Noise) + " (Settings > Smart features).";
 
             if (ctl.ShowHotspotHelp)
             {
                 bool pub = ctl.NetworkCategory == "Public";
-                hotTitle.Text = pub ? "You're on a public network" : "No phone has joined yet?";
-                hotText.Text = (pub ? "Cafe, hotel and university Wi-Fi often stop devices from reaching each other. " : "If phones can't open the link, the Wi-Fi may keep devices apart. ") +
-                               "Use a hotspot instead: turn on Mobile hotspot on this laptop and connect the phone to it (the sound goes straight between them and uses no mobile data), " +
-                               "or turn on the phone's hotspot and connect the laptop. Dual Earbuds changes no Windows settings itself - the button only opens the page.";
+                hotTitle.Text = pub ? "This is a public network" : "No one has joined in 60 s";
+                hotText.Text = (pub ? "Cafe, hotel and campus Wi-Fi often keeps devices apart. " : "The Wi-Fi may keep devices apart. ") +
+                               "Turn on this laptop's Mobile hotspot and connect the devices to it (no mobile data used), or join the laptop to a phone's hotspot.";
                 hotspot.Visibility = Visibility.Visible;
             }
             else hotspot.Visibility = Visibility.Collapsed;
@@ -1016,36 +838,36 @@ namespace DualEarbuds
                 shownUrl = url;
                 shownParty = partyOn;
                 double size = partyOn ? QrParty : QrNormal;
-                qrColumn.Width = new GridLength(partyOn ? 400 : 320);
+                qrColumn.Width = new GridLength(size + 52);
                 qrHost.Width = size;
                 qrHost.Height = size;
-                partyHead.Visibility = partyOn ? Visibility.Visible : Visibility.Collapsed;
                 if (url == null)
                 {
-                    var t = Ui.Text(ctl.Settings.PhoneLink ? "Connect this laptop to Wi-Fi to get a link." : "The phone link is off.", 13.5, FontWeights.Normal, "Muted");
+                    var t = Ui.Text(ctl.Settings.PhoneLink ? "Connect this laptop to Wi-Fi to get a link." : "The link is off.", 13, FontWeights.Normal, "Muted");
                     t.Foreground = Brushes.Gray;
                     t.TextAlignment = TextAlignment.Center;
                     t.VerticalAlignment = VerticalAlignment.Center;
+                    t.Margin = new Thickness(12);
                     qrHost.Child = t;
                     link.Text = "";
                 }
                 else
                 {
-                    qrHost.Child = Ui.Qr(url, size - 12);
+                    qrHost.Child = Ui.Qr(url, size - 8);
                     link.Text = url;
                 }
             }
             int n = ctl.Phones.Count, cap = ctl.ListenerCapacity;
-            partyCount.Text = n + " of " + cap + " listening";
-            listTitle.Text = (partyOn ? "Listeners · " + n + " of " + cap : "Connected phones" + (n > 0 ? " · " + n : "")).ToUpperInvariant();
+            listCount.Text = n + " of " + cap + (n > 0 ? " · P " + ctl.PlayoutMs + " ms" : "");
 
             if (!ctl.Settings.PhoneLink) linkState.Text = "Off.";
-            else if (ctl.Phone == null && !ctl.Demo) linkState.Text = "Not running - port " + ctl.Settings.PhonePort + " may be in use by another app (is the old Dual Earbuds still open?).";
+            else if (ctl.Phone == null && !ctl.Demo) linkState.Text = "Not running: port " + ctl.Settings.PhonePort + " is taken by another app (an older Dual Earbuds still open?).";
             else
             {
                 var a = ctl.Addresses;
-                linkState.Text = "Listening on port " + ctl.Settings.PhonePort + (a.Count > 1 ? " · other addresses: " + string.Join(", ", a.GetRange(1, a.Count - 1).ToArray()) : "");
+                linkState.Text = "TCP + UDP " + ctl.Settings.PhonePort + (a.Count > 1 ? " · also on " + string.Join(", ", a.GetRange(1, a.Count - 1).ToArray()) : "");
             }
+            linkState.Visibility = Visibility.Visible;
         }
 
         public void Animate() { }
@@ -1059,184 +881,129 @@ namespace DualEarbuds
         readonly Action exitApp;
         public FrameworkElement Root { get { return root; } }
 
-        // phone link network
+        // listener network (Windows Firewall rule)
         readonly RadioButton netPrivate, netAll;
         readonly TextBlock netStatus;
         bool netBusy, netUpdating;
 
         // updates
-        readonly TextBlock updTitle, updStatus, relTitle, relNotes, dlText, updError;
+        readonly TextBlock updStatus, relTitle, relNotes, dlText, updError;
         readonly Button checkBtn, installBtn, pageBtn;
         readonly ProgressBar checking;
         readonly Meter dlMeter;
-        readonly Border release;
+        readonly StackPanel release;
         readonly CheckBox autoUpd;
 
         public SettingsPage(Controller ctl, Action<string> onTheme, Action onHotkeyChanged, Action onReset, Action exitApp)
         {
             this.ctl = ctl;
             this.exitApp = exitApp;
-            root = PageKit.Column();
-            root.Children.Add(PageKit.Header("Settings", "Make Dual Earbuds work the way you like."));
+            root = Kit.Page();
             var s = ctl.Settings;
 
-            var apSec = PageKit.Section("Appearance");
+            var apSec = Kit.Section("Appearance");
             apSec.Name = "anchor_appearance";
             root.Children.Add(apSec);
-            var ap = new StackPanel();
+            var ap = new RowPanel();
             string[] modes = { "system", "light", "dark" };
             int mi = Array.IndexOf(modes, s.Theme);
-            ap.Children.Add(PageKit.Row("Theme", "System follows Windows' light or dark app mode, and switches when Windows does.",
-                PageKit.Segmented("theme", new[] { "System", "Light", "Dark" }, mi < 0 ? 0 : mi, i => { s.Theme = modes[i]; ctl.MarkDirty(); onTheme(modes[i]); })));
-            root.Children.Add(Ui.Card(ap));
+            ap.Add(Kit.Row("Theme", "System follows Windows' app mode and switches with it.",
+                Kit.Segmented("theme", new[] { "System", "Light", "Dark" }, mi < 0 ? 0 : mi, i => { s.Theme = modes[i]; ctl.MarkDirty(); onTheme(modes[i]); })));
+            root.Children.Add(ap.Root);
 
-            root.Children.Add(PageKit.Section("General"));
-            var win = new StackPanel();
-            win.Children.Add(PageKit.Row("When I close the window", "Keep running near the clock so the sound keeps playing, or exit completely.",
-                PageKit.Segmented("close", new[] { "Keep running", "Exit" }, s.CloseToTray ? 0 : 1, i => { s.CloseToTray = i == 0; ctl.MarkDirty(); })));
-            win.Children.Add(PageKit.Divider());
+            root.Children.Add(Kit.Section("General"));
+            var win = new RowPanel();
+            win.Add(Kit.Row("Closing the window", "Keep running in the tray so the sound keeps playing, or exit.",
+                Kit.Segmented("close", new[] { "Keep running", "Exit" }, s.CloseToTray ? 0 : 1, i => { s.CloseToTray = i == 0; ctl.MarkDirty(); })));
             var minSw = Ui.Switch("", s.StartMinimized);
             minSw.Checked += (o, e) => { s.StartMinimized = true; ctl.MarkDirty(); };
             minSw.Unchecked += (o, e) => { s.StartMinimized = false; ctl.MarkDirty(); };
-            win.Children.Add(PageKit.Row("Start minimized", "Open straight to the tray icon.", minSw));
-            win.Children.Add(PageKit.Divider());
-            var st = win;
+            win.Add(Kit.Row("Start minimized", "Open to the tray icon only.", minSw));
             var boot = Ui.Switch("", StartupReg.Get());
             boot.Checked += (o, e) => SetBoot(true);
             boot.Unchecked += (o, e) => SetBoot(false);
-            st.Children.Add(PageKit.Row("Run when Windows starts", "Starts quietly in the tray after you sign in.", boot));
-            st.Children.Add(PageKit.Divider());
+            win.Add(Kit.Row("Run when Windows starts", "Starts in the tray after you sign in.", boot));
             var auto = Ui.Switch("", s.AutoStart);
             auto.Checked += (o, e) => { s.AutoStart = true; ctl.MarkDirty(); };
             auto.Unchecked += (o, e) => { s.AutoStart = false; ctl.MarkDirty(); };
-            st.Children.Add(PageKit.Row("Start mirroring automatically", "Begin as soon as the app opens.", auto));
-            st.Children.Add(PageKit.Divider());
+            win.Add(Kit.Row("Share when the app opens", null, auto));
             var hk = Ui.Switch("", s.Hotkey);
             hk.Checked += (o, e) => { s.Hotkey = true; ctl.MarkDirty(); onHotkeyChanged(); };
             hk.Unchecked += (o, e) => { s.Hotkey = false; ctl.MarkDirty(); onHotkeyChanged(); };
-            st.Children.Add(PageKit.Row("Shortcut Ctrl + Alt + M", "Start or stop mirroring from anywhere.", hk));
-            root.Children.Add(Ui.Card(win));
+            win.Add(Kit.Row("Ctrl + Alt + M", "Start or stop sharing from any app.", hk));
+            root.Children.Add(win.Root);
 
-            // ---- smart features
-            var smSec = PageKit.Section("Smart features");
+            var smSec = Kit.Section("Smart features");
             smSec.Name = "anchor_smart";
             root.Children.Add(smSec);
             root.Children.Add(new SmartPanel(ctl).Root);
 
-            // ---- which networks phones may connect on (Windows Firewall rule)
-            root.Children.Add(PageKit.Section("Phone link network"));
-            var net = new StackPanel();
-            net.Children.Add(Ui.Text("Phones can connect on", 14, FontWeights.SemiBold, "Text"));
-            var nd = Ui.Text("Sets the Windows Firewall rule for the phone link. Windows asks for permission when you change it.", 12.5, FontWeights.Normal, "Muted");
-            nd.Margin = new Thickness(0, 2, 0, 10);
-            net.Children.Add(nd);
-            netPrivate = Choice("netscope", "Home (private) networks only",
-                "Safest. Phones connect at home, or on networks you marked as private in Windows.");
-            netAll = Choice("netscope", "Home and public networks",
-                "Also works on cafe, hotel and university Wi-Fi. The link's secret key still keeps strangers out.");
+            root.Children.Add(Kit.Section("Networks listeners may use"));
+            var net = new RowPanel();
+            netPrivate = Choice("netscope", "Private networks only", "Home networks, or ones you marked Private in Windows.");
+            netAll = Choice("netscope", "Private and public networks", "Also cafe, hotel and campus Wi-Fi and most hotspots. The link's key still keeps strangers out.");
             netPrivate.IsChecked = s.NetworkScope == Settings.NetScopePrivate;
             netAll.IsChecked = s.NetworkScope != Settings.NetScopePrivate;
             netPrivate.Checked += (o, e) => PickScope(Settings.NetScopePrivate);
             netAll.Checked += (o, e) => PickScope(Settings.NetScopeAll);
-            net.Children.Add(netPrivate);
-            net.Children.Add(netAll);
-            var tip = new Grid { Margin = new Thickness(2, 10, 0, 0) };
-            tip.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            tip.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            var wi = Ui.Icon(Icons.Wifi, 16, "Accent", false);
-            wi.Margin = new Thickness(0, 1, 10, 0);
-            wi.VerticalAlignment = VerticalAlignment.Top;
-            tip.Children.Add(wi);
-            var tt = Ui.Text("Using a hotspot? Windows usually treats hotspot networks as public, so pick Home and public networks - or mark that network as Private in Windows' Wi-Fi settings.", 12.5, FontWeights.Normal, "Muted");
-            Grid.SetColumn(tt, 1);
-            tip.Children.Add(tt);
-            net.Children.Add(tip);
-            netStatus = Ui.Text("", 12.5, FontWeights.SemiBold, "Muted");
-            netStatus.Margin = new Thickness(2, 10, 0, 0);
-            netStatus.Visibility = Visibility.Collapsed;
-            net.Children.Add(netStatus);
-            net.Children.Add(PageKit.Divider());
+            var choices = new StackPanel { Margin = new Thickness(0, 6, 0, 6) };
+            choices.Children.Add(netPrivate);
+            choices.Children.Add(netAll);
+            netStatus = Kit.Hint("Sets the Windows Firewall rule (TCP and UDP). Windows asks for permission.");
+            netStatus.Margin = new Thickness(44, 0, 16, 8);
+            choices.Children.Add(netStatus);
+            net.Add(choices);
             var showSw = Ui.Switch("", s.ShowOnNetwork);
             showSw.Checked += (o, e) => ctl.SetShowOnNetwork(true);
             showSw.Unchecked += (o, e) => ctl.SetShowOnNetwork(false);
-            net.Children.Add(PageKit.Row("Show on this network", "Other Dual Earbuds devices nearby list this laptop with its link, so they join with one click. " +
-                "On home (private) networks that happens anyway; turn this on to allow it on public networks too. Off: they see the name and ask for the link.", showSw));
-            root.Children.Add(Ui.Card(net));
+            net.Add(Kit.Row("Show on public networks", "Nearby devices list this laptop with its link and join in one click. On private networks that's always on.", showSw));
+            root.Children.Add(net.Root);
 
-            // ---- updates
-            root.Children.Add(PageKit.Section("Updates"));
-            var upd = new StackPanel();
-            var head = new Grid();
-            head.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            head.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var hl = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 20, 0) };
-            updTitle = Ui.Text("Dual Earbuds " + AppInfo.Version, 14, FontWeights.SemiBold, "Text");
-            hl.Children.Add(updTitle);
-            updStatus = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
-            updStatus.Margin = new Thickness(0, 2, 0, 0);
-            hl.Children.Add(updStatus);
-            head.Children.Add(hl);
-            checkBtn = Ui.Button("Check for updates", "Ghost", (o, e) => ctl.CheckForUpdates(true));
-            checkBtn.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(checkBtn, 1);
-            head.Children.Add(checkBtn);
-            upd.Children.Add(head);
-            checking = new ProgressBar { IsIndeterminate = true, Height = 3, BorderThickness = new Thickness(0), Margin = new Thickness(0, 12, 0, 0), Visibility = Visibility.Collapsed };
+            // updates
+            root.Children.Add(Kit.Section("Updates"));
+            var upd = new RowPanel();
+            checkBtn = Kit.Secondary("Check now", (o, e) => ctl.CheckForUpdates(true));
+            TextBlock h;
+            upd.Add(Kit.Row("Dual Earbuds " + AppInfo.Version, " ", checkBtn, out h));
+            updStatus = h;
+            checking = new ProgressBar { IsIndeterminate = true, Height = 2, BorderThickness = new Thickness(0), Visibility = Visibility.Collapsed };
             checking.SetResourceReference(Control.ForegroundProperty, "Accent");
             checking.SetResourceReference(Control.BackgroundProperty, "Line");
             upd.Children.Add(checking);
 
-            // the release panel, shown when a newer version is available
-            var rel = new StackPanel();
-            var rh = new StackPanel { Orientation = Orientation.Horizontal };
-            var newBadge = new Border { CornerRadius = new CornerRadius(7), Padding = new Thickness(8, 2, 8, 2), Margin = new Thickness(0, 0, 10, 0), VerticalAlignment = VerticalAlignment.Center };
-            newBadge.SetResourceReference(Border.BackgroundProperty, "Accent");
-            var nb = Ui.Text("NEW", 10.5, FontWeights.Bold, "AccentInk");
-            nb.TextWrapping = TextWrapping.NoWrap;
-            newBadge.Child = nb;
-            rh.Children.Add(newBadge);
-            relTitle = Ui.Heading("", 17);
-            relTitle.VerticalAlignment = VerticalAlignment.Center;
-            rh.Children.Add(relTitle);
-            rel.Children.Add(rh);
-            var wn = Ui.Text("WHAT'S NEW", 11.5, FontWeights.SemiBold, "Muted");
-            wn.Margin = new Thickness(0, 14, 0, 6);
-            rel.Children.Add(wn);
+            release = new StackPanel { Margin = new Thickness(16, 12, 16, 14), Visibility = Visibility.Collapsed };
+            relTitle = Ui.Text("", 15, FontWeights.SemiBold, "Text");
+            release.Children.Add(relTitle);
             relNotes = Ui.Text("", 13, FontWeights.Normal, "Text");
             relNotes.LineHeight = 20;
-            var notesScroll = new ScrollViewer { Content = relNotes, MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false };
-            rel.Children.Add(notesScroll);
-            dlMeter = new Meter { Height = 6, Margin = new Thickness(0, 16, 0, 0), Visibility = Visibility.Collapsed };
-            rel.Children.Add(dlMeter);
-            dlText = Ui.Text("", 12.5, FontWeights.Normal, "Muted");
+            var notesScroll = new ScrollViewer { Content = relNotes, MaxHeight = 160, Margin = new Thickness(0, 8, 0, 0), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Focusable = false };
+            release.Children.Add(notesScroll);
+            dlMeter = new Meter { Margin = new Thickness(0, 12, 0, 0), Visibility = Visibility.Collapsed };
+            release.Children.Add(dlMeter);
+            dlText = Kit.Hint("");
             dlText.Margin = new Thickness(0, 8, 0, 0);
-            rel.Children.Add(dlText);
-            updError = Ui.Text("", 12.5, FontWeights.SemiBold, "Warn");
-            updError.Margin = new Thickness(0, 8, 0, 0);
+            release.Children.Add(dlText);
+            updError = Ui.Text("", 12, FontWeights.Normal, "Warn");
+            updError.Margin = new Thickness(0, 6, 0, 0);
             updError.Visibility = Visibility.Collapsed;
-            rel.Children.Add(updError);
-            var rb = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
-            installBtn = Ui.Button("Install update", "Primary", (o, e) => ctl.InstallUpdate(exitApp));
+            release.Children.Add(updError);
+            var rb = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 12, 0, 0) };
+            installBtn = Kit.Primary("Install update", (o, e) => ctl.InstallUpdate(exitApp));
             rb.Children.Add(installBtn);
-            pageBtn = Ui.Button("Release page", "Ghost", (o, e) => OpenReleasePage());
-            pageBtn.Margin = new Thickness(8, 0, 0, 0);
+            pageBtn = Kit.Quiet("Release page", (o, e) => OpenReleasePage());
+            pageBtn.Margin = new Thickness(6, 0, 0, 0);
             rb.Children.Add(pageBtn);
-            rel.Children.Add(rb);
-            release = new Border { CornerRadius = new CornerRadius(14), Padding = new Thickness(18, 16, 18, 16), BorderThickness = new Thickness(1), Margin = new Thickness(0, 16, 0, 4), Child = rel, Visibility = Visibility.Collapsed };
-            release.SetResourceReference(Border.BackgroundProperty, "AccentSoft");
-            release.SetResourceReference(Border.BorderBrushProperty, "Accent");
-            upd.Children.Add(release);
-
-            upd.Children.Add(PageKit.Divider());
+            release.Children.Add(rb);
+            upd.Add(release);
             autoUpd = Ui.Switch("", s.CheckUpdates);
             autoUpd.Checked += (o, e) => { s.CheckUpdates = true; ctl.MarkDirty(); };
             autoUpd.Unchecked += (o, e) => { s.CheckUpdates = false; ctl.MarkDirty(); };
-            upd.Children.Add(PageKit.Row("Check automatically", "Once a day, in the background. Nothing is downloaded or installed until you press Install.", autoUpd));
-            root.Children.Add(Ui.Card(upd));
+            upd.Add(Kit.Row("Check once a day", "Nothing is downloaded or installed until you press Install.", autoUpd));
+            root.Children.Add(upd.Root);
 
-            root.Children.Add(PageKit.Section("Help and data"));
-            var data = new StackPanel();
-            var copyDiag = Ui.Button("Copy diagnostics", "Ghost", null);
+            root.Children.Add(Kit.Section("Help and data"));
+            var data = new RowPanel();
+            var copyDiag = Kit.Secondary("Copy", null);
             copyDiag.Click += (o, e) =>
             {
                 string text;
@@ -1245,37 +1012,33 @@ namespace DualEarbuds
                 try { Clipboard.SetText(text); copyDiag.Content = "Copied"; }
                 catch { copyDiag.Content = "Couldn't copy"; }
                 var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
-                t.Tick += (o2, e2) => { t.Stop(); copyDiag.Content = "Copy diagnostics"; };
+                t.Tick += (o2, e2) => { t.Stop(); copyDiag.Content = "Copy"; };
                 t.Start();
             };
-            data.Children.Add(PageKit.Row("Diagnostics", "Version, Windows build, network type, outputs, listeners and the last 200 log lines - to paste when asking for help. Never includes your link key or PIN.", copyDiag));
-            data.Children.Add(PageKit.Divider());
-            var open = Ui.Button("Open folder", "Ghost", (o, e) => PageKit.OpenFolder(AppInfo.DataDir));
-            data.Children.Add(PageKit.Row("Settings and logs", AppInfo.DataDir, open));
-            data.Children.Add(PageKit.Divider());
-            var reset = Ui.Button("Reset", "Ghost", (o, e) =>
+            data.Add(Kit.Row("Diagnostics", "Version, Windows build, network, outputs, listeners and the last 200 log lines. Never your link key or PIN.", copyDiag));
+            var open = Kit.Secondary("Open folder", (o, e) => PageKit.OpenFolder(AppInfo.DataDir));
+            data.Add(Kit.Row("Settings and logs", AppInfo.DataDir, open));
+            var reset = Kit.Secondary("Reset", (o, e) =>
             {
-                var r = MessageBox.Show("Reset all settings to defaults? Your phone link key will change too.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
+                var r = MessageBox.Show("Reset all settings? The link key changes too, so everyone has to join again.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Warning);
                 if (r == MessageBoxResult.OK) onReset();
             });
-            data.Children.Add(PageKit.Row("Reset all settings", "Back to how the app was on first start.", reset));
-            root.Children.Add(Ui.Card(data));
+            data.Add(Kit.Row("Reset all settings", "Calibrations, hearing profiles and recent devices are kept.", reset));
+            root.Children.Add(data.Root);
         }
 
         static void SetBoot(bool on)
         {
             try { StartupReg.Set(on, System.Reflection.Assembly.GetEntryAssembly().Location); }
-            catch (Exception ex) { MessageBox.Show("Could not change the startup setting: " + ex.Message, "Dual Earbuds"); }
+            catch (Exception ex) { MessageBox.Show("Windows refused the startup setting: " + ex.Message, "Dual Earbuds"); }
         }
 
         static RadioButton Choice(string group, string title, string text)
         {
             var sp = new StackPanel();
-            sp.Children.Add(Ui.Text(title, 14, FontWeights.SemiBold, "Text"));
-            var d = Ui.Text(text, 12.5, FontWeights.Normal, "Muted");
-            d.Margin = new Thickness(0, 2, 0, 0);
-            sp.Children.Add(d);
-            var r = new RadioButton { GroupName = group, Content = sp };
+            sp.Children.Add(Ui.Text(title, 14, FontWeights.Normal, "Text"));
+            sp.Children.Add(Kit.Hint(text));
+            var r = new RadioButton { GroupName = group, Content = sp, HorizontalContentAlignment = HorizontalAlignment.Stretch };
             r.SetResourceReference(FrameworkElement.StyleProperty, "Choice");
             return r;
         }
@@ -1285,31 +1048,29 @@ namespace DualEarbuds
             if (netUpdating || netBusy || scope == ctl.Settings.NetworkScope) return;
             netBusy = true;
             netPrivate.IsEnabled = netAll.IsEnabled = false;
-            ShowNet("Windows will ask for permission to change the firewall rule...", "Muted");
+            ShowNet("Windows asks for permission to change the firewall rule.", "Muted");
             ctl.ApplyNetworkScope(scope, r =>
             {
                 netBusy = false;
                 netPrivate.IsEnabled = netAll.IsEnabled = true;
                 if (r == FirewallResult.Ok)
                 {
-                    ShowNet(scope == Settings.NetScopePrivate ? "Saved. Phones can connect on home (private) networks." : "Saved. Phones can connect on home and public networks.", "Good");
+                    ShowNet(scope == Settings.NetScopePrivate ? "Saved: private networks only." : "Saved: private and public networks.", "Good");
                     return;
                 }
-                // put the choice back to what is really in effect
                 netUpdating = true;
                 if (ctl.Settings.NetworkScope == Settings.NetScopePrivate) netPrivate.IsChecked = true; else netAll.IsChecked = true;
                 netUpdating = false;
                 ShowNet(r == FirewallResult.Declined
-                    ? "Nothing changed - Windows' permission prompt was declined."
-                    : "Nothing changed - the firewall rule couldn't be updated. Try again, or check the logs on the Diagnostics page.", "Warn");
+                    ? "Nothing changed: the permission prompt was declined."
+                    : "Nothing changed: Windows didn't update the rule. Try again, or see the log on Diagnostics.", "Warn");
             });
         }
 
         void ShowNet(string text, string brush)
         {
             netStatus.Text = text;
-            netStatus.SetResourceReference(TextBlock.ForegroundProperty, brush);
-            netStatus.Visibility = Visibility.Visible;
+            netStatus.SetResourceReference(TextBlock.ForegroundProperty, brush == "Good" ? "Muted" : brush);
         }
 
         void OpenReleasePage()
@@ -1329,35 +1090,34 @@ namespace DualEarbuds
             bool available = r != null && r.Status == UpdateStatus.Available && r.Release != null;
             checking.Visibility = ctl.UpdateChecking ? Visibility.Visible : Visibility.Collapsed;
             checkBtn.IsEnabled = !ctl.UpdateChecking && !ctl.UpdateDownloading;
-            checkBtn.Content = ctl.UpdateChecking ? "Checking..." : "Check for updates";
+            checkBtn.Content = ctl.UpdateChecking ? "Checking" : "Check now";
 
             string status, brush = "Muted";
-            if (ctl.UpdateChecking) status = "Checking GitHub for a newer version...";
-            else if (r == null) status = ctl.Settings.LastUpdateCheckUtc > DateTime.MinValue
-                ? "Last checked " + When(ctl.Settings.LastUpdateCheckUtc) + "."
-                : "Not checked yet.";
-            else if (available) { status = r.Message; brush = "Accent"; }
-            else if (r.Status == UpdateStatus.UpToDate) { status = "You're up to date · checked " + When(r.CheckedUtc) + "."; brush = "Good"; }
+            if (ctl.UpdateChecking) status = "Asking GitHub for the latest release.";
+            else if (r == null) status = ctl.Settings.LastUpdateCheckUtc > DateTime.MinValue ? "Last checked " + When(ctl.Settings.LastUpdateCheckUtc) + "." : "Not checked yet.";
+            else if (available) status = r.Message;
+            else if (r.Status == UpdateStatus.UpToDate) status = "Up to date, checked " + When(r.CheckedUtc) + ".";
             else if (r.Status == UpdateStatus.NoRelease) status = r.Message;
             else { status = r.Message; brush = "Warn"; }
             updStatus.Text = status;
             updStatus.SetResourceReference(TextBlock.ForegroundProperty, brush);
+            updStatus.Visibility = Visibility.Visible;
 
             release.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
             if (available)
             {
-                relTitle.Text = "Version " + r.Release.Version + " is ready";
+                relTitle.Text = "Version " + r.Release.Version;
                 string notes = Updater.NotesForDisplay(r.Release.Notes);
-                if (notes.Length == 0) notes = "Bug fixes and improvements.";
+                if (notes.Length == 0) notes = "Fixes and improvements.";
                 if (relNotes.Text != notes) relNotes.Text = notes;
                 bool dl = ctl.UpdateDownloading;
                 installBtn.IsEnabled = !dl;
-                installBtn.Content = dl ? "Downloading..." : "Install update";
+                installBtn.Content = dl ? "Downloading" : "Install update";
                 dlMeter.Visibility = dl ? Visibility.Visible : Visibility.Collapsed;
                 dlMeter.Level = ctl.UpdateProgress < 0 ? 0.5 : ctl.UpdateProgress / 100.0;
                 dlText.Text = dl
-                    ? (ctl.UpdateProgress < 0 ? "Downloading the installer..." : "Downloading the installer... " + ctl.UpdateProgress + "%")
-                    : "Dual Earbuds closes, updates itself and opens again - your settings stay as they are.";
+                    ? (ctl.UpdateProgress < 0 ? "Downloading the installer." : "Downloading the installer: " + ctl.UpdateProgress + "%")
+                    : "Dual Earbuds closes, updates and opens again. Settings stay as they are.";
                 updError.Text = ctl.UpdateError ?? "";
                 updError.Visibility = ctl.UpdateError != null ? Visibility.Visible : Visibility.Collapsed;
             }
@@ -1382,14 +1142,13 @@ namespace DualEarbuds
 
         public DiagnosticsPage(Controller ctl)
         {
-            root = PageKit.Column();
-            root.Children.Add(PageKit.Header("Diagnostics", "Check what Windows allows on each output. Nothing is played while checking."));
-            var bar = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 14) };
-            run = Ui.Button("Run check", "Primary", null);
+            root = Kit.Page();
+            var bar = new StackPanel { Orientation = Orientation.Horizontal };
+            run = Kit.Primary("Run check", null);
             run.Click += (s, e) =>
             {
                 run.IsEnabled = false;
-                report.Text = "Checking outputs...";
+                report.Text = "Checking outputs.";
                 var t = new Thread(() =>
                 {
                     string text;
@@ -1401,16 +1160,23 @@ namespace DualEarbuds
                 t.SetApartmentState(ApartmentState.MTA);
                 t.Start();
             };
-            var copy = Ui.Button("Copy", "Ghost", (s, e) => { try { if (report.Text.Length > 0) Clipboard.SetText(report.Text); } catch { } });
-            var save = Ui.Button("Save report", "Ghost", (s, e) => Save());
-            var logs = Ui.Button("Open logs", "Ghost", (s, e) => PageKit.OpenFolder(Log.Dir));
-            foreach (var b in new[] { run, copy, save, logs }) { b.Margin = new Thickness(0, 0, 8, 0); bar.Children.Add(b); }
-            root.Children.Add(bar);
+            bar.Children.Add(run);
+            foreach (var b in new[] {
+                Kit.Quiet("Copy", (s, e) => { try { if (report.Text.Length > 0) Clipboard.SetText(report.Text); } catch { } }),
+                Kit.Quiet("Save", (s, e) => Save()),
+                Kit.Quiet("Open logs", (s, e) => PageKit.OpenFolder(Log.Dir)) })
+            {
+                b.Margin = new Thickness(6, 0, 0, 0);
+                bar.Children.Add(b);
+            }
+            TextBlock c;
+            root.Children.Add(Kit.Section("Outputs and listeners", out c, bar));
+            c.Text = "nothing is played while checking";
             report = new TextBox
             {
-                IsReadOnly = true, FontFamily = Theme.Mono, FontSize = 12, MinHeight = 360, TextWrapping = TextWrapping.NoWrap,
+                IsReadOnly = true, FontFamily = Theme.Mono, FontSize = 12, MinHeight = 420, TextWrapping = TextWrapping.NoWrap, VerticalContentAlignment = VerticalAlignment.Top,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto, VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Text = "Press Run check. Send the report when asking for help - your phone link key is not included."
+                Text = "Run check lists what Windows allows on each output. Your link key is never included."
             };
             root.Children.Add(report);
         }
@@ -1421,7 +1187,7 @@ namespace DualEarbuds
             if (dlg.ShowDialog() == true)
             {
                 try { File.WriteAllText(dlg.FileName, report.Text); }
-                catch (Exception ex) { MessageBox.Show("Could not save: " + ex.Message, "Dual Earbuds"); }
+                catch (Exception ex) { MessageBox.Show("Couldn't save: " + ex.Message, "Dual Earbuds"); }
             }
         }
 
@@ -1438,54 +1204,38 @@ namespace DualEarbuds
 
         public AboutPage()
         {
-            root = PageKit.Column();
-            var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 4, 0, 24) };
-            head.Children.Add(Ui.Logo(64));
-            var t = new StackPanel { Margin = new Thickness(18, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            t.Children.Add(Ui.Heading("Dual Earbuds", 28));
-            t.Children.Add(Ui.Text("Version " + AppInfo.Version + " · free and open source (MIT)", 13.5, FontWeights.Normal, "Muted"));
+            root = Kit.Page();
+            var top = new RowPanel();
+            var head = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(16) };
+            head.Children.Add(Ui.Logo(40));
+            var t = new StackPanel { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            t.Children.Add(Ui.Text("Dual Earbuds", 15, FontWeights.SemiBold, "Text"));
+            t.Children.Add(Ui.Mono(AppInfo.Version + "  ·  protocol 3.2  ·  MIT", 12, "Muted"));
             head.Children.Add(t);
-            root.Children.Add(head);
+            top.Add(head);
+            top.Root.Margin = new Thickness(0, 20, 0, 0);
+            root.Children.Add(top.Root);
 
-            root.Children.Add(PageKit.Section("How it works"));
-            var g = new UniformGrid3();
-            g.Add("1  Capture", "Dual Earbuds listens to what Windows plays on your main output - silently, with Windows' own audio engine.");
-            g.Add("2  Copy", "It plays the same sound on your other earbuds and speakers, each with its own delay and volume.");
-            g.Add("3  Stream", "Earbuds the laptop can't reach? It streams over Wi-Fi to a phone they're paired with.");
-            root.Children.Add(g.Root);
+            root.Children.Add(Kit.Section("How it works"));
+            var how = new RowPanel();
+            string[][] rows =
+            {
+                new[] { "Capture", "Windows' audio engine hands over what this laptop plays (or one app), silently." },
+                new[] { "Deadline", "Every ear plays a sample at capture + P. P is the slowest ear's need, so the laptop's own earbuds wait for the phones." },
+                new[] { "Send", "Phones and laptops get 10 ms UDP packets with the previous one repeated, so one lost packet costs nothing. Browsers use a WebSocket." },
+                new[] { "Line up", "Each ear's latency is measured (calibration) or estimated; clock sync keeps everyone within a few ms." },
+            };
+            foreach (var r in rows) how.Add(Kit.Row(r[0], r[1], null));
+            root.Children.Add(how.Root);
 
-            root.Children.Add(PageKit.Section("Credits"));
-            root.Children.Add(Ui.Card(Ui.Text("Made by Qasim Raza Malik. Built with Windows Core Audio (WASAPI), WPF and a small built-in web server. No data leaves your network.", 13.5, FontWeights.Normal, "Text")));
+            root.Children.Add(Kit.Section("Credits"));
+            var cr = new RowPanel();
+            cr.Add(Kit.Row("Qasim Raza Malik", "WASAPI, WPF and a small built-in web server. No account, no cloud: nothing leaves your network.", null));
+            root.Children.Add(cr.Root);
         }
 
         public void Rebuild() { }
         public void Refresh() { }
         public void Animate() { }
-
-        class UniformGrid3
-        {
-            public readonly Grid Root = new Grid();
-            int n;
-            public UniformGrid3()
-            {
-                for (int i = 0; i < 3; i++)
-                {
-                    Root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                    if (i < 2) Root.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(14) });
-                }
-            }
-            public void Add(string title, string body)
-            {
-                var sp = new StackPanel();
-                sp.Children.Add(Ui.Heading(title, 16));
-                var b = Ui.Text(body, 13, FontWeights.Normal, "Muted");
-                b.Margin = new Thickness(0, 6, 0, 0);
-                sp.Children.Add(b);
-                var card = Ui.Card(sp);
-                Grid.SetColumn(card, n * 2);
-                Root.Children.Add(card);
-                n++;
-            }
-        }
     }
 }

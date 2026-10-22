@@ -182,8 +182,10 @@ namespace DualEarbuds
                     int n = Math.Min(chunk, train.Length - pos);
                     for (int i = 0; i < n; i++) { buf[2 * i] = train[pos + i]; buf[2 * i + 1] = train[pos + i]; }
                     long now = Qpc100ns();
-                    int queued = o.QueuedFrames;
-                    if (queued == 0) queued = rate * 15 / 1000;   // first push primes with the 15 ms cushion
+                    // measured from the moment a frame enters the device buffer: count what already sits there too,
+                    // so the result is the output's own latency (protocol v3.2 outputLatency)
+                    int queued = o.QueuedFrames + o.PaddingFrames;
+                    if (queued == 0) queued = rate * OutputTiming.CushionMs / 1000;   // first push primes with the cushion
                     o.Push(buf, n);
                     while (next < offsets.Length && offsets[next] < pos + n)
                     {

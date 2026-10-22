@@ -72,6 +72,7 @@ namespace DualEarbuds
                 {
                     timeBeginPeriod(1);
                     Log.Info("Starting " + AppInfo.Name + " " + AppInfo.Version);
+                    Power.OptOutOfThrottling();   // keep the 10 ms rhythm on battery saver and while minimized
                     var app = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
                     app.DispatcherUnhandledException += (s, e) =>
                     {
@@ -106,6 +107,7 @@ namespace DualEarbuds
 
                     if (!(tray || settings.StartMinimized)) win.Show();
                     app.Run();
+                    Power.KeepAwake(false);
                     timeEndPeriod(1);
                     Log.Info("Exited");
                 }

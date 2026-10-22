@@ -25,7 +25,12 @@ namespace DualEarbuds
         public DateTime LastRetry = DateTime.MinValue;
         public OutputEffects Effects = new OutputEffects();
         public double LatencyMs;          // calibrated, 0 = not calibrated
-        public int ExtraDelayMs;          // auto-sync alignment added to the manual delay
+        public double ReportedMs;         // what WASAPI reports for the open stream (0 = unknown)
+        public bool IsBluetooth;
+        public int ExtraDelayMs;          // common-deadline delay (P - latency) added to the manual delay
+        // calibrated, else estimated from WASAPI (+ a Bluetooth guess)
+        public double EffectiveLatencyMs { get { return OutputTiming.LatencyMs(LatencyMs, ReportedMs, IsBluetooth); } }
+        public bool LatencyMeasured { get { return LatencyMs > 0; } }
         public bool Calibrating;
         public bool ListenTicked;         // plays the other device's sound in listener mode
     }
@@ -201,7 +206,7 @@ namespace DualEarbuds
             RefreshDevices(true);
             if (Settings.PhoneLink) StartPhone();
             if (Settings.AutoStart) Start(true);
-            else SetInfo("Press Start to begin.");
+            else SetInfo("Press Start sharing to begin.");
             Settings.FirstRun = false;
             dirty = true;
         }
@@ -223,6 +228,11 @@ namespace DualEarbuds
         public void SlowTick()
         {
             if (Demo) return;
+            // while sound plays (sharing or listening) the laptop must not go to sleep
+            Power.KeepAwake(Running || Listening);
+            PowerNow = Power.Read();
+            WifiReader.Refresh();
+            if ((DateTime.Now - firewallCheckedAt).TotalMinutes >= 5) RefreshFirewallStatus();
             RefreshDevices(false);
             HealthCheck();
             UpdateBatteries();
@@ -244,6 +254,8 @@ namespace DualEarbuds
         public void FastTick()
         {
             if (Demo) return;
+            // P moved (a listener joined, Wi-Fi got worse, an output was ticked): re-line-up the local outputs
+            if (PlayoutMs != appliedPlayout || ++alignTicks % 20 == 0) ApplyDelays();
             float pk = Engine.TakePeak();
             Level = Math.Max(Level * 0.88f, (float)Math.Sqrt(pk));
             foreach (var o in Outputs)
@@ -255,6 +267,7 @@ namespace DualEarbuds
         }
 
         public void MarkDirty() { dirty = true; }
+        int alignTicks;
 
         // ------------------------------------------------------------------ devices
         public void RefreshDevices(bool force)
@@ -297,6 +310,7 @@ namespace DualEarbuds
                 Outputs.Add(vm);
             }
             UpdateBatteries();
+            foreach (var o in Outputs) o.IsBluetooth = OutputTiming.LooksBluetooth(o.Name, o.Battery >= 0, o.ContainerId);
             ComputeAlignment();
             fxSnapshot = Outputs.Select(o => o.Effects).ToArray();
             if (Listen != null) ReopenListenOutputs();
@@ -304,7 +318,7 @@ namespace DualEarbuds
             Raise(DevicesChanged);
             if (Engine.Running && defChanged && Settings.SourceId == "" && Settings.SourceMode != "app")
             {
-                SetInfo("Windows default output changed - switching source...");
+                SetInfo("The Windows default output changed. Switching the source.");
                 Start(false);
             }
         }
@@ -352,7 +366,7 @@ namespace DualEarbuds
             {
                 if (err != null)
                 {
-                    if (WantRunning) SetError("Waiting for the sound source (" + srcName + "): " + err + ". Trying again every few seconds.");
+                    if (WantRunning) SetError("Waiting for " + srcName + ": " + err + ". Trying again every 4 s.");
                 }
                 else
                 {
@@ -367,7 +381,7 @@ namespace DualEarbuds
         void AddStream(OutputVm o)
         {
             var st = Engine.AddOutput(o.Id, o.DelayMs + o.ExtraDelayMs, o.Volume / 100f);
-            if (st != null) st.Effects = o.Effects;
+            if (st != null) { st.Effects = o.Effects; if (st.ReportedLatencyMs > 0) o.ReportedMs = st.ReportedLatencyMs; }
         }
 
         public void Stop()
@@ -399,7 +413,7 @@ namespace DualEarbuds
                 if (captureFailures > 5)
                 {
                     Background(Engine.Stop, null);
-                    SetError("The sound source isn't available (" + ce + "). Trying again every few seconds - or pick another source.");
+                    SetError("The source stopped (" + ce + "). Trying again every 4 s, or pick another source.");
                     return;
                 }
                 Start(false);
@@ -454,14 +468,47 @@ namespace DualEarbuds
             foreach (var lo in listenOutputs) if (lo.DeviceId == o.Id) lo.Volume = o.Volume / 100f;
         }
 
-        // ------------------------------------------------------------------ auto-sync (calibration)
-        // Calibrated laptop outputs are lined up with the slowest calibrated one; the manual Delay adds on top.
+        // ------------------------------------------------------------------ common deadline (protocol v3.2)
+        // Every ear hears the sample captured at t at t + P. P comes from the phone link (it knows the listeners'
+        // needs) or, with the link off, from the local outputs alone. Each ticked local output is delayed by
+        // P - its latency; the manual Delay adds on top.
+        int appliedPlayout = -1;
+
+        public int LocalNeedMs
+        {
+            get
+            {
+                var l = new List<double>();
+                foreach (var o in Outputs) if (o.Enabled && !o.IsSource) l.Add(o.EffectiveLatencyMs);
+                return OutputTiming.LocalNeedMs(l);
+            }
+        }
+
+        public int PlayoutMs
+        {
+            get
+            {
+                if (Demo) return DemoPlayoutMs;
+                var p = Phone;
+                return p != null ? p.PlayoutMs : PlayoutPlanner.Choose(null, LocalNeedMs);
+            }
+        }
+        public int DemoPlayoutMs = 236;
+
         void ComputeAlignment()
         {
-            double max = 0;
-            foreach (var o in Outputs) if (o.Enabled && !o.IsSource && o.LatencyMs > 0) max = Math.Max(max, o.LatencyMs);
             foreach (var o in Outputs)
-                o.ExtraDelayMs = o.Enabled && o.LatencyMs > 0 ? (int)Math.Round(max - o.LatencyMs) : 0;
+            {
+                var st = Demo ? null : Engine.Get(o.Id);
+                if (st != null && st.ReportedLatencyMs > 0) o.ReportedMs = st.ReportedLatencyMs;
+            }
+            int need = LocalNeedMs;
+            var ph = Phone;
+            if (ph != null) ph.LocalNeedMs = need;
+            int p = PlayoutMs;
+            foreach (var o in Outputs)
+                o.ExtraDelayMs = o.Enabled && !o.IsSource ? OutputTiming.AutoDelayMs(p, o.EffectiveLatencyMs) : 0;
+            appliedPlayout = p;
         }
 
         void ApplyDelays()
@@ -471,6 +518,11 @@ namespace DualEarbuds
             {
                 var s = Engine.Get(o.Id);
                 if (s != null) s.SetDelayMs(o.DelayMs + o.ExtraDelayMs);
+            }
+            foreach (var lo in listenOutputs)
+            {
+                var vm = Outputs.Find(x => x.Id == lo.DeviceId);
+                if (vm != null) lo.OutputLatencyMs = vm.EffectiveLatencyMs;
             }
         }
 
@@ -492,7 +544,6 @@ namespace DualEarbuds
                     Settings.LatencyByName[name] = o.LatencyMs;
                     dirty = true;
                     ApplyDelays();
-                    foreach (var lo in listenOutputs) if (lo.DeviceId == id) lo.OutputLatencyMs = o.LatencyMs;
                     Log.Info("Calibrated " + name + ": " + o.LatencyMs + " ms (" + r.Agreeing + "/8 clicks)");
                 }
                 else Log.Info("Calibration of " + name + ": " + r.Problem);
@@ -507,7 +558,6 @@ namespace DualEarbuds
             Settings.LatencyByName.Remove(o.Name);
             dirty = true;
             ApplyDelays();
-            foreach (var lo in listenOutputs) if (lo.DeviceId == o.Id) lo.OutputLatencyMs = 0;
             UpdateStates();
         }
 
@@ -811,7 +861,7 @@ namespace DualEarbuds
                 UpdateStates();
                 return;
             }
-            if (!Engine.Running) { Talking = false; TalkError = "Start mirroring first - talk-over mixes your voice into the shared sound."; UpdateStates(); return; }
+            if (!Engine.Running) { Talking = false; TalkError = "Start sharing first: talk-over mixes your voice into the shared sound."; UpdateStates(); return; }
             Engine.Talk.Noise = NoiseSetting;
             int rate = Engine.Rate;
             RunAsync(() => Engine.Talk.Begin(rate), ok =>
@@ -896,8 +946,8 @@ namespace DualEarbuds
             if (c.State == ListenState.Playing || c.State == ListenState.HostPaused)
             {
                 var t = c.Target;
-                bool known = Settings.Recent.Count > 0 && Settings.Recent[0].HostPort == t.HostPort && Settings.Recent[0].Key == t.Key && Settings.Recent[0].Name == c.HostName;
-                if (!known) { Settings.AddRecent(t.HostPort, t.Key, c.HostName); dirty = true; }
+                bool known = Settings.Recent.Count > 0 && Settings.Recent[0].HostPort == t.HostPort && Settings.Recent[0].Key == t.Key && Settings.Recent[0].Name == c.HostName && Settings.Recent[0].Kind == c.HostKind;
+                if (!known) { Settings.AddRecent(t.HostPort, t.Key, c.HostName, c.HostKind); dirty = true; }
             }
             Raise(ListenChanged);
             UpdateStates();
@@ -981,7 +1031,8 @@ namespace DualEarbuds
                     st.Effects = w.Effects;
                     st.Start();
                     if (!st.Running) { Log.Warn("Listen output " + w.Name + ": " + st.Error); st.Stop(); continue; }
-                    keep.Add(new ListenerOutput(w.Id, w.Name, st) { DelayMs = w.DelayMs, Volume = w.Volume / 100f, OutputLatencyMs = w.LatencyMs });
+                    if (st.ReportedLatencyMs > 0) w.ReportedMs = st.ReportedLatencyMs;
+                    keep.Add(new ListenerOutput(w.Id, w.Name, st) { DelayMs = w.DelayMs, Volume = w.Volume / 100f, OutputLatencyMs = w.EffectiveLatencyMs });
                 }
                 if (Listen == c) { c.SetOutputs(keep); result = keep; }
                 else foreach (var k in keep) k.Stream.Stop();
@@ -1031,6 +1082,125 @@ namespace DualEarbuds
         {
             var c = Listen;
             if (c != null && !c.Remote(action)) { ListenProblem = "The other device doesn't allow its listeners to control playback."; Raise(ListenChanged); }
+        }
+
+        // ------------------------------------------------------------------ header readout + sync scopes
+        // A local output's offset from the deadline: only known when its latency was measured. It is late only
+        // when even zero extra delay can't reach P (then P is still ramping up to it).
+        public double LocalOffsetMs(OutputVm o)
+        {
+            if (!o.LatencyMeasured || !o.Enabled || o.IsSource) return double.NaN;
+            double heard = OutputTiming.CushionMs + o.ExtraDelayMs + o.EffectiveLatencyMs;
+            return heard - PlayoutMs;
+        }
+
+        // A listen output's offset from the host's deadline (clock sync), NaN while not synced.
+        public double ListenOffsetMs(OutputVm o)
+        {
+            if (Demo) return DemoListening && o.ListenTicked ? (o.Id == "tws" ? 2 : -1) : double.NaN;
+            var c = Listen;
+            if (c == null || !c.Synced || !o.ListenTicked) return double.NaN;
+            var lo = listenOutputs.Find(x => x.DeviceId == o.Id);
+            return lo == null ? double.NaN : lo.LastErrorMs;
+        }
+
+        public static double PhoneOffsetMs(PhoneInfo p) { return p.OffsetMs == int.MinValue ? double.NaN : p.OffsetMs; }
+
+        public int EarCount
+        {
+            get
+            {
+                int n = 0;
+                foreach (var o in Outputs) if (o.Kind == StateKind.Playing) n++;
+                return n + Phones.Count;
+            }
+        }
+
+        // "LIVE  48 kHz · P 92 ms · 4 ears · sync ±3 ms"
+        public string Readout(out bool live)
+        {
+            var inv = System.Globalization.CultureInfo.InvariantCulture;
+            live = false;
+            if (Listening)
+            {
+                var c = Listen;
+                var ls = ListenStateNow;
+                if (ls != ListenState.Playing) return ls == ListenState.HostPaused ? "HOST PAUSED" : ls == ListenState.Reconnecting ? "REJOINING" : "CONNECTING";
+                live = true;
+                if (c == null) return "LISTENING  48 kHz  ·  P 120 ms  ·  UDP  ·  sync +2 ms";
+                double off = c.OffsetMs;
+                return "LISTENING  " + (c.Rate / 1000.0).ToString("0.#", inv) + " kHz  ·  P " + c.PlayoutMs.ToString(inv) + " ms  ·  " + c.Transport.ToUpperInvariant() +
+                       (double.IsNaN(off) ? "" : "  ·  sync " + Kit.Signed(off));
+            }
+            if (!Running) return WantRunning ? "WAITING FOR SOUND" : "STOPPED";
+            live = true;
+            int rate = Demo ? 48000 : Engine.Rate;
+            double worst = double.NaN;
+            foreach (var p in Phones) { double v = PhoneOffsetMs(p); if (!double.IsNaN(v) && (double.IsNaN(worst) || Math.Abs(v) > worst)) worst = Math.Abs(v); }
+            foreach (var o in Outputs) { double v = LocalOffsetMs(o); if (!double.IsNaN(v) && (double.IsNaN(worst) || Math.Abs(v) > worst)) worst = Math.Abs(v); }
+            int ears = EarCount;
+            return "LIVE  " + (rate / 1000.0).ToString("0.#", inv) + " kHz  ·  P " + PlayoutMs.ToString(inv) + " ms  ·  " + ears.ToString(inv) + (ears == 1 ? " ear" : " ears") +
+                   (double.IsNaN(worst) ? "" : "  ·  sync ±" + Math.Round(worst).ToString(inv) + " ms");
+        }
+
+        // ------------------------------------------------------------------ setup check
+        public PowerState PowerNow;
+        public FirewallStatus FirewallNow;
+        public WifiInfo DemoWifi;
+        DateTime firewallCheckedAt = DateTime.MinValue;
+        bool firewallBusy;
+        public event Action ChecksChanged;
+
+        public void RefreshFirewallStatus()
+        {
+            firewallCheckedAt = DateTime.Now;
+            if (Demo || firewallBusy) return;
+            firewallBusy = true;
+            string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+            RunAsync(() => FirewallCheck.Query(exe), st => { firewallBusy = false; FirewallNow = st; Raise(ChecksChanged); });
+        }
+
+        public WifiInfo Wifi { get { return Demo ? DemoWifi : WifiReader.Last; } }
+
+        public CheckInput CheckSnapshot()
+        {
+            var x = new CheckInput
+            {
+                HostMode = !Listening,
+                NetworkCategory = NetworkCategory,
+                NetworkScope = Settings.NetworkScope,
+                Firewall = FirewallNow,
+                Power = PowerNow,
+                Wifi = Wifi,
+                PlayoutMs = PlayoutMs,
+            };
+            foreach (var o in Outputs)
+            {
+                if (o.IsSource) continue;
+                bool ticked = Listening ? o.ListenTicked : o.Enabled;
+                x.Outputs.Add(new CheckOutput { Id = o.Id, Name = o.Name, Bluetooth = o.IsBluetooth, Enabled = ticked, Calibrated = o.LatencyMeasured, LatencyMs = o.EffectiveLatencyMs });
+            }
+            foreach (var p in Phones) x.Listeners.Add(new CheckListener { Name = p.Name, Client = p.Client, NeedMs = p.NeedMs, Synced = p.Synced, Transport = p.Transport });
+            return x;
+        }
+
+        public List<CheckItem> Checks() { return SetupCheck.Build(CheckSnapshot()); }
+
+        // The fix buttons of Setup check that open Windows settings pages (the firewall one runs ApplyNetworkScope).
+        public static void OpenSettingsPage(string actionId)
+        {
+            string uri = null;
+            switch (actionId)
+            {
+                case "network": uri = "ms-settings:network-status"; break;
+                case "wifi": uri = "ms-settings:network-wifi"; break;
+                case "bluetooth": uri = "ms-settings:bluetooth"; break;
+                case "battery": uri = "ms-settings:batterysaver"; break;
+                case "power": uri = "ms-settings:powersleep"; break;
+            }
+            if (uri == null) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri) { UseShellExecute = true }); }
+            catch (Exception ex) { Log.Warn("Open " + uri + ": " + ex.Message); }
         }
 
         // ------------------------------------------------------------------ diagnostics
@@ -1173,6 +1343,7 @@ namespace DualEarbuds
             int profiles = Firewall.ProfilesFor(scope);
             RunAsync(() => Firewall.Apply(exe, true, profiles), r =>
             {
+                RefreshFirewallStatus();
                 if (r == FirewallResult.Ok)
                 {
                     Settings.NetworkScope = scope;
@@ -1348,19 +1519,19 @@ namespace DualEarbuds
             else if (DateTime.Now >= errorUntil)
             {
                 int phones = Phones.Count;
-                if (!Running && !WantRunning) { StatusText = "Stopped. Press Start to mirror your sound."; StatusKind = StateKind.Off; }
+                if (!Running && !WantRunning) { StatusText = "Not sharing."; StatusKind = StateKind.Off; }
                 else if (!Running) { /* keep the waiting message from Start() */ }
-                else if (ticked == 0 && phones == 0) { StatusText = "Running - tick another output or connect a phone."; StatusKind = StateKind.Ready; }
+                else if (ticked == 0 && phones == 0) { StatusText = "Sharing, but nothing plays it yet: turn on an output or let a phone join."; StatusKind = StateKind.Ready; }
                 else
                 {
                     var parts = new List<string>();
                     if (playing > 0) parts.Add(playing + (playing == 1 ? " output" : " outputs"));
                     if (phones > 0) parts.Add(phones + (phones == 1 ? " phone" : " phones"));
-                    StatusText = "Mirroring " + NameOf(src) + (parts.Count > 0 ? " to " + string.Join(" and ", parts.ToArray()) : "") + ".";
+                    StatusText = "From " + SourceDescription + (parts.Count > 0 ? " to " + string.Join(" and ", parts.ToArray()) : "") + ".";
                     StatusKind = StateKind.Playing;
                     if (problems.Count > 0)
                     {
-                        StatusText += " " + string.Join(", ", problems.ToArray()) + (problems.Count == 1 ? " can't" : " can't") + " be opened - use the phone link for it.";
+                        StatusText += " Windows won't open " + string.Join(", ", problems.ToArray()) + ": let it listen through a phone instead.";
                         StatusKind = StateKind.Problem;
                     }
                 }
@@ -1372,14 +1543,14 @@ namespace DualEarbuds
         {
             switch (ls)
             {
-                case ListenState.Connecting: return "Connecting to " + ListenHostName + "...";
-                case ListenState.Reconnecting: return "Reconnecting to " + ListenHostName + "... " + (Listen != null ? Listen.Detail : "");
-                case ListenState.Playing: return "Listening to " + ListenHostName + (Listen != null && Listen.Synced ? " · in step" : "") + ".";
-                case ListenState.HostPaused: return ListenHostName + " isn't sharing sound right now. It starts by itself when they press Start.";
-                case ListenState.NeedPin: return "This room needs a PIN. Ask the host - it's on their Phones page.";
+                case ListenState.Connecting: return "Connecting to " + ListenHostName + ".";
+                case ListenState.Reconnecting: return "Rejoining " + ListenHostName + ". " + (Listen != null ? Listen.Detail : "");
+                case ListenState.Playing: return "Listening to " + ListenHostName + (Listen != null && Listen.Synced ? ", on the shared deadline" : "") + ".";
+                case ListenState.HostPaused: return ListenHostName + " isn't sharing right now. Sound starts when it does.";
+                case ListenState.NeedPin: return "This room needs a PIN. The host sees it on their Listeners page.";
                 case ListenState.WrongPin: return "That PIN didn't work. Check it with the host and try again.";
-                case ListenState.WrongKey: return "The link's key is out of date (the host made a new link). Ask for the new link.";
-                case ListenState.Full: return "The host already has as many listeners as it allows. Trying again...";
+                case ListenState.WrongKey: return "This link is out of date: the host made a new one. Ask for the new link.";
+                case ListenState.Full: return "The host has as many listeners as it allows. Trying again every 10 s.";
                 case ListenState.Kicked: return "The host removed this laptop.";
                 case ListenState.Unreachable: return "Can't reach the other device.";
                 default: return "Not listening.";
@@ -1435,6 +1606,12 @@ namespace DualEarbuds
             c.Outputs[0].ListenTicked = true;
             c.WantRunning = running;
             c.Level = running ? 0.66f : 0f;
+            foreach (var o in c.Outputs) o.IsBluetooth = o.Id != "spk";
+            c.PowerNow = new PowerState { OnBattery = true, BatterySaver = false, BatteryPercent = 64, Mode = PowerMode.BetterPerformance };
+            c.FirewallNow = new FirewallStatus { Known = true, Tcp = true, Udp = true, Profiles = 6 };
+            c.DemoWifi = new WifiInfo { Connected = true, Ssid = "HomeNet", RadioType = "802.11ax", Channel = 44, Band = "5 GHz", SignalPercent = 84 };
+            c.Phones[0].NeedMs = 168; c.Phones[0].Synced = true; c.Phones[0].Transport = "udp"; c.Phones[0].OffsetMs = 2;
+            c.ComputeAlignment();
             c.UpdateStates();
             return c;
         }

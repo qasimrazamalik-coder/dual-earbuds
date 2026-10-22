@@ -69,6 +69,27 @@ static class EngineTests
         Run("Diagnostics scrubbing", TestScrub);
         Run("Join by link: parsing", TestLinkParse);
         Run("Laptop to laptop: loopback host + listener", TestLoopbackListen);
+        Run("v3.2 common deadline: choosing P", TestPlayoutChoose);
+        Run("v3.2 common deadline: ramping", TestPlayoutRamp);
+        Run("v3.2 common deadline: per-output delay", TestOutputTiming);
+        Run("v3.2 needMs: jitter window + lateness", TestNeedJitter);
+        Run("v3.2 old calibrations migrate", () => TestLatencyMigration(tmp));
+        Run("Output: small delay decreases play faster, no cut", TestSlew);
+        Run("v3.2 host announces playout from listener needs", TestPlayoutLoopback);
+        Run("v3.2 UDP datagrams + keepalives", TestUdpFormat);
+        Run("v3.2 UDP health (listener fallback logic)", TestUdpHealth);
+        Run("v3.2 UDP loopback: audio over UDP, none on the WebSocket", TestUdpLoopback);
+        Run("v3.2 UDP loopback: 10 % loss, redundancy hides single losses", TestUdpLoss);
+        Run("v3.2 UDP loopback: no UDP -> falls back to the WebSocket", TestUdpFallback);
+        Run("v3.2 UDP security: unknown tokens, keepalive rate limit", TestUdpSecurity);
+        Run("Host send path: a stalled listener never blocks capture", TestStalledListener);
+        Run("Wi-Fi band from netsh", TestWifiParse);
+        Run("Laptop to laptop: instant rejoin keeps buffer and sync", TestRejoin);
+        Run("Phone to laptop: an Android host's hello", TestAndroidHost);
+        Run("Setup check rows", TestSetupCheck);
+        Run("Power mode names", TestPowerModes);
+        Run("Bursty Wi-Fi: 200 ms gaps then bursts, buffer mode", () => TestBursty(false));
+        Run("Bursty Wi-Fi: 200 ms gaps then bursts, synced to the deadline", () => TestBursty(true));
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -899,6 +920,18 @@ static class EngineTests
         Check(Firewall.ProfilesFor(Settings.NetScopePrivate) == 2, "private scope = 2");
         Check(!Firewall.BuildScript("x", false, 6).Contains("FWRule"), "remove-only script adds nothing");
         Check(Encoding.Unicode.GetString(Convert.FromBase64String(PsScript.Encode(add))) == add, "encoded command round trip");
+        Check(add.Contains("foreach ($p in 6, 17)") && add.Contains("$r.Protocol = $p;"), "v3.2: TCP and UDP rules");
+        string exe = @"C:\Programs\Dual Earbuds\DualEarbuds.exe";
+        var fs = FirewallCheck.Parse("6|6|True|1|1|" + exe + "\r\n17|6|True|1|1|" + exe + "\r\n", exe);
+        Check(fs.Known && fs.Tcp && fs.Udp && fs.Complete && fs.Profiles == 6, "rule check: TCP + UDP on private + public");
+        var old = FirewallCheck.Parse("6|2|True|1|1|" + exe.ToUpperInvariant() + "\n", exe);
+        Check(old.Tcp && !old.Udp && !old.Complete && old.Profiles == 2, "pre-3.2 rule: TCP only -> incomplete");
+        var off = FirewallCheck.Parse("6|6|False|1|1|" + exe + "\n17|6|True|2|1|" + exe + "\n", exe);
+        Check(!off.Tcp && !off.Udp, "disabled or outbound rules don't count");
+        var other = FirewallCheck.Parse("6|6|True|1|1|D:\\old\\DualEarbuds.exe\n", exe);
+        Check(other.OtherApp && !other.Tcp, "a rule for another copy of the app is flagged");
+        Check(!FirewallCheck.Parse("", exe).Tcp && FirewallCheck.Parse(null, exe).Known == false, "no rule / unknown");
+        Check(FirewallCheck.Parse("garbage\n1|2\n", exe).Known, "garbage lines ignored");
     }
 
     // ------------------------------------------------------------------ smart features / DSP
@@ -1583,5 +1616,674 @@ static class EngineTests
         Check(!s.Contains("Q7RK2MXD") && !s.Contains("4711") && !s.ToUpperInvariant().Contains("ABCD2345"), "keys and PINs removed");
         Check(s.Contains("k=") && s.Contains("192.168.1.16"), "the rest stays readable");
         Check(DiagReport.Scrub("plain", null) == "plain", "nothing to scrub");
+    }
+
+    // ------------------------------------------------------------------ v3.2 common deadline
+    static void TestPlayoutChoose()
+    {
+        Check(PlayoutPlanner.Choose(new[] { 80, 150, 0 }, 60) == 150, "slowest listener wins");
+        Check(PlayoutPlanner.Choose(new[] { 80 }, 230) == 230, "slow local output wins");
+        Check(PlayoutPlanner.Choose(new int[0], 0) == 40, "never below 40 ms");
+        Check(PlayoutPlanner.Choose(null, 10) == 40, "no listeners: local need, clamped");
+        Check(PlayoutPlanner.Choose(new[] { 2000 }, 50) == 400, "a listener can't pull P above 400");
+        Check(PlayoutPlanner.Choose(new[] { -1, 0 }, 90) == 90, "unknown needs ignored");
+    }
+
+    static void TestPlayoutRamp()
+    {
+        var p = new PlayoutPlanner();
+        Check(p.Step(200, 0) == 200, "first value applies at once");
+        Check(p.Step(260, 500) == 260, "increase applies at once");
+        Check(p.Step(100, 1500) == 255, "decrease: 5 ms after 1 s");
+        Check(p.Step(100, 2500) == 250, "another 5 ms after another second");
+        int v = 0;
+        for (long t = 2600; t <= 2500 + 10000; t += 100) v = p.Step(100, t);
+        Check(v == 200, "10 s later: 50 ms lower (" + v + ")");
+        Check(p.Step(100, 100000) == 100, "never below the target");
+        Check(p.Step(300, 100001) == 300, "jumps up again at once");
+        var q = new PlayoutPlanner();
+        q.Step(120, 0);
+        int last = 120; bool smooth = true;
+        for (long t = 10; t < 30000; t += 10) { int x = q.Step(40, t); if (last - x > 1) smooth = false; last = x; }
+        Check(smooth && last == 40, "steps of at most 1 ms when called often (" + last + ")");
+    }
+
+    static void TestOutputTiming()
+    {
+        Check(OutputTiming.LatencyMs(182, 12, true) == 182, "calibrated latency wins");
+        Check(OutputTiming.LatencyMs(0, 12, false) == 22, "wired: reported + mixer");
+        Check(OutputTiming.LatencyMs(0, 12, true) == 172, "Bluetooth: + guess");
+        Check(OutputTiming.LatencyMs(0, 0, false) == 30, "nothing known: default");
+        Check(OutputTiming.NeedMs(182) == 197, "need = latency + cushion");
+        // P = 214, earbuds at 182 ms: queue 214 - 182 - 15 = 17 ms extra
+        Check(OutputTiming.AutoDelayMs(214, 182) == 17, "delay = P - latency - cushion");
+        Check(OutputTiming.AutoDelayMs(214, 199) == 0, "the slowest output gets no extra delay");
+        Check(OutputTiming.AutoDelayMs(100, 300) == 0, "never negative");
+        Check(OutputTiming.LocalNeedMs(new[] { 22.0, 182.0, 140.0 }) == 197, "local need = slowest ticked output");
+        Check(OutputTiming.LocalNeedMs(new double[0]) == 0, "no outputs: no need");
+        // heard time check: capture + cushion + delay + latency = capture + P
+        int P = 250; double lat = 172;
+        Check(Math.Abs(OutputTiming.CushionMs + OutputTiming.AutoDelayMs(P, lat) + lat - P) <= 0.5, "output heard at capture + P");
+        Check(OutputTiming.LooksBluetooth("Headphones (Evo Z-Buds)", false, Guid.NewGuid()), "A2DP name -> Bluetooth");
+        Check(!OutputTiming.LooksBluetooth("Headphones (Realtek(R) Audio)", false, Guid.NewGuid()), "Realtek -> wired");
+        Check(!OutputTiming.LooksBluetooth("Headphones (TWS)", false, OutputTiming.ComputerContainer), "built-in container -> wired");
+        Check(OutputTiming.LooksBluetooth("Speakers (whatever)", true, OutputTiming.ComputerContainer), "battery -> Bluetooth");
+        Check(!OutputTiming.LooksBluetooth("Speaker (Realtek(R) Audio)", false, Guid.NewGuid()), "speaker -> wired");
+    }
+
+    static void TestNeedJitter()
+    {
+        var w = new JitterWindow(30000, 10);
+        long t = 0;
+        var rj = new Random(3);
+        // Wi-Fi-like jitter: 2 ms floor plus an exponential tail (mean 5 ms): true p99 = 2 + 5 ln 100 = 25 ms
+        for (int i = 0; i < 2000; i++) { w.AddJitter(2 - 5 * Math.Log(1 - rj.NextDouble())); t += 10; w.OnPacket(t); }
+        Check(w.P99 >= 19 && w.P99 <= 32, "p99 of a jittery network (" + w.P99.ToString("0.0") + " ms, true 25)");
+        for (int i = 0; i < 4000; i++) { w.AddJitter(1); t += 10; w.OnPacket(t); }
+        Check(w.P99 < 5, "after 30 s of calm network it comes down (" + w.P99.ToString("0.0") + ")");
+
+        var lt = new LatenessTracker(10);
+        Check(lt.OnPacket(100, 1000) == 0, "first packet on time");
+        Check(lt.OnPacket(101, 1010) == 0, "steady");
+        Check(Math.Abs(lt.OnPacket(102, 1215) - 195) < 0.01, "200 ms gap -> 195 ms late");
+        Check(Math.Abs(lt.OnPacket(103, 1215) - 185) < 0.01, "burst: next one less late");
+        Check(lt.OnPacket(110, 1095) == 0, "earlier than ever re-anchors");
+    }
+
+    static void TestLatencyMigration(string tmp)
+    {
+        string path = Path.Combine(tmp, "old-latency.txt");
+        File.WriteAllLines(path, new[] { "latency\tHeadphones (A)\t200", "latency2\tHeadphones (B)\t150", "latency\tHeadphones (B)\t999" });
+        var s = Settings.Load(path);
+        Check(s.LatencyFor("Headphones (A)") == 200 - Settings.OldDeviceBufferMs, "pre-3.2 value loses the device buffer it counted");
+        Check(s.LatencyFor("Headphones (B)") == 150, "3.2 value kept as is (and wins)");
+        s.Save(path);
+        Check(File.ReadAllText(path).Contains("latency2\tHeadphones (A)\t165"), "saved in the new format");
+        Check(Settings.Load(path).LatencyFor("Headphones (A)") == 165, "no second migration");
+    }
+
+    static void TestSlew()
+    {
+        int rate = 1000;
+        var o = new OutputStream("slew", rate, 100, 1f);
+        o.MarkRunningForTest();
+        var dst = new float[4000];
+        var src = new float[20];
+        for (int i = 0; i < 10; i++) { src[2 * i] = 0.5f; src[2 * i + 1] = 0.5f; }
+        // steady state: 10 frames in, 10 out, queue = cushion + 100
+        for (int k = 0; k < 30; k++) { o.Push(src, 10); o.Fill(dst, 10, false); }
+        int q0 = o.QueuedFrames;
+        o.SetDelayMs(95);   // the deadline ramps down 5 ms
+        Check(o.SlewPendingFrames == 5 && o.QueuedFrames == q0, "5 ms drop is not cut out (" + o.SlewPendingFrames + ")");
+        bool full = true;
+        for (int k = 0; k < 2000 && o.SlewPendingFrames > 0; k++) { o.Push(src, 10); if (o.Fill(dst, 10, false) != 10) full = false; }
+        Check(o.SlewPendingFrames == 0 && full, "played away slowly without gaps");
+        Check(Math.Abs(o.QueuedFrames - (q0 - 5)) <= 1, "queue 5 ms shorter afterwards (" + o.QueuedFrames + " vs " + q0 + ")");
+        o.SetDelayMs(0);
+        Check(o.SlewPendingFrames == 0 && o.QueuedFrames <= q0 - 90, "a big jump is cut at once");
+    }
+
+    static void TestPlayoutLoopback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        try
+        {
+            host.SetMirroring(true, 48000);
+            host.LocalNeedMs = 197;
+            Check(host.UpdatePlayout(host.NowMs) == 197, "no listeners: P = local need");
+            var w = WsClient.Open(port, "k=ABCD2345&client=android&name=P");
+            string hello = NextOfType(w, "hello", 10);
+            Check(hello != null && hello.Contains("\"playoutMs\":197"), "hello carries the current P");
+            int got = 0;
+            host.PlayoutChanged += ms => got = ms;
+            w.SendText("{\"type\":\"sync\",\"c\":1}");
+            w.SendText("{\"type\":\"status\",\"device\":\"P\",\"needMs\":260,\"bufferMs\":0,\"underruns\":0,\"playing\":true}");
+            Check(WaitFor(() => host.Snapshot().Count == 1 && host.Snapshot()[0].NeedMs == 260 && host.Snapshot()[0].Synced, 2000), "host reads needMs");
+            Check(host.UpdatePlayout(host.NowMs) == 260 && got == 260, "slow listener raises P at once");
+            string po = NextOfType(w, "playout", 40);
+            Check(po != null && po.Contains("\"ms\":260"), "playout message sent (" + po + ")");
+            w.SendText("{\"type\":\"status\",\"device\":\"P\",\"needMs\":90,\"bufferMs\":0,\"underruns\":0,\"playing\":true}");
+            Check(WaitFor(() => host.Snapshot()[0].NeedMs == 90, 2000), "need drops");
+            int p1 = host.UpdatePlayout(host.NowMs + 1000);
+            Check(p1 >= 249 && p1 <= 256, "P comes down about 5 ms per second (" + p1 + ")");
+            w.Dispose();
+        }
+        finally { host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ v3.2 UDP
+    static byte[] WsBody(int rate, uint seq, short fill)
+    {
+        int frames = PhoneLink.PacketFrames(rate);
+        var f = new float[frames * 2];
+        for (int i = 0; i < f.Length; i++) f[i] = fill / 32767f;
+        return PhoneLink.BuildAudioFrame(f, frames, rate, seq);
+    }
+
+    static void TestUdpFormat()
+    {
+        string tok = UdpAudio.NewToken();
+        Check(tok.Length == 32 && UdpAudio.FromHex(tok) != null, "token: 32 hex characters");
+        Check(UdpAudio.FromHex("zz" + tok.Substring(2)) == null && UdpAudio.FromHex("abc") == null, "bad tokens rejected");
+        var ka = UdpAudio.BuildKeepalive(UdpAudio.FromHex(tok));
+        Check(ka.Length == 21 && Encoding.ASCII.GetString(ka, 0, 4) == "DE3U" && ka[4] == 1, "keepalive layout");
+        Check(UdpAudio.ParseKeepalive(ka, ka.Length) == tok, "keepalive parses back to the token");
+        Check(UdpAudio.ParseKeepalive(ka, 20) == null, "wrong length ignored");
+
+        var a = WsBody(48000, 7, 1000);
+        var b = WsBody(48000, 8, 2000);
+        int ha = 4, hb = 4;   // 1928-byte payloads use the 4-byte header
+        var d = UdpAudio.BuildDatagram(b, hb, b.Length - hb, a, ha, a.Length - ha);
+        Check(d.Length == 4 + 2 * (8 + 480 * 4), "datagram = magic + this packet + the previous one (" + d.Length + " bytes)");
+        Check(Encoding.ASCII.GetString(d, 0, 4) == "DE3A" && BitConverter.ToUInt32(d, 4) == 8 && BitConverter.ToInt32(d, 8) == 48000, "magic, seq, rate");
+        UdpBlock cur, prev; bool hasPrev;
+        Check(UdpAudio.TryParse(d, d.Length, out cur, out hasPrev, out prev) && cur.Seq == 8 && cur.Frames == 480 && hasPrev && prev.Seq == 7, "parses both blocks");
+        Check(BitConverter.ToInt16(d, cur.PcmOffset) == 2000 && BitConverter.ToInt16(d, prev.PcmOffset) == 1000, "PCM of both");
+        var single = UdpAudio.BuildDatagram(b, hb, b.Length - hb, null, 0, 0);
+        Check(UdpAudio.TryParse(single, single.Length, out cur, out hasPrev, out prev) && !hasPrev && cur.Seq == 8, "first packet: no previous");
+        // a host that repeats the magic before the second block is understood too
+        var withMagic = new byte[d.Length + 4];
+        Buffer.BlockCopy(d, 0, withMagic, 0, 4 + 8 + 1920);
+        Buffer.BlockCopy(Encoding.ASCII.GetBytes("DE3A"), 0, withMagic, 4 + 8 + 1920, 4);
+        Buffer.BlockCopy(d, 4 + 8 + 1920, withMagic, 4 + 8 + 1920 + 4, 8 + 1920);
+        Check(UdpAudio.TryParse(withMagic, withMagic.Length, out cur, out hasPrev, out prev) && hasPrev && prev.Seq == 7, "second block with its own magic");
+        Check(!UdpAudio.TryParse(d, 100, out cur, out hasPrev, out prev), "truncated datagram rejected");
+        Check(!UdpAudio.TryParse(ka, ka.Length, out cur, out hasPrev, out prev), "keepalive is not audio");
+    }
+
+    static void TestUdpHealth()
+    {
+        var h = new UdpHealth();
+        h.OnHello(0, true);
+        Check(h.Tick(1000) == UdpAction.None && h.Tick(5000) == UdpAction.None, "host plays nothing: no verdict");
+        for (long t = 100; t < 2600; t += 10) h.OnWsAudio(t);
+        Check(h.Tick(2600) == UdpAction.SendOkFalse && h.Refused, "WebSocket audio but no UDP for 2 s -> ok:false");
+        Check(h.Tick(2700) == UdpAction.None, "said once");
+
+        var g = new UdpHealth();
+        g.OnHello(0, true);
+        g.OnClock(1000, 900);
+        g.OnClock(1100, 1900);
+        g.OnClock(1200, 2900);
+        Check(g.Tick(2950) == UdpAction.SendOkFalse, "host produces (clock seq moves) but no UDP -> ok:false");
+
+        var u = new UdpHealth();
+        u.OnHello(0, true);
+        for (uint i = 0; i < 100; i++) u.OnUdp(i, 50 + i * 10);
+        Check(u.Active(1060) && u.Tick(1100) == UdpAction.None, "UDP flowing -> active");
+        u.OnClock(130, 1300);
+        Check(u.Tick(2200) == UdpAction.None, "short gap, host not far ahead -> keep UDP");
+        u.OnClock(400, 2300);
+        Check(u.Tick(2400) == UdpAction.SendOkFalse, "host 3 s ahead of what UDP delivered -> ok:false");
+
+        var w = new UdpHealth();
+        w.OnHello(0, true);
+        for (uint i = 0; i < 100; i++) w.OnUdp(i, i * 10);
+        Check(w.Tick(4000) == UdpAction.None, "Wi-Fi blip (clock messages stale too) -> no switch");
+        var o = new UdpHealth();
+        o.OnHello(0, false);
+        for (long t = 0; t < 5000; t += 10) o.OnWsAudio(t);
+        Check(o.Tick(5000) == UdpAction.None && !o.Active(5000), "host without UDP: nothing to do");
+    }
+
+    static LinkClient JoinLoopback(int port)
+    {
+        LinkTarget t; string why;
+        LinkAddress.TryParse("127.0.0.1:" + port + "/?k=abcd2345", out t, out why);
+        return new LinkClient(t, null, "UDP listener");
+    }
+
+    // Broadcasts 10 ms packets until stopped (like the capture thread).
+    static Thread Pump(PhoneLink host, Func<bool> stop)
+    {
+        var th = new Thread(() =>
+        {
+            var buf = new float[480 * 2];
+            int v = 0;
+            var sw = Stopwatch.StartNew();
+            long n = 0;
+            while (!stop())
+            {
+                for (int i = 0; i < 480; i++) { float x = ((v++ % 960) - 480) / 960f; buf[2 * i] = x; buf[2 * i + 1] = x; }
+                host.Broadcast(buf, 480, 48000);
+                n++;
+                long wait = n * 10 - sw.ElapsedMilliseconds;
+                if (wait > 0) Thread.Sleep((int)wait);
+            }
+        }) { IsBackground = true };
+        th.Start();
+        return th;
+    }
+
+    static void TestUdpLoopback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            Check(host.UdpAvailable, "host binds UDP on the same port");
+            Check(host.HelloJson("00112233445566778899aabbccddeeff").Contains("\"udp\":" + port + ",\"token\":\"00112233445566778899aabbccddeeff\""), "hello offers udp + token");
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Check(WaitFor(() => c.State == ListenState.Playing, 5000), "joins");
+            Pump(host, () => done);
+            Check(WaitFor(() => c.Transport == "udp" && host.Snapshot().Count == 1 && host.Snapshot()[0].Transport == "udp", 4000), "audio switches to UDP on both sides");
+            long ws0 = c.WsPackets, udp0 = c.UdpPackets;
+            Thread.Sleep(1000);
+            Check(c.UdpPackets - udp0 >= 60, "UDP datagrams arrive (" + (c.UdpPackets - udp0) + " in 1 s)");
+            Check(c.WsPackets - ws0 <= 2, "no audio on the WebSocket while UDP works (" + (c.WsPackets - ws0) + ")");
+            Check(c.Lost == 0 || c.Lost < 3, "nothing lost on loopback (" + c.Lost + ")");
+            Check(host.UdpDatagramsSent > 50, "host counted its datagrams");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+
+        // an older host (or a phone without UDP): no udp field -> WebSocket audio as before
+        int p2 = FreePort();
+        var old = new PhoneLink(p2, "ABCD2345", IPAddress.Loopback) { DisableUdpForTest = true };
+        old.Start();
+        bool d2 = false;
+        LinkClient c2 = null;
+        try
+        {
+            Check(!old.HelloJson("00112233445566778899aabbccddeeff").Contains("udp"), "no udp field without UDP");
+            old.SetMirroring(true, 48000);
+            c2 = JoinLoopback(p2);
+            c2.Start();
+            Pump(old, () => d2);
+            Check(WaitFor(() => c2.WsPackets > 50, 4000) && c2.Transport == "ws" && c2.UdpPackets == 0, "plays over the WebSocket");
+        }
+        finally { d2 = true; if (c2 != null) c2.Dispose(); old.Stop(); }
+    }
+
+    static void TestUdpLoss()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Pump(host, () => done);
+            Check(WaitFor(() => c.Transport == "udp", 5000), "on UDP");
+            // from now on every datagram has a 10 % chance to be lost; note the pattern
+            var rnd = new Random(11);
+            var pattern = new List<bool>();
+            host.UdpDropForTest = () => { bool gone = rnd.NextDouble() < 0.10; lock (pattern) pattern.Add(gone); return gone; };
+            long lost0 = c.Lost, rec0 = c.UdpRecovered;
+            Thread.Sleep(4000);
+            host.UdpDropForTest = null;
+            Thread.Sleep(300);
+            int drops = 0, doubles = 0;
+            lock (pattern)
+            {
+                for (int i = 0; i < pattern.Count; i++)
+                {
+                    if (!pattern[i]) continue;
+                    drops++;
+                    if (i + 1 < pattern.Count && pattern[i + 1]) doubles++;   // this and the next one: the copy is lost too
+                }
+            }
+            long lost = c.Lost - lost0, recovered = c.UdpRecovered - rec0;
+            Check(drops > 20, "about 10 % of " + pattern.Count + " datagrams dropped (" + drops + ")");
+            Check(recovered >= drops - doubles - 2, "single losses filled from the next datagram (" + recovered + " of " + (drops - doubles) + ")");
+            Check(lost <= doubles + 1, "only back-to-back losses reach concealment (" + lost + " lost, " + doubles + " double drops)");
+            Check(c.Transport == "udp", "stays on UDP through 10 % loss");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    static void TestUdpFallback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.UdpDropForTest = () => true;   // UDP never reaches the listener (a firewall, a strict hotspot)
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Pump(host, () => done);
+            var sw = Stopwatch.StartNew();
+            Check(WaitFor(() => c.State == ListenState.Playing, 4000), "joins");
+            Check(WaitFor(() => host.Snapshot().Count == 1 && host.Snapshot()[0].Transport == "ws" && c.WsPackets > 0 && sw.ElapsedMilliseconds > 2500, 8000), "host back on the WebSocket after ok:false");
+            long ws0 = c.WsPackets;
+            Thread.Sleep(1000);
+            Check(c.WsPackets - ws0 >= 60, "audio flows on the WebSocket (" + (c.WsPackets - ws0) + " in 1 s)");
+            Check(c.Transport == "ws", "listener reports WebSocket transport");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    static void TestUdpSecurity()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            var w = WsClient.Open(port, "k=ABCD2345&client=android&name=X");
+            Pump(host, () => done);
+            using (var raw = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
+            {
+                raw.Client.ReceiveTimeout = 600;
+                var fake = UdpAudio.BuildKeepalive(UdpAudio.FromHex(UdpAudio.NewToken()));
+                raw.Send(fake, fake.Length, new IPEndPoint(IPAddress.Loopback, port));
+                bool got = false;
+                try { IPEndPoint any = null; raw.Receive(ref any); got = true; } catch (SocketException) { }
+                Check(!got, "keepalive with an unknown token: nothing is sent back");
+                for (int i = 0; i < 40; i++) raw.Send(fake, fake.Length, new IPEndPoint(IPAddress.Loopback, port));
+                Check(WaitFor(() => host.KeepalivesDropped >= 30, 2000), "keepalive flood rate-limited per IP (" + host.KeepalivesDropped + " dropped)");
+            }
+            Check(host.Snapshot()[0].Transport == "ws", "a session that never sent its token stays on the WebSocket");
+            w.Dispose();
+        }
+        finally { done = true; host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ bursty arrival
+    // Wi-Fi power save and retransmits deliver nothing for 200 ms, then 20 packets at once. Once the smart buffer
+    // (or the deadline, in sync mode) has adapted, the ear must hear no dropouts. The device is simulated:
+    // a 40 ms buffer drained every 10 ms, refilled like the WASAPI render loop does.
+    static void TestBursty(bool synced)
+    {
+        const int rate = 48000, per = 480, devCap = 1920;
+        var jb = new JitterBuffer();
+        jb.Reset(0);
+        var need = new JitterWindow(30000, 10);
+        var late = new LatenessTracker(10);
+        var st = new OutputStream("sim", rate, 0, 1f);
+        st.MarkRunningForTest();
+        var lo = new ListenerOutput("sim", "sim", st);
+        var tmp = new float[devCap * 2];
+        var pkt = new float[per * 2];
+        for (int i = 0; i < pkt.Length; i++) pkt[i] = 0.1f;
+        int pad = 0, dropoutsAfter = 0, dropoutsBefore = 0, seen = 0;
+        uint seq = 0;
+        const long adaptMs = 15000, endMs = 45000;
+        var arrivals = new Queue<long>();
+        // arrival schedule: packet s is captured at 10 s, delivered at the end of its 210 ms cycle
+        long cycle = 210;
+        for (long s = 0; s * 10 < endMs; s++) { long cap = s * 10; long at = (cap / cycle + 1) * cycle; arrivals.Enqueue(at); }
+        int playout = 120;
+        double worstSync = 0;
+        for (long now = 0; now < endMs; now++)
+        {
+            while (arrivals.Count > 0 && arrivals.Peek() <= now)
+            {
+                arrivals.Dequeue();
+                jb.OnPacket(now);
+                need.AddJitter(late.OnPacket(seq, now));
+                double hostNow = synced ? now : double.NaN;
+                double playAt = synced ? seq * 10.0 + playout : double.NaN;
+                if (synced && now >= adaptMs + 5000)
+                {
+                    // when this packet will really be heard: after everything queued before it (device buffer included)
+                    double heard = now + (st.QueuedFrames + pad) * 1000.0 / rate;
+                    worstSync = Math.Max(worstSync, Math.Abs(heard - playAt));
+                }
+                lo.Push(pkt, per, playAt, hostNow, jb.TargetMs, 1f);
+                seq++;
+            }
+            if (synced && now % 1000 == 0)
+            {
+                // the host follows this listener's needMs (decreases ramp; here only increases matter)
+                int n = (int)Math.Ceiling(Math.Max(need.P99 + 10, jb.TargetMs) + OutputTiming.CushionMs);
+                if (n > playout) playout = Math.Min(400, n);
+            }
+            if (now % 10 == 0)
+            {
+                // the device plays 10 ms
+                if (pad < per) { if (st.QueuedFrames > 0 || seen > 0) { if (now >= adaptMs) dropoutsAfter++; else dropoutsBefore++; } pad = 0; }
+                else pad -= per;
+                st.SetPaddingForTest(pad);
+                int n = st.Fill(tmp, devCap - pad, pad == 0);
+                if (n > 0) seen++;
+                pad += n;
+                st.SetPaddingForTest(pad);
+                if (st.NewUnderrunsForTest() > 0) jb.OnUnderrun(now);
+                jb.Tick(now);
+            }
+        }
+        Check(jb.TargetMs >= 190, "smart buffer learned the 200 ms gaps (" + jb.TargetMs + " ms)");
+        if (synced) Check(playout >= 200 && playout <= 400, "deadline grew to cover them (" + playout + " ms)");
+        if (synced) Check(worstSync <= 12, "and every packet is heard on the deadline (worst " + worstSync.ToString("0.0") + " ms off)");
+        Check(dropoutsAfter == 0, "no dropouts once adapted (" + dropoutsAfter + " after, " + dropoutsBefore + " while learning)");
+    }
+
+    static void TestStalledListener()
+    {
+        Check(PhoneLink.AudioQueueLimit * PhoneLink.PacketMs == 300, "per-listener queue holds 300 ms");
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback) { DisableUdpForTest = true };
+        host.Start();
+        try
+        {
+            host.SetMirroring(true, 48000);
+            var stalled = WsClient.Open(port, "k=ABCD2345&client=web&name=Stalled");   // never reads
+            Check(WaitFor(() => host.ClientCount == 1, 2000), "listener connected");
+            var buf = new float[480 * 2];
+            var sw = Stopwatch.StartNew();
+            long worst = 0;
+            for (int i = 0; i < 3000; i++)   // 30 s of sound, as fast as possible
+            {
+                long t0 = sw.ElapsedTicks;
+                host.Broadcast(buf, 480, 48000);
+                if (i >= 20) worst = Math.Max(worst, sw.ElapsedTicks - t0);   // after JIT warm-up
+            }
+            double worstMs = worst * 1000.0 / Stopwatch.Frequency;
+            Check(worstMs < 20, "Broadcast never waits for the network (worst " + worstMs.ToString("0.00") + " ms)");
+            Check(WaitFor(() => host.Snapshot()[0].PacketsDropped > 2000, 3000), "oldest packets dropped and counted (" + host.Snapshot()[0].PacketsDropped + ")");
+            stalled.Dispose();
+        }
+        finally { host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ setup check
+    const string NetshEn = @"
+There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    Description            : Intel(R) Wi-Fi 6 AX201 160MHz
+    GUID                   : 5f0e3a2c-1111-2222-3333-444455556666
+    Physical address       : a4:6b:b6:01:02:03
+    Interface type         : Primary
+    State                  : connected
+    SSID                   : HomeNet-5G
+    AP BSSID               : 00:11:22:33:44:55
+    Band                   : 5 GHz
+    Channel                : 44
+    Network type           : Infrastructure
+    Radio type             : 802.11ax
+    Authentication         : WPA2-Personal
+    Cipher                 : CCMP
+    Connection mode        : Auto Connect
+    Receive rate (Mbps)    : 1201
+    Transmit rate (Mbps)   : 1201
+    Signal                 : 88%
+    Profile                : HomeNet-5G
+    QoS MSCS Configured         : 0
+
+    Hosted network status  : Not available
+";
+
+    static void TestWifiParse()
+    {
+        var w = WifiInfo.Parse(NetshEn);
+        Check(w.Connected && w.Ssid == "HomeNet-5G" && w.Channel == 44 && w.RadioType == "802.11ax", "English output (" + w.Ssid + ", ch " + w.Channel + ", " + w.RadioType + ")");
+        Check(w.Band == "5 GHz" && w.IsFast && w.SignalPercent == 88, "5 GHz, 88 %");
+        // Windows 10: no Band line; 2.4 GHz from the channel
+        var w10 = WifiInfo.Parse(NetshEn.Replace("    Band                   : 5 GHz\r\n", "").Replace("    Band                   : 5 GHz\n", "").Replace(": 44", ": 6").Replace("802.11ax", "802.11n"));
+        Check(w10.Band == "2.4 GHz" && w10.Is24 && w10.Channel == 6, "no Band line: channel 6 -> 2.4 GHz (" + w10.Band + ")");
+        // German labels: values recognised by their shape
+        string de = "    Name                   : WLAN\n    Zustand                : Verbunden\n    SSID                   : Zuhause\n    Funktyp                : 802.11ac\n    Kanal                  : 36\n    Signal                 : 71%\n";
+        var wd = WifiInfo.Parse(de);
+        Check(wd.Connected && wd.RadioType == "802.11ac" && wd.Channel == 36 && wd.Band == "5 GHz" && wd.SignalPercent == 71, "German output (" + wd.Band + ")");
+        var off = WifiInfo.Parse("    Name                   : Wi-Fi\n    State                  : disconnected\n    Radio status           : Hardware On\n");
+        Check(!off.Connected && off.Band == null, "disconnected");
+        Check(!WifiInfo.Parse("").Connected && !WifiInfo.Parse(null).Connected && !WifiInfo.Parse("The Wireless AutoConfig Service (wlansvc) is not running.").Connected, "no Wi-Fi service / garbage");
+        string two = "    Name : Wi-Fi 2\n    State : disconnected\n\n    Name : Wi-Fi\n    State : connected\n    SSID : B\n    Channel : 149\n";
+        var w2 = WifiInfo.Parse(two);
+        Check(w2.Connected && w2.Ssid == "B" && w2.Band == "5 GHz", "two adapters: the connected one");
+        Check(WifiInfo.BandFrom("6 GHz", 5, "802.11ax") == "6 GHz" && WifiInfo.BandFrom(null, 0, "802.11g") == "2.4 GHz" && WifiInfo.BandFrom("2,4 GHz", 0, null) == "2.4 GHz", "band names");
+    }
+
+    static void TestSetupCheck()
+    {
+        var x = new CheckInput
+        {
+            NetworkCategory = "Public",
+            Firewall = FirewallCheck.Parse("6|2|True|1|1|a.exe\n", "a.exe"),
+            Power = new PowerState { BatterySaver = true, OnBattery = true, Mode = PowerMode.BestEfficiency },
+            Wifi = WifiInfo.Parse(NetshEn.Replace("5 GHz", "2.4 GHz").Replace(": 44", ": 6")),
+            PlayoutMs = 240,
+        };
+        x.Outputs.Add(new CheckOutput { Id = "a", Name = "Headphones (Evo)", Bluetooth = true, Enabled = true, Calibrated = false, LatencyMs = 172 });
+        x.Outputs.Add(new CheckOutput { Id = "b", Name = "Headphones (TWS)", Bluetooth = true, Enabled = true, Calibrated = true, LatencyMs = 182 });
+        x.Outputs.Add(new CheckOutput { Id = "c", Name = "Speaker", Bluetooth = false, Enabled = false });
+        x.Listeners.Add(new CheckListener { Name = "Redmi", NeedMs = 230 });
+        x.Listeners.Add(new CheckListener { Name = "Pixel", NeedMs = 90 });
+        var rows = SetupCheck.Build(x);
+        Func<string, CheckItem> row = id => rows.Find(r => r.Id == id);
+        Check(row("network").Status == CheckStatus.Warn && row("network").ActionId == "network", "public network: warn + settings");
+        Check(row("firewall").Status == CheckStatus.Warn && row("firewall").Value == "TCP only" && row("firewall").ActionId == "firewall", "old TCP-only rule: update via the elevated flow");
+        Check(row("wifi").Status == CheckStatus.Warn && row("wifi").Value.StartsWith("2.4 GHz · ch 6"), "2.4 GHz flagged (" + row("wifi").Value + ")");
+        Check(row("bluetooth").Status == CheckStatus.Good && row("bluetooth").Value == "2 connected", "two Bluetooth pairs");
+        Check(row("cal:a").Status == CheckStatus.Warn && row("cal:a").ActionId == "calibrate:a" && row("cal:b").Status == CheckStatus.Good, "uncalibrated Bluetooth pair -> calibrate");
+        Check(row("cal:c") == null, "unticked outputs not listed");
+        Check(row("battery").Status == CheckStatus.Warn && row("power").Status == CheckStatus.Warn, "battery saver and efficiency mode flagged");
+        Check(row("listeners").Status == CheckStatus.Warn && row("listeners").Detail.StartsWith("Redmi 230 ms"), "slow listener named");
+        Check(SetupCheck.Attention(rows) == 7, "rows needing attention counted (" + SetupCheck.Attention(rows) + ")");
+
+        var ok = new CheckInput
+        {
+            NetworkCategory = "Private",
+            Firewall = FirewallCheck.Parse("6|6|True|1|1|a.exe\n17|6|True|1|1|a.exe\n", "a.exe"),
+            Power = new PowerState { Mode = PowerMode.BetterPerformance },
+            Wifi = WifiInfo.Parse(NetshEn),
+        };
+        ok.Outputs.Add(new CheckOutput { Id = "b", Name = "TWS", Bluetooth = true, Enabled = true, Calibrated = true, LatencyMs = 182 });
+        var good = SetupCheck.Build(ok);
+        Check(SetupCheck.Attention(good) == 0, "a good setup has nothing to fix");
+        Check(good.Find(r => r.Id == "firewall").Value == "TCP + UDP · private + public", "rule summary");
+        var unknown = SetupCheck.Build(new CheckInput());
+        Check(unknown.Find(r => r.Id == "firewall").Status == CheckStatus.Unknown && unknown.Find(r => r.Id == "wifi").Status == CheckStatus.Unknown, "nothing known yet: unknown, not alarming");
+        Check(SetupCheck.BestSoundGuide.Length == 5 && SetupCheck.BestSoundGuide[4].Contains("LDAC"), "best-sound guide");
+    }
+
+    static void TestPowerModes()
+    {
+        Check(Power.ModeFor(Power.OverlayBestEfficiency) == PowerMode.BestEfficiency, "best efficiency overlay");
+        Check(Power.ModeFor(Guid.Empty) == PowerMode.BetterPerformance, "empty overlay = Windows' default (balanced)");
+        Check(Power.ModeFor(Power.OverlayBestPerformance) == PowerMode.BestPerformance, "best performance overlay");
+        Check(Power.ModeFor(Guid.NewGuid()) == PowerMode.Unknown, "unknown overlay");
+        var st = Power.Read();
+        Check(st != null && !Power.Awake, "reading power state never throws (no Windows here)");
+        Power.KeepAwake(true);
+        Check(Realtime.Enter("Pro Audio") == IntPtr.Zero, "MMCSS is a no-op where it doesn't exist");
+    }
+
+    static void TestRejoin()
+    {
+        var cs = new ClockSync();
+        cs.Add(0, 1000, 10);
+        Check(Math.Abs(cs.Offset - 995) < 0.01, "clock offset");
+        cs.Add(100, 1100, 110);
+        Check(cs.Samples == 2, "consistent sample kept");
+        cs.Add(200, 50, 210);   // the host restarted: its clock is near 0 again
+        Check(cs.Samples == 1 && Math.Abs(cs.Offset - (50 - 205)) < 0.01, "host restart -> sync starts over");
+
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Buffer.Mode = BufferMode.Steady;
+            c.Start();
+            Pump(host, () => done);
+            Check(WaitFor(() => c.State == ListenState.Playing && c.Synced, 5000), "playing and synced");
+            c.Buffer.OnUnderrun(0); c.Buffer.OnUnderrun(0);
+            int target = c.Buffer.TargetMs;
+            var sw = Stopwatch.StartNew();
+            host.DisconnectAll();   // like a Wi-Fi blip that reset the connection
+            Check(WaitFor(() => c.Rejoins >= 1 && c.State == ListenState.Playing, 4000), "rejoins");
+            long ms = sw.ElapsedMilliseconds;
+            Check(ms < 2000, "within 2 s (" + ms + " ms)");
+            Check(c.Synced, "sync kept across the rejoin");
+            Check(c.Buffer.TargetMs >= target, "jitter buffer kept (" + c.Buffer.TargetMs + " ms)");
+            long p0 = c.Packets;
+            Check(WaitFor(() => c.Packets > p0 + 50, 3000), "audio flows again");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    // A phone in "Share this phone" mode: host "android", sourceApp in hello's "app", no udp field.
+    static void TestAndroidHost()
+    {
+        int port = FreePort();
+        var srv = new TcpListener(IPAddress.Loopback, port);
+        srv.Start();
+        bool done = false;
+        var th = new Thread(() =>
+        {
+            try
+            {
+                using (var tc = srv.AcceptTcpClient())
+                {
+                    var ns = tc.GetStream();
+                    var sb = new StringBuilder();
+                    var b1 = new byte[1];
+                    while (!sb.ToString().EndsWith("\r\n\r\n") && ns.Read(b1, 0, 1) > 0) sb.Append((char)b1[0]);
+                    string head = sb.ToString();
+                    int ki = head.IndexOf("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase);
+                    string key = head.Substring(ki + 18, head.IndexOf("\r\n", ki) - ki - 18).Trim();
+                    byte[] resp = Encoding.ASCII.GetBytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + PhoneLink.AcceptKey(key) + "\r\n\r\n");
+                    ns.Write(resp, 0, resp.Length);
+                    var hello = PhoneLink.BuildTextFrame("{\"type\":\"hello\",\"protocol\":3,\"pc\":\"Pixel 8\",\"version\":\"3.2.0\",\"host\":\"android\",\"rate\":48000,\"party\":false,\"playoutMs\":180,\"source\":\"app\",\"app\":\"YouTube\"}");
+                    ns.Write(hello, 0, hello.Length);
+                    var pcm = new float[960];
+                    uint seq = 0;
+                    while (!done)
+                    {
+                        var f = PhoneLink.BuildAudioFrame(pcm, 480, 48000, seq++);
+                        ns.Write(f, 0, f.Length);
+                        if (seq % 50 == 0) { var ping = PhoneLink.BuildTextFrame("{\"type\":\"ping\",\"t\":1}"); ns.Write(ping, 0, ping.Length); }
+                        Thread.Sleep(10);
+                    }
+                }
+            }
+            catch { }
+        }) { IsBackground = true };
+        th.Start();
+        LinkClient c = null;
+        try
+        {
+            c = JoinLoopback(port);
+            c.Start();
+            Check(WaitFor(() => c.State == ListenState.Playing && c.Packets > 30, 5000), "plays a phone's sound (" + c.State + ")");
+            Check(c.HostKind == "android" && c.HostName == "Pixel 8", "knows it's a phone");
+            Check(c.Source == "app" && c.SourceApp == "YouTube", "shared app from hello");
+            Check(c.PlayoutMs == 180, "uses the phone's playout");
+            Check(c.Transport == "ws" && c.UdpPackets == 0, "no udp field -> WebSocket audio");
+        }
+        finally { done = true; if (c != null) c.Dispose(); srv.Stop(); }
     }
 }

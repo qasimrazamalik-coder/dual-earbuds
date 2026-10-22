@@ -27,14 +27,22 @@ namespace DualEarbuds
 
         public static TextBlock Heading(string s, double size)
         {
-            var t = Text(s, size, FontWeights.SemiBold, "Text");
-            t.FontFamily = Theme.Display;
+            return Text(s, size, FontWeights.SemiBold, "Text");
+        }
+
+        // Values (ms, dB, kHz, %, IP, PIN): mono, tabular, +0.2 letter-spacing is approximated by the font itself.
+        public static TextBlock Mono(string s, double size, string brush)
+        {
+            var t = Text(s, size, FontWeights.Normal, brush);
+            t.FontFamily = Theme.Mono;
+            t.TextWrapping = TextWrapping.NoWrap;
             return t;
         }
 
+        // A panel: radius 8, 1 px Line border, no shadow.
         public static Border Card(UIElement child)
         {
-            var b = new Border { CornerRadius = new CornerRadius(18), Padding = new Thickness(20), BorderThickness = new Thickness(1), Child = child };
+            var b = new Border { CornerRadius = new CornerRadius(8), Padding = new Thickness(16), BorderThickness = new Thickness(1), Child = child };
             b.SetResourceReference(Border.BackgroundProperty, "Surface");
             b.SetResourceReference(Border.BorderBrushProperty, "Line");
             return b;
@@ -52,25 +60,22 @@ namespace DualEarbuds
             }
         }
 
-        // Rounded pill with a colored dot.
+        // Status = 6 px dot + word (never colour alone). The word stays in Text colour for contrast.
         public static Border Chip(string text, string brushKey, out TextBlock label, out Ellipse dot)
         {
-            dot = new Ellipse { Width = 7, Height = 7, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
+            dot = new Ellipse { Width = 6, Height = 6, Margin = new Thickness(0, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
             dot.SetResourceReference(Shape.FillProperty, brushKey);
-            label = Text(text, 12, FontWeights.SemiBold, brushKey);
+            label = Text(text, 12, FontWeights.Normal, "Muted");
             label.TextWrapping = TextWrapping.NoWrap;
             var sp = new StackPanel { Orientation = Orientation.Horizontal };
             sp.Children.Add(dot);
             sp.Children.Add(label);
-            var b = new Border { CornerRadius = new CornerRadius(20), Padding = new Thickness(10, 4, 10, 4), Child = sp, VerticalAlignment = VerticalAlignment.Center };
-            b.SetResourceReference(Border.BackgroundProperty, "Surface2");
-            return b;
+            return new Border { Child = sp, VerticalAlignment = VerticalAlignment.Center };
         }
 
         public static void SetChip(TextBlock label, Ellipse dot, string text, string brushKey)
         {
             label.Text = text;
-            label.SetResourceReference(TextBlock.ForegroundProperty, brushKey);
             dot.SetResourceReference(Shape.FillProperty, brushKey);
         }
 
@@ -79,7 +84,7 @@ namespace DualEarbuds
             var p = new Path { Data = Geometry.Parse(data), Width = size, Height = size, Stretch = Stretch.Uniform, VerticalAlignment = VerticalAlignment.Center };
             if (stroke)
             {
-                p.StrokeThickness = 2;
+                p.StrokeThickness = 1.5;
                 p.StrokeStartLineCap = PenLineCap.Round;
                 p.StrokeEndLineCap = PenLineCap.Round;
                 p.StrokeLineJoin = PenLineJoin.Round;
@@ -92,8 +97,8 @@ namespace DualEarbuds
         // Battery badge: outline icon + percent, colored by level.
         public static StackPanel Battery(out TextBlock label, out Path icon)
         {
-            icon = Icon(Icons.Battery, 18, "Muted", false);
-            label = Text("", 12, FontWeights.SemiBold, "Muted");
+            icon = Icon(Icons.Battery, 16, "Muted", false);
+            label = Mono("", 12, "Muted");
             label.Margin = new Thickness(5, 0, 0, 0);
             label.VerticalAlignment = VerticalAlignment.Center;
             var sp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -108,7 +113,7 @@ namespace DualEarbuds
             panel.Visibility = Visibility.Visible;
             label.Text = percent + "%";
             string key = percent <= 15 ? "Bad" : percent <= 35 ? "Warn" : "Good";
-            label.SetResourceReference(TextBlock.ForegroundProperty, key);
+            label.SetResourceReference(TextBlock.ForegroundProperty, percent <= 15 ? "Bad" : "Muted");
             icon.SetResourceReference(Shape.FillProperty, key);
         }
 
@@ -118,11 +123,10 @@ namespace DualEarbuds
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(64) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(62) });
-            var l = Text(label, 13, FontWeights.Normal, "Muted");
+            var l = Text(label, 12, FontWeights.Normal, "Muted");
             l.VerticalAlignment = VerticalAlignment.Center;
             slider = new Slider { Minimum = min, Maximum = max, Value = value, VerticalAlignment = VerticalAlignment.Center, SmallChange = 5, LargeChange = 25 };
-            valueText = Text(Math.Round(value) + unit, 13, FontWeights.SemiBold, "Text");
-            valueText.FontFamily = Theme.Display;
+            valueText = Mono(Math.Round(value) + unit, 12, "Text");
             valueText.TextAlignment = TextAlignment.Right;
             valueText.VerticalAlignment = VerticalAlignment.Center;
             Grid.SetColumn(slider, 1);
@@ -199,16 +203,17 @@ namespace DualEarbuds
             }
         }
 
-        public Meter() { Height = 6; }
+        public Meter() { Height = 4; }
 
+        // A meter is one of the few places accent is allowed.
         protected override void OnRender(DrawingContext dc)
         {
             double w = ActualWidth, h = ActualHeight;
             var track = TryFindResource("Line") as Brush ?? Brushes.Gray;
             var fill = TryFindResource("Accent") as Brush ?? Brushes.Teal;
-            dc.DrawRoundedRectangle(track, null, new Rect(0, 0, w, h), h / 2, h / 2);
-            double fw = Math.Max(level > 0.01 ? h : 0, w * level);
-            if (fw > 0) dc.DrawRoundedRectangle(fill, null, new Rect(0, 0, fw, h), h / 2, h / 2);
+            dc.DrawRoundedRectangle(track, null, new Rect(0, 0, w, h), 1, 1);
+            double fw = w * level;
+            if (fw > 0.5) dc.DrawRoundedRectangle(fill, null, new Rect(0, 0, fw, h), 1, 1);
         }
     }
 
@@ -229,6 +234,8 @@ namespace DualEarbuds
         public const string Refresh = "M17.65 6.35A7.95 7.95 0 0 0 12 4a8 8 0 1 0 7.73 10h-2.08A6 6 0 1 1 12 6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z";
         public const string Lock = "M18 8h-1V6a5 5 0 0 0-10 0v2H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2zm-6 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zm3.1-9H8.9V6a3.1 3.1 0 0 1 6.2 0v2z";
         public const string Spark = "M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z";
+        public const string Check = "M4 12.5l5 5L20 6.5";
+        public const string Globe = "M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm6.9 6h-2.95a15.6 15.6 0 0 0-1.38-3.56A8.03 8.03 0 0 1 18.9 8zM12 4.04c.83 1.2 1.48 2.53 1.91 3.96h-3.82c.43-1.43 1.08-2.76 1.91-3.96zM4.26 14a8.2 8.2 0 0 1 0-4h3.38a16.5 16.5 0 0 0 0 4zm.84 2h2.95c.32 1.25.78 2.45 1.38 3.56A7.99 7.99 0 0 1 5.1 16zM8.05 8H5.1a7.99 7.99 0 0 1 4.33-3.56A15.6 15.6 0 0 0 8.05 8zM12 19.96c-.83-1.2-1.48-2.53-1.91-3.96h3.82c-.43 1.43-1.08 2.76-1.91 3.96zM14.34 14H9.66a14.7 14.7 0 0 1 0-4h4.68a14.7 14.7 0 0 1 0 4zm.25 5.56c.6-1.11 1.06-2.31 1.38-3.56h2.95a8.03 8.03 0 0 1-4.33 3.56zM16.36 14a16.5 16.5 0 0 0 0-4h3.38a8.2 8.2 0 0 1 0 4z";
         public const string Laptop = "M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v9H4zm2 0v7h12V6zM2 17h20v1a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2z";
         // Logo layers from assets/logo/wpf-geometry.txt: { fill, path } in a 24x24 box, drawn in order.
         public static readonly string[][] Mark =

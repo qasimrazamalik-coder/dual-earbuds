@@ -21,6 +21,9 @@ namespace DualEarbuds
         {
             double rtt = now - c;
             if (rtt < 0 || rtt > 5000 || double.IsNaN(h)) return false;
+            // kept across a rejoin; a host that restarted (its clock began again) shows up as a jump: start over
+            double off = h - (c + now) / 2;
+            if (count > 0 && Math.Abs(off - Offset) > 50 + rtt / 2) { count = 0; pos = 0; }
             rtts[pos] = rtt;
             offs[pos] = h - (c + now) / 2;
             pos = (pos + 1) % Keep;

@@ -95,6 +95,9 @@ namespace DualEarbuds
 
         // Times the device ran dry while playing (network listening counts these; mirroring ignores them).
         public int Underruns { get { return Thread.VolatileRead(ref underruns); } }
+        int seenUnderrunsTest;
+        public void SetPaddingForTest(int frames) { Thread.VolatileWrite(ref padding, frames); }
+        public int NewUnderrunsForTest() { int u = Underruns, d = u - seenUnderrunsTest; seenUnderrunsTest = u; return d; }
 
         public long SourceFrames { get { return Interlocked.Read(ref sourceFrames); } }
         public float TakePeak() { float p = peak; peak = 0; return p; }
@@ -140,15 +143,55 @@ namespace DualEarbuds
             int diff = nt - target;
             target = nt;
             if (!primed) return;
-            if (diff > 0) pendingSilence += diff;
+            if (diff > 0)
+            {
+                int cancel = Math.Min(diff, slewDrop);   // a pending slow drop is simply cancelled first
+                slewDrop -= cancel;
+                pendingSilence += diff - cancel;
+            }
             else
             {
                 int d = -diff;
                 int fromSil = Math.Min(d, pendingSilence);
                 pendingSilence -= fromSil;
-                ring.Discard(d - fromSil);
+                d -= fromSil;
+                // small steps (the common deadline ramping down 5 ms/s) are played 0.5 % faster instead of
+                // cut out, so there is no click; big jumps are cut at once
+                if (d + slewDrop <= rate / 20) slewDrop += d;
+                else { ring.Discard(d + slewDrop); slewDrop = 0; }
             }
         }
+
+        int slewDrop;            // frames still to drop by playing slightly faster
+        float[] slewBuf = new float[0];
+
+        // Reads n output frames from the ring while consuming n + extra input frames (linear interpolation).
+        int ReadSlewed(float[] dst, int at, int n, int extra)
+        {
+            int inN = n + extra;
+            if (slewBuf.Length < inN * 2) slewBuf = new float[inN * 2];
+            int got = ring.Read(slewBuf, 0, inN);
+            if (got < inN)
+            {
+                // not enough queued: play what is there as it is
+                Array.Copy(slewBuf, 0, dst, at * 2, Math.Min(got, n) * 2);
+                return Math.Min(got, n);
+            }
+            double step = n > 1 ? (inN - 1.0) / (n - 1.0) : 1.0;
+            for (int i = 0; i < n; i++)
+            {
+                double x = i * step;
+                int i0 = (int)x;
+                int i1 = Math.Min(inN - 1, i0 + 1);
+                float f = (float)(x - i0);
+                dst[(at + i) * 2] = slewBuf[i0 * 2] + (slewBuf[i1 * 2] - slewBuf[i0 * 2]) * f;
+                dst[(at + i) * 2 + 1] = slewBuf[i0 * 2 + 1] + (slewBuf[i1 * 2 + 1] - slewBuf[i0 * 2 + 1]) * f;
+            }
+            slewDrop -= extra;
+            return n;
+        }
+
+        public int SlewPendingFrames { get { lock (lk) return slewDrop; } }
 
         public void Push(float[] data, int frames)
         {
@@ -175,7 +218,10 @@ namespace DualEarbuds
                 int w = 0;
                 int sil = Math.Min(want, pendingSilence);
                 if (sil > 0) { Array.Clear(dst, 0, sil * 2); pendingSilence -= sil; w = sil; }
-                int r = ring.Read(dst, w, want - w);
+                int r;
+                int extra = slewDrop > 0 ? Math.Min(slewDrop, Math.Max(1, (want - w) / 200)) : 0;
+                if (extra > 0 && ring.Count >= want - w + extra) r = ReadSlewed(dst, w, want - w, extra);
+                else r = ring.Read(dst, w, want - w);
                 if (r > 0)
                 {
                     float g = Gain;
@@ -221,21 +267,48 @@ namespace DualEarbuds
         // For unit tests that drive Fill() without a real device.
         public void MarkRunningForTest() { Running = true; }
 
+        // Frames in the device's own buffer after the last write (part of what is queued before it is heard).
+        public int PaddingFrames { get { return Thread.VolatileRead(ref padding); } }
+        // What WASAPI reports as the stream latency (ms), 0 until the stream is open.
+        public double ReportedLatencyMs { get { return reportedMs; } }
+        public bool EventDriven { get { return eventDriven; } }
+        int padding;
+        volatile float reportedMs;
+        volatile bool eventDriven;
+
+        // The device buffer: 40 ms in shared mode. Event-driven (woken every device period by Windows,
+        // independent of timer resolution or power throttling); falls back to polling if a driver refuses events.
+        const long BufferHns = 400000;
+
         void Run()
         {
             IMMDeviceEnumerator en = null;
             IAudioClient ac = null;
             IAudioRenderClient rc = null;
             IntPtr fmt = IntPtr.Zero;
+            AutoResetEvent wake = null;
+            IntPtr mmcss = Realtime.Enter("Pro Audio");
             try
             {
                 en = Wasapi.NewEnumerator();
                 string rid;
                 ac = Wasapi.OpenClient(en, DeviceId, out rid);
                 fmt = Wasapi.MakeFloatStereo(rate);
-                Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_AUTOCONVERT | Wasapi.FLAG_SRC_QUALITY, 400000, 0, fmt, IntPtr.Zero), "Set up output");
+                wake = new AutoResetEvent(false);
+                int hr = ac.Initialize(0, Wasapi.FLAG_AUTOCONVERT | Wasapi.FLAG_SRC_QUALITY | Wasapi.FLAG_EVENTCALLBACK, BufferHns, 0, fmt, IntPtr.Zero);
+                if (hr >= 0 && ac.SetEventHandle(wake.SafeWaitHandle.DangerousGetHandle()) >= 0) eventDriven = true;
+                else
+                {
+                    // a fresh client: Initialize can only be called once per IAudioClient
+                    Wasapi.Release(ac);
+                    ac = Wasapi.OpenClient(en, DeviceId, out rid);
+                    Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_AUTOCONVERT | Wasapi.FLAG_SRC_QUALITY, BufferHns, 0, fmt, IntPtr.Zero), "Set up output");
+                    eventDriven = false;
+                }
                 uint bufFrames;
                 Wasapi.Check(ac.GetBufferSize(out bufFrames), "Read buffer size");
+                long lat;
+                if (ac.GetStreamLatency(out lat) >= 0 && lat > 0) reportedMs = (float)(lat / 10000.0);
                 Guid iid = Wasapi.IID_Render;
                 object o;
                 Wasapi.Check(ac.GetService(ref iid, out o), "Open renderer");
@@ -247,12 +320,13 @@ namespace DualEarbuds
                 float[] tmp = new float[bufFrames * 2];
                 while (!stopFlag)
                 {
-                    Thread.Sleep(3);
+                    if (eventDriven) wake.WaitOne(20); else Thread.Sleep(3);
                     uint pad;
                     Wasapi.Check(ac.GetCurrentPadding(out pad), "Check output");
                     int avail = (int)bufFrames - (int)pad;
-                    if (avail <= 0) continue;
+                    if (avail <= 0) { Thread.VolatileWrite(ref padding, (int)pad); continue; }
                     int n = Fill(tmp, avail, pad == 0);
+                    Thread.VolatileWrite(ref padding, (int)pad + n);
                     if (n == 0) continue;
                     IntPtr p;
                     Wasapi.Check(rc.GetBuffer((uint)n, out p), "Write output");
@@ -275,6 +349,8 @@ namespace DualEarbuds
                 Wasapi.Release(ac);
                 Wasapi.Release(en);
                 if (fmt != IntPtr.Zero) Marshal.FreeCoTaskMem(fmt);
+                if (wake != null) wake.Close();
+                Realtime.Leave(mmcss);
             }
         }
     }
@@ -341,6 +417,7 @@ namespace DualEarbuds
             IAudioCaptureClient cc = null;
             IntPtr fmtMem = IntPtr.Zero;
             AutoResetEvent wake = null;
+            IntPtr mmcss = Realtime.Enter(kind == CaptureKind.Microphone ? "Audio" : "Pro Audio");
             try
             {
                 AudioFormat f;
@@ -375,7 +452,18 @@ namespace DualEarbuds
                         try
                         {
                             f = Wasapi.ReadFormat(mf);
-                            Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_LOOPBACK, 2000000, 0, mf, IntPtr.Zero), "Set up capture");
+                            // Event-driven loopback (Windows 10+): woken as soon as the engine has 10 ms ready,
+                            // so packets leave on an even 10 ms rhythm. Older drivers that refuse it are polled.
+                            wake = new AutoResetEvent(false);
+                            int hr = ac.Initialize(0, Wasapi.FLAG_LOOPBACK | Wasapi.FLAG_EVENTCALLBACK, 2000000, 0, mf, IntPtr.Zero);
+                            if (hr < 0 || ac.SetEventHandle(wake.SafeWaitHandle.DangerousGetHandle()) < 0)
+                            {
+                                wake.Close();
+                                wake = null;
+                                Wasapi.Release(ac);
+                                ac = Wasapi.OpenClient(en, requestedId, out rid);
+                                Wasapi.Check(ac.Initialize(0, Wasapi.FLAG_LOOPBACK, 2000000, 0, mf, IntPtr.Zero), "Set up capture");
+                            }
                         }
                         finally { Marshal.FreeCoTaskMem(mf); }
                     }
@@ -395,7 +483,8 @@ namespace DualEarbuds
                 byte[] raw = new byte[0];
                 while (!stopFlag)
                 {
-                    if (wake != null) wake.WaitOne(100); else Thread.Sleep(5);
+                    // the event is not signalled while nothing plays; the timeout keeps silence-detection going
+                    if (wake != null) wake.WaitOne(kind == CaptureKind.Loopback ? 12 : 100); else Thread.Sleep(5);
                     uint packet;
                     Wasapi.Check(cc.GetNextPacketSize(out packet), "Read sound");
                     while (packet > 0 && !stopFlag)
@@ -443,6 +532,7 @@ namespace DualEarbuds
                 Wasapi.Release(en);
                 if (fmtMem != IntPtr.Zero) Marshal.FreeCoTaskMem(fmtMem);
                 if (wake != null) wake.Close();
+                Realtime.Leave(mmcss);
             }
         }
     }
