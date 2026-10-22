@@ -164,7 +164,8 @@ All optional; a listener or host that does not know them ignores them.
 
 - Every ear — the host's own outputs included — hears the sample captured at host time `t` at `t + P`.
   `P` (playout) is chosen by the host, not fixed at 120 ms.
-- Listeners report what they need in `status`: `"needMs":<jitterP99 + outputLatency + 10>`
+- Listeners report what they need in `status`: `"needMs":<jitterP99 + outputLatency + 10>` and how far they are
+  from the deadline: `"syncErrMs":<int, + = late>` (drives the host's sync scope)
   (jitter p99 over the last 30 s of packet arrivals; outputLatency calibrated or from the platform).
 - The host sets `P = clamp(max(needMs of listeners in sync mode, host local need), 40, 400)` where host local need =
   the slowest *ticked* local output's latency (+ the Windows mixer buffer). It announces
