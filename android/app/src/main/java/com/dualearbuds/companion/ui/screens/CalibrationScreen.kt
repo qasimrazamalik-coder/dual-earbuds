@@ -1,16 +1,17 @@
 package com.dualearbuds.companion.ui.screens
 
+import com.dualearbuds.companion.ui.components.QuietButton
+import com.dualearbuds.companion.ui.components.PrimaryButton
+import com.dualearbuds.companion.ui.theme.Mono
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -82,38 +83,37 @@ fun CalibrationScreen(onBack: () -> Unit) {
             )
             StepLine(1, "Sit somewhere quiet and put the volume at a normal level.")
             StepLine(2, "Take one earbud out and hold it right against the phone's microphone (bottom edge).")
-            StepLine(3, "Tap Start. You'll hear 8 clicks — about 6 seconds.")
+            StepLine(3, "Tap Start. You'll hear 8 clicks, about 6 seconds.")
             if (!earbuds.connected) {
-                Banner(text = "No Bluetooth earbuds connected — this will measure the phone's own speaker.", color = AppTheme.colors.warning)
+                Banner(text = "No Bluetooth earbuds connected, so this measures the phone's own speaker.", color = AppTheme.colors.warning)
             }
             Text(
-                if (saved != null) String.format(Locale.US, "Saved: %.0f ms", saved) else "Not calibrated yet",
-                style = MaterialTheme.typography.titleSmall,
-                color = if (saved != null) AppTheme.colors.accentText else AppTheme.colors.textDim
+                if (saved != null) String.format(Locale.US, "Saved %.0f ms", saved) else "Not calibrated yet",
+                style = Mono.large,
+                color = if (saved != null) AppTheme.colors.text else AppTheme.colors.textDim
             )
             when (val s = state) {
                 CalState.Ready -> Unit
                 CalState.Running -> {
                     Text("Listening for the clicks…", style = MaterialTheme.typography.bodyMedium)
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                    LinearProgressIndicator(Modifier.fillMaxWidth(), color = AppTheme.colors.accent, trackColor = AppTheme.colors.line)
                 }
                 is CalState.Done -> when (val r = s.result) {
                     is CalibrationResult.Ok -> Banner(
-                        text = String.format(Locale.US, "Done: %.0f ms (heard %d of %d clicks, spread %.0f ms). Saved for %s.", r.latencyMs, r.found, r.total, r.spreadMs, device),
-                        color = AppTheme.colors.accentText
+                        text = String.format(Locale.US, "%.0f ms, heard %d of %d clicks, spread %.0f ms. Saved for %s.", r.latencyMs, r.found, r.total, r.spreadMs, device),
+                        color = AppTheme.colors.good
                     )
                     is CalibrationResult.Failed -> Banner(text = r.reason, color = AppTheme.colors.warning)
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(
-                    onClick = {
-                        if (Permissions.has(context, Manifest.permission.RECORD_AUDIO)) runNow() else askMic = true
-                    },
+                PrimaryButton(
+                    if (state is CalState.Done) "Try again" else "Start",
+                    onClick = { if (Permissions.has(context, Manifest.permission.RECORD_AUDIO)) runNow() else askMic = true },
                     enabled = state != CalState.Running
-                ) { Text(if (state is CalState.Done) "Try again" else "Start") }
+                )
                 if (saved != null) {
-                    TextButton(onClick = { SoundSettings.setLatency(device, null) }, enabled = state != CalState.Running) { Text("Forget") }
+                    QuietButton("Forget", onClick = { SoundSettings.setLatency(device, null) }, enabled = state != CalState.Running, color = AppTheme.colors.muted)
                 }
             }
         }
@@ -122,7 +122,7 @@ fun CalibrationScreen(onBack: () -> Unit) {
     if (askMic) {
         ReasonDialog(
             title = "Use the microphone?",
-            reason = "Only to hear the 8 clicks for a few seconds — nothing is recorded, kept or sent.",
+            reason = "Only to hear the 8 clicks for a few seconds. Nothing is recorded, kept or sent.",
             confirmLabel = "Allow",
             onConfirm = {
                 askMic = false

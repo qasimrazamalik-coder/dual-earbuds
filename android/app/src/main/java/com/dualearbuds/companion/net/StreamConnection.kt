@@ -61,6 +61,12 @@ class StreamConnection(
 
         /** Source changed (in `state`, if the host sends it). */
         fun onSource(source: String, app: String) = Unit
+
+        /** v3.2 `playout`: the host's common deadline P changed (the host ramps it; we just follow). */
+        fun onPlayout(ms: Int) = Unit
+
+        /** v3.2 `hello.udp` + `hello.token`: the host offers UDP audio on [port] for this session. */
+        fun onUdpOffer(port: Int, token: String) = Unit
     }
 
     private val active = AtomicBoolean(true)
@@ -74,6 +80,11 @@ class StreamConnection(
 
     val isOpen: Boolean
         get() = active.get() && opened.get()
+
+    /** Something else proved the host is alive (a UDP datagram): resets the silence watchdog. */
+    fun touch() {
+        if (opened.get()) lastMessageAt = SystemClock.elapsedRealtime()
+    }
 
     /** Sends a text frame. Thread-safe. Returns false when not connected. */
     fun send(text: String): Boolean {
@@ -143,7 +154,8 @@ class StreamConnection(
             ws.cancel()
         }
 
-        // Watchdog: the host pings every 2 s, so 8 s of silence means the link is dead (e.g. Wi-Fi dropped).
+        // Watchdog: the host pings every 2 s (and UDP datagrams call touch()), so 5 s of silence means the link is
+        // dead (e.g. Wi-Fi dropped); the service then rejoins at once.
         val watchdog = launch {
             while (isActive) {
                 delay(1000)
@@ -152,12 +164,12 @@ class StreamConnection(
                     break
                 }
                 val last = lastMessageAt
-                if (opened.get() && last > 0 && SystemClock.elapsedRealtime() - last > 8000) {
+                if (opened.get() && last > 0 && SystemClock.elapsedRealtime() - last > SILENCE_LIMIT_MS) {
                     try {
                         ws.cancel()
                     } catch (_: Throwable) {
                     }
-                    done.complete(WsEnd(true, 0, "no data from the host for 8 s"))
+                    done.complete(WsEnd(true, 0, "no data from the host for 5 s"))
                     break
                 }
             }
@@ -206,6 +218,9 @@ class StreamConnection(
                     o.optString("source", "all").ifBlank { "all" },
                     o.optString("sourceApp", "").ifBlank { o.optString("app", "") }
                 )
+                val udpPort = o.optInt("udp", 0)
+                val token = o.optString("token", "")
+                if (udpPort in 1..65535 && token.isNotBlank()) callbacks.onUdpOffer(udpPort, token)
             }
             "state" -> {
                 callbacks.onMirroring(o.optBoolean("mirroring", true), o.optInt("rate", 0))
@@ -222,6 +237,10 @@ class StreamConnection(
                 val seq = o.optLong("seq", -1L)
                 val h = o.optDouble("h", Double.NaN)
                 if (seq >= 0 && !h.isNaN()) callbacks.onClock(seq and 0xFFFFFFFFL, h)
+            }
+            "playout" -> {
+                val ms = o.optDouble("ms", Double.NaN)
+                if (!ms.isNaN()) callbacks.onPlayout(ms.toInt().coerceIn(20, 2_000))
             }
             "talk" -> callbacks.onTalk(o.optBoolean("on", false))
             "party" -> callbacks.onParty(o.optBoolean("on", false))
@@ -252,6 +271,10 @@ class StreamConnection(
         bb.position(8)
         bb.asShortBuffer().get(samples, 0, sampleCount)
         callbacks.onPacket(rate, seq, samples)
+    }
+
+    private companion object {
+        const val SILENCE_LIMIT_MS = 5_000L
     }
 
     private inline fun safe(block: () -> Unit) {

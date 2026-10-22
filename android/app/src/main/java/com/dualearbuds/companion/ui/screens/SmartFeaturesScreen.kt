@@ -1,11 +1,11 @@
 package com.dualearbuds.companion.ui.screens
 
+import com.dualearbuds.companion.ui.components.SliderRow
+import com.dualearbuds.companion.ui.components.QuietButton
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -33,11 +33,7 @@ fun SmartFeaturesScreen(onBack: () -> Unit, onOpenHearing: () -> Unit) {
     val player by PlaybackController.state.collectAsStateWithLifecycle()
 
     ScreenScaffold(title = "Smart features", onBack = onBack) {
-        Text(
-            "All of this runs on your phone — nothing is sent anywhere. Turn anything off at any time; playback keeps going.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = AppTheme.colors.textDim
-        )
+        Explain("Runs on this phone; nothing is sent anywhere. Each switch applies at once, playback keeps going.")
 
         SectionCard(title = "Smart EQ") {
             Explain("Picks the EQ from what is playing: by the app the host shares, by listening to the sound, or both.")
@@ -54,7 +50,7 @@ fun SmartFeaturesScreen(onBack: () -> Unit, onOpenHearing: () -> Unit) {
                         color = AppTheme.colors.warning,
                         modifier = Modifier.weight(1f)
                     )
-                    TextButton(onClick = { SoundSettings.setEqManual(null) }) { Text("Use Auto") }
+                    QuietButton("Use Auto", onClick = { SoundSettings.setEqManual(null) })
                 }
             } else if (player.running && smartEq != SmartEqMode.OFF) {
                 Explain("Now: ${player.eqInUse.label}" + (player.soundClass?.let { " · hears ${it.name.lowercase()}" } ?: ""))
@@ -84,11 +80,9 @@ fun SmartFeaturesScreen(onBack: () -> Unit, onOpenHearing: () -> Unit) {
                 onSelect = { PlaybackController.setBufferMode(it) }
             )
             if (buffer.mode == BufferMode.MANUAL) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Buffer", style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                    Text("${buffer.manualMs} ms", style = MaterialTheme.typography.titleSmall, color = AppTheme.colors.accentText)
-                }
-                Slider(
+                SliderRow(
+                    label = "Buffer",
+                    valueText = "${buffer.manualMs} ms",
                     value = buffer.manualMs.toFloat(),
                     onValueChange = { PlaybackController.setManualBufferMs((it / 10f).roundToInt() * 10) },
                     valueRange = Prefs.MIN_MANUAL_BUFFER_MS.toFloat()..Prefs.MAX_MANUAL_BUFFER_MS.toFloat()
@@ -99,7 +93,7 @@ fun SmartFeaturesScreen(onBack: () -> Unit, onOpenHearing: () -> Unit) {
 
         SectionCard(title = "Hearing profile") {
             Explain("A short tone test per ear that tunes the sound to you, saved per pair of earbuds. Not a medical hearing test.")
-            TextButton(onClick = onOpenHearing) { Text("Open hearing profiles") }
+            QuietButton("Open hearing profiles", onClick = onOpenHearing)
         }
     }
 }

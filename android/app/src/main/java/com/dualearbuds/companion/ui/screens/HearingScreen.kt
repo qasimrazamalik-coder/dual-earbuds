@@ -1,19 +1,19 @@
 package com.dualearbuds.companion.ui.screens
 
+import com.dualearbuds.companion.ui.components.QuietButton
+import com.dualearbuds.companion.ui.components.SecondaryButton
+import com.dualearbuds.companion.ui.components.PrimaryButton
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -75,8 +75,8 @@ fun HearingScreen(onBack: () -> Unit) {
         profiles.forEach { p ->
             SectionCard(title = p.name) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = { testing = p }) { Text("Retest") }
-                    TextButton(onClick = { SoundSettings.deleteProfile(p.id) }) { Text("Delete") }
+                    SecondaryButton("Retest", onClick = { testing = p })
+                    QuietButton("Delete", onClick = { SoundSettings.deleteProfile(p.id) }, color = AppTheme.colors.muted)
                 }
             }
         }
@@ -90,12 +90,10 @@ fun HearingScreen(onBack: () -> Unit) {
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
-            Button(
-                onClick = {
-                    testing = HearingProfile(UUID.randomUUID().toString(), newName.trim().ifEmpty { "Me" }, List(7) { 0.0 }, List(7) { 0.0 }, 0)
-                    newName = ""
-                }
-            ) { Text("Start test") }
+            PrimaryButton("Start test", onClick = {
+                testing = HearingProfile(UUID.randomUUID().toString(), newName.trim().ifEmpty { "Me" }, List(7) { 0.0 }, List(7) { 0.0 }, 0)
+                newName = ""
+            })
         }
     }
 }
@@ -142,7 +140,7 @@ private fun TestCard(name: String, onDone: (HearingProfile) -> Unit, onCancel: (
         val c = session.current
         if (tick < 0 || c == null) {
             Text("Finished.", style = MaterialTheme.typography.titleMedium)
-            Button(onClick = { session.result("", name, System.currentTimeMillis())?.let(onDone) }) { Text("Save profile") }
+            PrimaryButton("Save profile", onClick = { session.result("", name, System.currentTimeMillis())?.let(onDone) })
             return@SectionCard
         }
         Text("Tone ${session.step + 1} of ${session.totalSteps}", style = MaterialTheme.typography.labelMedium, color = AppTheme.colors.textDim)
@@ -152,12 +150,12 @@ private fun TestCard(name: String, onDone: (HearingProfile) -> Unit, onCancel: (
             Text("Did you hear the tone?", style = MaterialTheme.typography.bodyMedium)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = { session.answer(true); tick++; playCurrent() }, enabled = !playing) { Text("I hear it") }
-            OutlinedButton(onClick = { session.answer(false); tick++; playCurrent() }, enabled = !playing) { Text("Can't hear") }
+            PrimaryButton("I hear it", onClick = { session.answer(true); tick++; playCurrent() }, enabled = !playing)
+            SecondaryButton("Can't hear", onClick = { session.answer(false); tick++; playCurrent() }, enabled = !playing)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { playCurrent() }, enabled = !playing) { Text("Play again") }
-            TextButton(onClick = onCancel) { Text("Cancel") }
+            QuietButton("Play again", onClick = { playCurrent() }, enabled = !playing)
+            QuietButton("Cancel", onClick = onCancel, color = AppTheme.colors.muted)
         }
     }
 }

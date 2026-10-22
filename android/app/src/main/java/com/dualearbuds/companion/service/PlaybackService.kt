@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
@@ -14,6 +16,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -27,6 +31,7 @@ import androidx.media.AudioManagerCompat
 import com.dualearbuds.companion.MainActivity
 import com.dualearbuds.companion.R
 import com.dualearbuds.companion.audio.AudioEngine
+import com.dualearbuds.companion.audio.sync.DeadlineNeed
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.bt.EarbudsState
 import com.dualearbuds.companion.data.AppSettings
@@ -49,8 +54,14 @@ import com.dualearbuds.companion.net.LinkParser
 import com.dualearbuds.companion.net.LinkTarget
 import com.dualearbuds.companion.net.Net
 import com.dualearbuds.companion.net.ParseResult
+import com.dualearbuds.companion.net.SeqGate
 import com.dualearbuds.companion.net.StreamConnection
+import com.dualearbuds.companion.net.UdpAudioReceiver
+import com.dualearbuds.companion.net.UdpPolicy
+import com.dualearbuds.companion.net.UdpSignal
+import com.dualearbuds.companion.net.UdpWire
 import com.dualearbuds.companion.net.UserError
+import com.dualearbuds.companion.power.PowerState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -92,6 +103,8 @@ class PlaybackService : Service() {
         private const val VOLUME_STEP = 10
         private const val MAX_BACKOFF_MS = 10_000L
         private const val QUICK_SYNCS = 5
+        private const val QUICK_REJOINS = 6
+        private const val QUICK_REJOIN_GAP_MS = 300L
     }
 
     private val scope = CoroutineScope(
@@ -114,6 +127,10 @@ class PlaybackService : Service() {
 
     @Volatile
     private var focusMuted = false
+
+    /** When the transient focus loss began (elapsedRealtime), 0 when not muted for focus. */
+    @Volatile
+    private var focusMutedAt = 0L
 
     @Volatile
     private var userMuted = false
@@ -145,6 +162,17 @@ class PlaybackService : Service() {
     private var sourceApp = ""
 
     private var syncJob: Job? = null
+    private var powerReceiverRegistered = false
+
+    /** Battery saver switched: note it (diagnostics, Now Playing) and make sure the locks are still held. */
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val facts = PowerState.read(applicationContext)
+            AppLog.i("Power: ${facts.summary()}")
+            PlaybackController.update { it.copy(powerSave = facts.powerSave, backgroundRestricted = facts.backgroundRestricted) }
+            if (sessionJob?.isActive == true) acquireLocks()
+        }
+    }
 
     private val packets = AtomicLong()
     private val lost = AtomicLong()
@@ -152,14 +180,41 @@ class PlaybackService : Service() {
     @Volatile
     private var lastSeq = -1L
 
+    /** v3.2 UDP audio: receiver for the current session, when/if to fall back, and the dedupe gate. */
+    @Volatile
+    private var udp: UdpAudioReceiver? = null
+    private val udpPolicy = UdpPolicy()
+    private val gate = SeqGate()
+    private var udpJob: Job? = null
+
+    /** needMs the host last heard from us (v3.2), null before the first report on this link. */
+    @Volatile
+    private var sentNeedMs: Int? = null
+
     // ---------------------------------------------------------------- lifecycle
 
     override fun onCreate() {
         super.onCreate()
+        engine.framesPerBurst = try {
+            (getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                .getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 0
+        } catch (_: Throwable) {
+            0
+        }
         engine.gain = PlaybackController.volume.value / 100f
         applyBufferSettings(PlaybackController.buffer.value)
         createMediaSession()
         startObservers()
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                powerReceiver,
+                IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            powerReceiverRegistered = true
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -206,6 +261,14 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         sessionJob?.cancel()
         sessionJob = null
+        stopUdp()
+        if (powerReceiverRegistered) {
+            try {
+                unregisterReceiver(powerReceiver)
+            } catch (_: Throwable) {
+            }
+            powerReceiverRegistered = false
+        }
         connection?.close()
         connection = null
         engine.stop()
@@ -251,6 +314,8 @@ class PlaybackService : Service() {
         requestFocus()
         mediaSession?.isActive = true
         updateMediaSession()
+        val power = PowerState.read(applicationContext)
+        AppLog.i("Power: ${power.summary()}")
 
         applyBufferSettings(PlaybackController.buffer.value)
         engine.gain = PlaybackController.volume.value / 100f
@@ -266,7 +331,9 @@ class PlaybackService : Service() {
                 party = false,
                 packets = 0, lost = 0, dropped = 0, underruns = 0, userMuted = false,
                 remote = false, talking = false, source = "all", sourceApp = "", hostEq = null,
-                synced = false, concealed = 0, pinRequired = false
+                synced = false, concealed = 0, pinRequired = false,
+                powerSave = power.powerSave, backgroundRestricted = power.backgroundRestricted,
+                transport = "", needMs = null
             )
         }
         sessionJob = scope.launch {
@@ -293,71 +360,92 @@ class PlaybackService : Service() {
     private suspend fun runSession(target: LinkTarget) {
         var backoff = 1000L
         var fatal: UserError? = null
+        // After a link that was up drops, rejoin the same host straight away (no /info, short connect timeout),
+        // keeping the queued sound and the clock sync, so a Wi-Fi blip costs well under 2 s.
+        var quickLeft = 0
+        var quick = false
         while (true) {
-            PlaybackController.update {
-                it.copy(
-                    status = if (it.status == PlayerStatus.RECONNECTING) PlayerStatus.RECONNECTING else PlayerStatus.CONNECTING,
-                    message = "Looking for ${target.display}…"
-                )
-            }
-            val info = withContext(Dispatchers.IO) { InfoClient.fetch(Net.infoHttp, target) }
-            if (info is InfoResult.Ok) {
-                pcName = info.info.pc
-                mirroring = info.info.rate > 0
-                hostKind = info.info.host
-                party = info.info.party
-                pinRequired = info.info.pin
-                sourceApp = if (info.info.source == "app") info.info.app else ""
-                val i = info.info
+            if (!quick) {
                 PlaybackController.update {
                     it.copy(
-                        pcName = pcName, hostKind = hostKind, party = party, error = null,
-                        hostVersion = i.version, protocol = i.protocol, pinRequired = i.pin, remote = i.remote,
-                        source = i.source, sourceApp = sourceApp
+                        status = if (it.status == PlayerStatus.RECONNECTING) PlayerStatus.RECONNECTING else PlayerStatus.CONNECTING,
+                        message = "Looking for ${target.display}…"
                     )
                 }
-                AppSettings.rememberHost(target.withoutPin(), pcName, hostKind)
-                AppLog.i("Host ${target.display}: ${hostKind.label} v${i.version} protocol ${i.protocol} pin=${i.pin} remote=${i.remote}")
-                if (i.pin && target.pin.isNullOrEmpty()) {
-                    fatal = Errors.pinNeeded()
-                    break
+                val info = withContext(Dispatchers.IO) { InfoClient.fetch(Net.infoHttp, target) }
+                if (info is InfoResult.Ok) {
+                    pcName = info.info.pc
+                    mirroring = info.info.rate > 0
+                    hostKind = info.info.host
+                    party = info.info.party
+                    pinRequired = info.info.pin
+                    sourceApp = if (info.info.source == "app") info.info.app else ""
+                    val i = info.info
+                    PlaybackController.update {
+                        it.copy(
+                            pcName = pcName, hostKind = hostKind, party = party, error = null,
+                            hostVersion = i.version, protocol = i.protocol, pinRequired = i.pin, remote = i.remote,
+                            source = i.source, sourceApp = sourceApp
+                        )
+                    }
+                    AppSettings.rememberHost(target.withoutPin(), pcName, hostKind)
+                    AppLog.i("Host ${target.display}: ${hostKind.label} v${i.version} protocol ${i.protocol} pin=${i.pin} remote=${i.remote}")
+                    if (i.pin && target.pin.isNullOrEmpty()) {
+                        fatal = Errors.pinNeeded()
+                        break
+                    }
+                } else {
+                    val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
+                    if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
+                        fatal = err
+                        break
+                    }
+                    waitAndRetry(backoff, err)
+                    backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
+                    continue
                 }
-            } else {
-                val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
-                if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
-                    fatal = err
-                    break
-                }
-                waitAndRetry(backoff, err)
-                backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
-                continue
             }
 
-            val conn = StreamConnection(Net.http, target, Build.MODEL ?: "Android", connectionCallbacks)
+            val conn = StreamConnection(if (quick) Net.quickHttp else Net.http, target, Build.MODEL ?: "Android", connectionCallbacks)
             connection = conn
-            engine.resetClock()
+            if (quick) engine.onReconnect() else engine.resetClock()
             PlaybackController.sender = { text -> conn.send(text) }
             val end = conn.runUntilClosed()
             syncJob?.cancel()
+            stopUdp()
             if (connection === conn) {
                 connection = null
                 PlaybackController.sender = null
             }
-            engine.flush()
-            AppLog.i("Link ended: opened=${end.opened} http=${end.httpCode} ${end.reason}")
+            AppLog.i("Link ended: opened=${end.opened} http=${end.httpCode} quick=$quick ${end.reason}")
 
             val kicked = kickReason
             if (kicked != null) {
                 // Protocol v3: never auto-reconnect after a kick.
+                engine.flush()
                 fatal = Errors.kicked(kicked)
                 break
             }
             if (end.httpCode == 403) {
                 // /info accepted the key, so with a room PIN a 403 means the PIN is wrong. Never retried.
+                engine.flush()
                 fatal = if (pinRequired) Errors.wrongPin() else Errors.wrongKey()
                 break
             }
-            if (end.opened) backoff = 1000L
+            if (end.opened) {
+                backoff = 1000L
+                quickLeft = QUICK_REJOINS
+            }
+            if (end.httpCode == 0 && quickLeft > 0) {
+                quickLeft--
+                val first = !quick || end.opened
+                quick = true
+                PlaybackController.update { it.copy(status = PlayerStatus.RECONNECTING, message = "Reconnecting…") }
+                if (!first) delay(QUICK_REJOIN_GAP_MS)
+                continue
+            }
+            quick = false
+            engine.flush()
             val err = when (end.httpCode) {
                 503 -> Errors.serverFull()
                 0 -> if (end.opened) {
@@ -407,6 +495,8 @@ class PlaybackService : Service() {
     private val connectionCallbacks = object : StreamConnection.Callbacks {
         override fun onOpened() {
             lastSeq = -1L
+            sentNeedMs = null
+            gate.reset()
             engine.resetCounters() // `underruns` counts since connect
             PlaybackController.update {
                 it.copy(
@@ -447,7 +537,13 @@ class PlaybackService : Service() {
         override fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) {
             engine.setPlayoutMs(playoutMs.toDouble())
             if (source == "app" && app.isNotBlank()) sourceApp = app else if (source == "all") sourceApp = ""
-            PlaybackController.update { it.copy(remote = remote, source = source, sourceApp = sourceApp) }
+            PlaybackController.update { it.copy(remote = remote, source = source, sourceApp = sourceApp, playoutMs = playoutMs) }
+        }
+
+        override fun onPlayout(ms: Int) {
+            // v3.2: the host already ramps P (up at once, down ≤ 5 ms/s); the clock target follows it directly.
+            engine.setPlayoutMs(ms.toDouble())
+            PlaybackController.update { it.copy(playoutMs = ms) }
         }
 
         override fun onSource(source: String, app: String) {
@@ -474,8 +570,15 @@ class PlaybackService : Service() {
             connection?.close()
         }
 
-        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) {
-            if (rate !in 8000..192000) return
+        override fun onUdpOffer(port: Int, token: String) = startUdp(port, token)
+
+        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) = deliver(rate, seq, samples)
+    }
+
+    /** One audio packet from either transport: deduped and kept in order by [gate], then counted and played. */
+    private fun deliver(rate: Int, seq: Long, samples: ShortArray) {
+        if (rate !in 8000..192000) return
+        gate.offer(seq) {
             val prev = lastSeq
             if (prev >= 0) {
                 val expected = (prev + 1) and 0xFFFFFFFFL
@@ -489,6 +592,74 @@ class PlaybackService : Service() {
             mirroring = true
             engine.push(rate, seq, samples)
         }
+    }
+
+    private val udpListener = object : UdpAudioReceiver.Listener {
+        override fun onDatagram(nowMs: Long) {
+            synchronized(udpPolicy) { udpPolicy.onDatagram(SystemClock.elapsedRealtime()) }
+            connection?.touch()
+        }
+
+        override fun onBlock(block: UdpWire.Block) = deliver(block.rate, block.seq, block.samples)
+
+        override fun onError(reason: String) {
+            AppLog.w("UDP unusable: $reason")
+        }
+    }
+
+    /** v3.2: hello offered UDP. Keepalives start at once; no datagram within 2 s → WebSocket audio. */
+    private fun startUdp(port: Int, tokenText: String) {
+        val token = UdpWire.parseToken(tokenText)
+        val target = currentTarget
+        if (token == null || target == null) {
+            AppLog.w("UDP offer ignored (token unreadable)")
+            return
+        }
+        udp?.close()
+        val rx = UdpAudioReceiver(
+            host = target.host,
+            port = port,
+            token = token,
+            listener = udpListener,
+            threadSetup = {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+                } catch (_: Throwable) {
+                }
+            }
+        )
+        udp = rx
+        synchronized(udpPolicy) { udpPolicy.onHello(SystemClock.elapsedRealtime()) }
+        rx.start()
+        AppLog.i("UDP audio offered on port $port")
+        udpJob?.cancel()
+        udpJob = scope.launch {
+            while (isActive) {
+                delay(250)
+                val conn = connection ?: break
+                if (!conn.isOpen) break
+                val signal = synchronized(udpPolicy) { udpPolicy.tick(SystemClock.elapsedRealtime(), mirroring) }
+                when (signal) {
+                    UdpSignal.SEND_OK_FALSE -> {
+                        conn.send("{\"type\":\"udp\",\"ok\":false}")
+                        AppLog.i("UDP: nothing received, audio over the WebSocket")
+                    }
+                    UdpSignal.SEND_OK_TRUE -> {
+                        conn.send("{\"type\":\"udp\",\"ok\":true}")
+                        AppLog.i("UDP: trying again")
+                    }
+                    UdpSignal.NONE -> Unit
+                }
+            }
+        }
+    }
+
+    private fun stopUdp() {
+        udpJob?.cancel()
+        udpJob = null
+        udp?.close()
+        udp = null
+        synchronized(udpPolicy) { udpPolicy.reset() }
     }
 
     /** v3.1 clock sync: 5 quick requests after connect, then one every 2 s. */
@@ -525,7 +696,8 @@ class PlaybackService : Service() {
         val classify = smart == SmartEqMode.BY_SOUND || smart == SmartEqMode.BOTH
         engine.setSound(preset, left, right, SoundSettings.dialogue.value, classify)
         val latency = SoundSettings.latencyFor(output)
-        engine.outputLatencyMs = latency ?: 0.0
+        engine.calibratedLatencyMs = latency
+        engine.assumeBluetooth = earbuds.connected
         PlaybackController.update { if (it.eqInUse != preset || it.outputLatencyMs != latency) it.copy(eqInUse = preset, outputLatencyMs = latency) else it }
     }
 
@@ -550,6 +722,24 @@ class PlaybackService : Service() {
                 EarbudsMonitor.state.map { it.connected to it.name }.distinctUntilChanged(),
                 PlaybackController.state.map { Triple(it.hostEq, it.sourceApp, it.soundClass) }.distinctUntilChanged()
             ) { a, b, c, d -> listOf(a, b, c, d) }.collect { applySound() }
+        }
+
+        // An app that took transient focus and never gave it back must not mute us forever: after 20 s, and only
+        // when no call is going on, take focus back and play again.
+        scope.launch {
+            while (isActive) {
+                delay(5_000)
+                val since = focusMutedAt
+                if (!focusMuted || since == 0L || SystemClock.elapsedRealtime() - since < 20_000) continue
+                val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: continue
+                val inCall = am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION ||
+                    am.mode == AudioManager.MODE_RINGTONE
+                if (!inCall && sessionJob?.isActive == true) {
+                    AppLog.i("Audio focus not returned after 20 s: playing again")
+                    withContext(Dispatchers.Main) { requestFocus() }
+                    focusMutedAt = 0L
+                }
+            }
         }
 
         // Live level for the meter: ~12 updates per second, only while a session runs.
@@ -595,9 +785,21 @@ class PlaybackService : Service() {
                         syncRttMs = s.rttMs,
                         concealed = s.concealed,
                         jitterP99Ms = s.jitterP99Ms,
-                        soundClass = s.soundClass
+                        soundClass = s.soundClass,
+                        needMs = s.needMs,
+                        usedLatencyMs = s.outputLatency?.ms,
+                        latencySource = s.outputLatency?.source,
+                        playoutMs = s.playoutMs.toInt(),
+                        transport = when {
+                            !open -> ""
+                            synchronized(udpPolicy) { udpPolicy.usingUdp } -> "UDP"
+                            else -> "WS"
+                        }
                     )
                 }
+                // v3.2: tell the host as soon as what we need changes noticeably (it raises P at once).
+                val need = s.needMs
+                if (open && need != null && DeadlineNeed.worthReporting(sentNeedMs, need)) sendStatus()
             }
         }
 
@@ -660,7 +862,10 @@ class PlaybackService : Service() {
                 .put("bufferMs", engineStats.targetMs)
                 .put("underruns", engineStats.underruns)
                 .put("playing", st.status == PlayerStatus.PLAYING && !userMuted)
-            conn.send(json.toString())
+            val need = engineStats.needMs
+            if (need != null) json.put("needMs", need)
+            if (engineStats.synced) json.put("syncErrMs", Math.round(engineStats.syncErrorMs).toInt())
+            if (conn.send(json.toString()) && need != null) sentNeedMs = need
         } catch (_: Throwable) {
         }
     }
@@ -672,6 +877,7 @@ class PlaybackService : Service() {
         if (forget) Prefs.wantPlaying = false
         PlaybackController.sender = null
         syncJob?.cancel()
+        stopUdp()
         sessionJob?.cancel()
         sessionJob = null
         connection?.close()
@@ -901,12 +1107,15 @@ class PlaybackService : Service() {
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                // Phone call / navigation prompt: go quiet until it's over.
+                // Phone call / voice prompt: go quiet until it's over. The link and the buffer stay up, so the
+                // sound is back the moment focus returns.
                 focusMuted = true
+                focusMutedAt = SystemClock.elapsedRealtime()
                 applyMute()
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 focusMuted = false
+                focusMutedAt = 0L
                 applyMute()
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
@@ -947,6 +1156,7 @@ class PlaybackService : Service() {
         }
         focusRequest = null
         focusMuted = false
+        focusMutedAt = 0L
     }
 
     // ---------------------------------------------------------------- locks

@@ -18,6 +18,13 @@ object Net {
             .build()
     }
 
+    /** Quick rejoin after a Wi-Fi blip: same host, so fail fast and try again rather than wait 4 s. */
+    val quickHttp: OkHttpClient by lazy {
+        http.newBuilder()
+            .connectTimeout(1500, TimeUnit.MILLISECONDS)
+            .build()
+    }
+
     /** Short timeouts for the one-shot GET /info check. Shares the connection pool with [http]. */
     val infoHttp: OkHttpClient by lazy {
         http.newBuilder()

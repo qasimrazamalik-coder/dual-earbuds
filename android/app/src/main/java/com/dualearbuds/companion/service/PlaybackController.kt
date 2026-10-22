@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.dualearbuds.companion.audio.BufferMode
+import com.dualearbuds.companion.audio.sync.LatencySource
 import com.dualearbuds.companion.data.Prefs
 import com.dualearbuds.companion.dsp.EqPreset
 import com.dualearbuds.companion.dsp.SoundClass
@@ -56,7 +57,18 @@ data class PlayerState(
     val concealed: Long = 0,
     val jitterP99Ms: Double = Double.NaN,
     val soundClass: SoundClass? = null,
-    val outputLatencyMs: Double? = null
+    /** Calibrated latency of the current earbuds, null when not calibrated. */
+    val outputLatencyMs: Double? = null,
+    /** v3.2 common deadline: the host's playout P (ms), what we report we need, and the latency behind it. */
+    val playoutMs: Int = 0,
+    val needMs: Int? = null,
+    val usedLatencyMs: Double? = null,
+    val latencySource: LatencySource? = null,
+    /** v3.2: how audio arrives right now: "UDP", "WS", or "" while not connected. */
+    val transport: String = "",
+    /** Battery saver is on / this app's background work is restricted (read when playback starts and on change). */
+    val powerSave: Boolean = false,
+    val backgroundRestricted: Boolean = false
 ) {
     /** True while the service is (trying to be) playing — i.e. between Start and Stop. */
     val running: Boolean

@@ -1,14 +1,21 @@
 package com.dualearbuds.companion.ui
 
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.dualearbuds.companion.bt.EarbudsMonitor
+import com.dualearbuds.companion.data.SoundSettings
+import kotlin.math.roundToInt
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.dualearbuds.companion.ui.screens.AboutScreen
+import com.dualearbuds.companion.ui.screens.BestSoundScreen
 import com.dualearbuds.companion.ui.screens.CalibrationScreen
 import com.dualearbuds.companion.ui.screens.GuideScreen
 import com.dualearbuds.companion.ui.screens.HearingScreen
 import com.dualearbuds.companion.ui.screens.SettingsScreen
+import com.dualearbuds.companion.ui.screens.SetupCheckScreen
 import com.dualearbuds.companion.ui.screens.SmartFeaturesScreen
 import com.dualearbuds.companion.ui.screens.home.HomeScreen
 import com.dualearbuds.host.HostScreen
@@ -22,6 +29,8 @@ object Routes {
     const val GUIDE = "guide"
     const val ABOUT = "about"
     const val HOST = "host"
+    const val SETUP = "setup"
+    const val BEST = "best"
 }
 
 @Composable
@@ -38,7 +47,8 @@ fun AppNav() {
                 onOpenGuide = { go(Routes.GUIDE) },
                 onOpenSettings = { go(Routes.SETTINGS) },
                 onOpenCalibration = { go(Routes.CALIBRATE) },
-                onShareThisPhone = { go(Routes.HOST) }
+                onShareThisPhone = { go(Routes.HOST) },
+                onOpenSetup = { go(Routes.SETUP) }
             )
         }
         composable(Routes.SETTINGS) {
@@ -48,7 +58,9 @@ fun AppNav() {
                 onOpenCalibration = { go(Routes.CALIBRATE) },
                 onOpenHearing = { go(Routes.HEARING) },
                 onOpenGuide = { go(Routes.GUIDE) },
-                onOpenAbout = { go(Routes.ABOUT) }
+                onOpenAbout = { go(Routes.ABOUT) },
+                onOpenSetup = { go(Routes.SETUP) },
+                onOpenBestSound = { go(Routes.BEST) }
             )
         }
         composable(Routes.SMART) { SmartFeaturesScreen(onBack = { back() }, onOpenHearing = { go(Routes.HEARING) }) }
@@ -56,6 +68,24 @@ fun AppNav() {
         composable(Routes.HEARING) { HearingScreen(onBack = { back() }) }
         composable(Routes.GUIDE) { GuideScreen(onBack = { back() }) }
         composable(Routes.ABOUT) { AboutScreen(onBack = { back() }) }
-        composable(Routes.HOST) { HostScreen(onBack = { back() }) }
+        composable(Routes.HOST) {
+            val earbuds by EarbudsMonitor.state.collectAsStateWithLifecycle()
+            val latencies by SoundSettings.outputLatency.collectAsStateWithLifecycle()
+            val calibrated = if (earbuds.connected) latencies[earbuds.name]?.roundToInt() else null
+            HostScreen(
+                onBack = { back() },
+                localOutputLatencyMs = calibrated,
+                onCalibrate = { go(Routes.CALIBRATE) }
+            )
+        }
+        composable(Routes.SETUP) {
+            SetupCheckScreen(
+                onBack = { back() },
+                onOpenBrandSteps = { go(Routes.GUIDE) },
+                onOpenCalibration = { go(Routes.CALIBRATE) },
+                onOpenBestSound = { go(Routes.BEST) }
+            )
+        }
+        composable(Routes.BEST) { BestSoundScreen(onBack = { back() }, onOpenCalibration = { go(Routes.CALIBRATE) }) }
     }
 }

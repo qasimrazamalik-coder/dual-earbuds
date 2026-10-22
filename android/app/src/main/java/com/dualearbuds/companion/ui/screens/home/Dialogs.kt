@@ -9,7 +9,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
+import com.dualearbuds.companion.ui.components.PrimaryButton
+import com.dualearbuds.companion.ui.components.QuietButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -55,7 +56,7 @@ internal fun PinDialog(hostName: String, wrongBefore: Boolean, onSubmit: (String
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "${hostName.ifBlank { "This host" }} is locked with a 4–6 digit PIN. Ask the host for it — it's never in the link or QR code.",
+                    "${hostName.ifBlank { "This host" }} is locked with a 4–6 digit PIN. Ask the host for it; it's never in the link or QR code.",
                     style = MaterialTheme.typography.bodyMedium
                 )
                 OutlinedTextField(
@@ -79,10 +80,11 @@ internal fun PinDialog(hostName: String, wrongBefore: Boolean, onSubmit: (String
             }
         },
         confirmButton = {
-            TextButton(onClick = { cleaned?.let(onSubmit) }, enabled = cleaned != null && wait == 0L) { Text("Join") }
+            PrimaryButton("Join", onClick = { cleaned?.let(onSubmit) }, enabled = cleaned != null && wait == 0L)
         },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-        containerColor = MaterialTheme.colorScheme.surface
+        dismissButton = { QuietButton("Cancel", onDismiss, color = AppTheme.colors.muted) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.medium
     )
 }
 
@@ -98,18 +100,19 @@ internal fun NeedLinkDialog(hostName: String, onScan: () -> Unit, onPaste: () ->
                 style = MaterialTheme.typography.bodyMedium
             )
         },
-        confirmButton = { TextButton(onClick = onScan) { Text("Scan QR") } },
-        dismissButton = { TextButton(onClick = onPaste) { Text("Paste link") } },
-        containerColor = MaterialTheme.colorScheme.surface
+        confirmButton = { PrimaryButton("Scan QR", onScan) },
+        dismissButton = { QuietButton("Paste link", onPaste) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.medium
     )
 }
 
 /** What "keep running" means on this phone's brand, in one short paragraph. */
 internal fun batteryAdvice(brand: Brand): String = when (brand) {
-    Brand.XIAOMI -> "Xiaomi, Redmi and POCO phones close background apps aggressively. Allow Autostart and set Battery saver to “No restrictions” for Dual Earbuds."
-    Brand.OPPO -> "Realme and OPPO phones pause background apps. Allow “Auto launch” and “Allow background activity” for Dual Earbuds."
-    Brand.SAMSUNG -> "Samsung may put the app to sleep. In Battery, set Dual Earbuds to “Unrestricted” and keep it out of “Sleeping apps”."
-    Brand.VIVO -> "Vivo and iQOO phones limit background apps. Allow “High background power consumption” for Dual Earbuds."
+    Brand.XIAOMI -> "Xiaomi, Redmi and POCO phones close background apps aggressively. Allow Autostart and set Battery saver to No restrictions for Dual Earbuds."
+    Brand.OPPO -> "Realme and OPPO phones pause background apps. Allow Auto launch and Allow background activity for Dual Earbuds."
+    Brand.SAMSUNG -> "Samsung may put the app to sleep. In Battery, set Dual Earbuds to Unrestricted and keep it out of Sleeping apps."
+    Brand.VIVO -> "Vivo and iQOO phones limit background apps. Allow High background power consumption for Dual Earbuds."
     Brand.OTHER -> "Android may pause the sound when the screen is off. Let Dual Earbuds ignore battery optimisation."
 }
 
@@ -120,9 +123,10 @@ internal fun BatteryOfferDialog(onOpenGuide: () -> Unit, onDismiss: () -> Unit) 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Keep playing with the screen off?", style = MaterialTheme.typography.titleLarge) },
-        text = { Text(batteryAdvice(brand), style = MaterialTheme.typography.bodyMedium) },
-        confirmButton = { TextButton(onClick = onOpenGuide) { Text("Show me how") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Not now") } },
-        containerColor = MaterialTheme.colorScheme.surface
+        text = { Text(batteryAdvice(brand) + " Setup check lists each step.", style = MaterialTheme.typography.bodyMedium) },
+        confirmButton = { PrimaryButton("Open Setup check", onOpenGuide) },
+        dismissButton = { QuietButton("Not now", onDismiss, color = AppTheme.colors.muted) },
+        containerColor = MaterialTheme.colorScheme.surface,
+        shape = MaterialTheme.shapes.medium
     )
 }

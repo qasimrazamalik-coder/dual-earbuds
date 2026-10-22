@@ -24,6 +24,11 @@
     <!-- "Calibrate my earbuds" only: hears 8 clicks for a few seconds; asked on that screen -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!-- Setup check only, when the user taps "Wi-Fi band" on Android versions that hide the band without it.
+         Asked on that tap with the reason; never used for location. -->
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
     <!-- QR code scanning -->
     <uses-permission android:name="android.permission.CAMERA" />
 

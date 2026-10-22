@@ -24,6 +24,7 @@ object Prefs {
     private const val K_BATTERY_OFFERED = "battery_offered"
     private const val K_SAMSUNG_TIP_HIDDEN = "samsung_tip_hidden"
     private const val K_RECENT_HOSTS = "recent_hosts"
+    private const val K_BRAND_DONE = "brand_steps_done"
 
     const val DEFAULT_VOLUME = 100
     const val MAX_VOLUME = 150
@@ -97,6 +98,11 @@ object Prefs {
     var samsungTipHidden: Boolean
         get() = sp.getBoolean(K_SAMSUNG_TIP_HIDDEN, false)
         set(value) = sp.edit().putBoolean(K_SAMSUNG_TIP_HIDDEN, value).apply()
+
+    /** The user marked the phone maker's battery steps (Setup check) as done. They can't be read back. */
+    var brandStepsDone: Boolean
+        get() = sp.getBoolean(K_BRAND_DONE, false)
+        set(value) = sp.edit().putBoolean(K_BRAND_DONE, value).apply()
 
     /** Encoded with [RecentHosts.encode]. */
     var recentHosts: String

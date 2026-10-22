@@ -8,15 +8,6 @@ import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
 import android.provider.Settings
-import java.util.Locale
-
-enum class Brand(val label: String) {
-    XIAOMI("Xiaomi / Redmi / POCO"),
-    OPPO("Oppo / Realme / OnePlus"),
-    VIVO("Vivo / iQOO"),
-    SAMSUNG("Samsung"),
-    OTHER("Other phones")
-}
 
 /** Result of trying to open a settings screen. FALLBACK = we opened this app's App info instead. */
 enum class OpenResult { EXACT, FALLBACK, FAILED }
@@ -32,18 +23,7 @@ data class GuideStep(val title: String, val detail: String, val action: Settings
  */
 object BackgroundSettings {
 
-    fun detectBrand(): Brand {
-        val m = (Build.MANUFACTURER ?: "").lowercase(Locale.ROOT)
-        val b = (Build.BRAND ?: "").lowercase(Locale.ROOT)
-        fun matches(vararg names: String) = names.any { m.contains(it) || b.contains(it) }
-        return when {
-            matches("xiaomi", "redmi", "poco") -> Brand.XIAOMI
-            matches("oppo", "realme", "oneplus") -> Brand.OPPO
-            matches("vivo", "iqoo") -> Brand.VIVO
-            matches("samsung") -> Brand.SAMSUNG
-            else -> Brand.OTHER
-        }
-    }
+    fun detectBrand(): Brand = Brand.of(Build.MANUFACTURER, Build.BRAND)
 
     fun isIgnoringBatteryOptimizations(context: Context): Boolean = try {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -80,6 +60,16 @@ object BackgroundSettings {
 
     fun openBluetoothSettings(context: Context): OpenResult =
         tryStart(context, listOf(Intent(Settings.ACTION_BLUETOOTH_SETTINGS)))
+
+    fun openBatterySaverSettings(context: Context): OpenResult =
+        tryStart(context, listOf(Intent(Settings.ACTION_BATTERY_SAVER_SETTINGS)))
+
+    fun openWifiSettings(context: Context): OpenResult =
+        tryStart(context, listOf(Intent(Settings.ACTION_WIFI_SETTINGS)))
+
+    /** Developer options (Bluetooth audio codec lives there). */
+    fun openDeveloperOptions(context: Context): OpenResult =
+        tryStart(context, listOf(Intent(Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS)))
 
     fun openNotificationSettings(context: Context): OpenResult {
         val i = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)

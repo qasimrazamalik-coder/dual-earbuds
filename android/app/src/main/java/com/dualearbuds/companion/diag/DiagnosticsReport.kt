@@ -29,7 +29,13 @@ data class DiagnosticsInput(
     val earbuds: String,
     val eq: String,
     val dialogue: String,
-    val logLines: List<String>
+    val logLines: List<String>,
+    /** v3.2 */
+    val transport: String = "",
+    val playoutMs: Int = 0,
+    val needMs: Int? = null,
+    val usedLatency: String = "",
+    val power: String = ""
 )
 
 object DiagnosticsReport {
@@ -49,6 +55,11 @@ object DiagnosticsReport {
             }
         )
         sb.appendLine("Output latency (calibrated): ${num(d.outputLatencyMs)} · earbuds: ${d.earbuds.ifBlank { "none" }}")
+        sb.appendLine(
+            "Deadline: P ${if (d.playoutMs > 0) "${d.playoutMs} ms" else "—"} · need ${d.needMs?.let { "$it ms" } ?: "—"}" +
+                " · output ${d.usedLatency.ifBlank { "—" }} · audio over ${d.transport.ifBlank { "—" }}"
+        )
+        if (d.power.isNotBlank()) sb.appendLine("Power: ${d.power}")
         sb.appendLine("EQ: ${d.eq} · dialogue boost: ${d.dialogue}")
         sb.appendLine("--- last ${d.logLines.size} log lines ---")
         d.logLines.forEach { sb.appendLine(Redact.secrets(it)) }
