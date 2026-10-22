@@ -154,7 +154,8 @@ class StreamConnection(
             ws.cancel()
         }
 
-        // Watchdog: the host pings every 2 s, so 8 s of silence means the link is dead (e.g. Wi-Fi dropped).
+        // Watchdog: the host pings every 2 s (and UDP datagrams call touch()), so 5 s of silence means the link is
+        // dead (e.g. Wi-Fi dropped); the service then rejoins at once.
         val watchdog = launch {
             while (isActive) {
                 delay(1000)
@@ -163,12 +164,12 @@ class StreamConnection(
                     break
                 }
                 val last = lastMessageAt
-                if (opened.get() && last > 0 && SystemClock.elapsedRealtime() - last > 8000) {
+                if (opened.get() && last > 0 && SystemClock.elapsedRealtime() - last > SILENCE_LIMIT_MS) {
                     try {
                         ws.cancel()
                     } catch (_: Throwable) {
                     }
-                    done.complete(WsEnd(true, 0, "no data from the host for 8 s"))
+                    done.complete(WsEnd(true, 0, "no data from the host for 5 s"))
                     break
                 }
             }
@@ -270,6 +271,10 @@ class StreamConnection(
         bb.position(8)
         bb.asShortBuffer().get(samples, 0, sampleCount)
         callbacks.onPacket(rate, seq, samples)
+    }
+
+    private companion object {
+        const val SILENCE_LIMIT_MS = 5_000L
     }
 
     private inline fun safe(block: () -> Unit) {

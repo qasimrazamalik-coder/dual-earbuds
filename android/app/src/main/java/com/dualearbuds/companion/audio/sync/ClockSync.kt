@@ -23,6 +23,9 @@ class ClockSync(
 
     private val samples = ArrayDeque<Sample>()
 
+    /** Set by [onReconnect]: the next reply checks the kept offset against a fresh one. */
+    private var verifyNext = false
+
     private var refSeq = -1L
     private var refHostMs = 0.0
     private var refReceivedLocalMs = Double.NEGATIVE_INFINITY
@@ -41,7 +44,17 @@ class ClockSync(
     val sampleCount: Int
         get() = samples.size
 
+    /**
+     * The link to the same host dropped and came back (Wi-Fi blip): keep the offset, the clock reference and the
+     * playout so synced playback continues at once. The first new reply is checked: if the offset moved by more
+     * than [REJOIN_TOLERANCE_MS] (the host restarted), the old samples are dropped.
+     */
+    fun onReconnect() {
+        verifyNext = samples.isNotEmpty()
+    }
+
     fun reset() {
+        verifyNext = false
         samples.clear()
         refSeq = -1L
         refHostMs = 0.0
@@ -53,7 +66,17 @@ class ClockSync(
     fun onSyncReply(c: Double, h: Double, nowLocal: Double) {
         val rtt = nowLocal - c
         if (rtt < 0 || rtt > MAX_RTT_MS) return
-        samples.addLast(Sample(h - (c + nowLocal) / 2.0, rtt))
+        val offset = h - (c + nowLocal) / 2.0
+        if (verifyNext) {
+            verifyNext = false
+            val kept = offsetMs
+            if (kept != null && kotlin.math.abs(offset - kept) > REJOIN_TOLERANCE_MS) {
+                samples.clear()
+                refSeq = -1L
+                refReceivedLocalMs = Double.NEGATIVE_INFINITY
+            }
+        }
+        samples.addLast(Sample(offset, rtt))
         while (samples.size > window) samples.removeFirst()
     }
 
@@ -87,6 +110,7 @@ class ClockSync(
     companion object {
         const val DEFAULT_PLAYOUT_MS = 120.0
         const val MAX_RTT_MS = 2_000.0
+        const val REJOIN_TOLERANCE_MS = 20.0
 
         /** Signed distance a − b between two uint32 sequence numbers. */
         fun seqDelta(a: Long, b: Long): Long {

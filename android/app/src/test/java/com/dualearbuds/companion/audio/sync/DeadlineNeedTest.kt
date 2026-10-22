@@ -69,3 +69,31 @@ class DeadlineNeedTest {
         assertEquals(150.0, s.valueMs, 1e-9)
     }
 }
+
+class ClockRejoinTest {
+
+    @Test
+    fun quickRejoinKeepsSyncWhenTheHostClockIsTheSame() {
+        val c = ClockSync()
+        c.onSyncReply(c = 0.0, h = 1_000.0, nowLocal = 10.0)
+        c.onClock(seq = 7, hostMs = 1_500.0, nowLocal = 500.0)
+        assertTrue(c.isReady(1_000.0))
+        c.onReconnect()
+        assertTrue(c.isReady(1_100.0)) // still synced while the link comes back
+        c.onSyncReply(c = 2_000.0, h = 2_997.0, nowLocal = 2_006.0) // offset 994: same host clock
+        assertEquals(2, c.sampleCount)
+        assertTrue(c.isReady(2_010.0))
+    }
+
+    @Test
+    fun hostRestartDropsTheOldClock() {
+        val c = ClockSync()
+        c.onSyncReply(c = 0.0, h = 1_000.0, nowLocal = 10.0)
+        c.onClock(seq = 7, hostMs = 1_500.0, nowLocal = 500.0)
+        c.onReconnect()
+        c.onSyncReply(c = 2_000.0, h = 40.0, nowLocal = 2_006.0) // host time started again
+        assertEquals(1, c.sampleCount)
+        assertEquals(40.0 - 2_003.0, c.offsetMs!!, 1e-9)
+        assertFalse(c.isReady(2_010.0)) // waits for a fresh clock reference
+    }
+}

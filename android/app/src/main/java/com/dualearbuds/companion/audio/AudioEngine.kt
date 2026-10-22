@@ -82,6 +82,10 @@ class AudioEngine {
     @Volatile
     var calibratedLatencyMs: Double? = null
 
+    /** Frames per hardware burst (AudioManager PROPERTY_OUTPUT_FRAMES_PER_BUFFER); 0 = unknown. */
+    @Volatile
+    var framesPerBurst: Int = 0
+
     /** Fallback for "is the output Bluetooth" when the track can't say (earbuds connected per EarbudsMonitor). */
     @Volatile
     var assumeBluetooth: Boolean = false
@@ -167,6 +171,9 @@ class AudioEngine {
     /** New connection: forget the old host clock (offset and reference). */
     fun resetClock() = lock.withLock { clock.reset() }
 
+    /** Quick rejoin to the same host after a blip: keep the clock (verified by the next sync reply). */
+    fun onReconnect() = lock.withLock { clock.onReconnect() }
+
     // ------------------------------------------------------------------ lifecycle
 
     /** Starts the audio thread if it is not already running; the adaptive buffer starts again at 60 ms. */
@@ -207,7 +214,7 @@ class AudioEngine {
             val prev = lastPushSeq
             if (prev >= 0 && rate == lastPushRate) {
                 val gap = ClockSync.seqDelta(seq, (prev + 1) and 0xFFFFFFFFL)
-                if (gap in 1..1000) {
+                if (gap in 1..MAX_FILL_PACKETS) {
                     val fill = concealer.conceal(gap.toInt(), rate)
                     fill.forEachIndexed { i, s ->
                         jitter.push(AudioPacket(rate, s, (prev + 1 + i) and 0xFFFFFFFFL, concealed = true), now)
@@ -286,9 +293,10 @@ class AudioEngine {
         p
     }
 
-    private class Track(val track: AudioTrack, val rate: Int) {
+    private class Track(val track: AudioTrack, val rate: Int, val tuner: TrackBufferTuner) {
         var framesWritten = 0L
         val ts = AudioTimestamp()
+        var nextUnderrunCheck = 0L
     }
 
     private fun loop(flag: AtomicBoolean) {
@@ -320,6 +328,10 @@ class AudioEngine {
                     nextRouteCheck = nowEr + 1_000
                     routedBluetooth = isBluetoothRoute(t.track)
                 }
+                if (t != null && nowEr >= t.nextUnderrunCheck) {
+                    t.nextUnderrunCheck = nowEr + 250
+                    tuneTrack(t)
+                }
                 // Synced playback needs the host clock and a working output timestamp.
                 val synced = t != null && lock.withLock { clock.isReady(nowMs()) } && pres != null
                 if (synced != wasSynced) {
@@ -347,7 +359,7 @@ class AudioEngine {
                         sleepQuietly(100)
                         continue
                     }
-                    t = Track(created, packet.rate)
+                    t = created
                     tsLatency.reset()
                     tsLatencyMs = Double.NaN
                     nextRouteCheck = 0L
@@ -504,7 +516,24 @@ class AudioEngine {
         return true
     }
 
-    private fun createTrack(rate: Int): AudioTrack? {
+    /** Grows the effective track buffer by one burst when the track itself underran (see [TrackBufferTuner]). */
+    private fun tuneTrack(t: Track) {
+        val count = try {
+            t.track.underrunCount
+        } catch (_: Throwable) {
+            return
+        }
+        val grow = t.tuner.onUnderrunCount(count) ?: return
+        try {
+            val actual = t.track.setBufferSizeInFrames(grow)
+            if (actual > 0) t.tuner.onApplied(actual)
+            trackMs = (t.tuner.sizeFrames * 1000L / t.rate).toInt()
+            AppLog.i("AudioTrack underran: buffer now $trackMs ms (${t.tuner.sizeFrames} frames)")
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun createTrack(rate: Int): Track? {
         if (rate !in 8000..192000) return null
         return try {
             val minBuf = AudioTrack.getMinBufferSize(
@@ -513,8 +542,9 @@ class AudioEngine {
                 AudioFormat.ENCODING_PCM_16BIT
             )
             if (minBuf <= 0) return null
-            // Smallest safe device buffer: the device minimum, but at least two 10 ms packets.
-            val bytes = max(minBuf, rate * 4 * 20 / 1000)
+            // Allocate room for 40 ms (or the device minimum), but *use* only ~2 bursts: setBufferSizeInFrames
+            // below keeps the effective buffer small and the tuner grows it only if the track itself underruns.
+            val bytes = max(minBuf, rate * 4 * 40 / 1000)
             val track = AudioTrack.Builder()
                 .setAudioAttributes(
                     AudioAttributes.Builder()
@@ -537,11 +567,23 @@ class AudioEngine {
                 track.release()
                 return null
             }
+            val tuner = TrackBufferTuner(framesPerBurst, bytes / 4, rate)
+            try {
+                val actual = track.setBufferSizeInFrames(tuner.sizeFrames)
+                if (actual > 0) tuner.onApplied(actual)
+            } catch (_: Throwable) {
+                tuner.onApplied(track.bufferSizeInFrames)
+            }
             track.play()
             trackRate = rate
-            trackMs = (track.bufferSizeInFrames * 1000L / rate).toInt()
-            AppLog.i("AudioTrack $rate Hz, buffer $trackMs ms, session ${track.audioSessionId}")
-            track
+            trackMs = (tuner.sizeFrames * 1000L / rate).toInt()
+            val fast = try {
+                track.performanceMode == AudioTrack.PERFORMANCE_MODE_LOW_LATENCY
+            } catch (_: Throwable) {
+                false
+            }
+            AppLog.i("AudioTrack $rate Hz, buffer $trackMs ms (burst ${tuner.burstFrames}), low-latency=$fast, session ${track.audioSessionId}")
+            Track(track, rate, tuner)
         } catch (t: Throwable) {
             AppLog.w("AudioTrack creation failed", t)
             null
@@ -575,5 +617,8 @@ class AudioEngine {
         /** Errors beyond this mean the clock data is nonsense (host restarted…): play without correcting. */
         private const val MAX_SANE_ERROR_MS = 2_000.0
         private val BLUETOOTH_TYPES = setOf(7, 8, 23, 26, 27, 30)
+
+        /** Longest sequence gap filled with concealment (fades to silence); longer gaps restart cleanly. */
+        private const val MAX_FILL_PACKETS = 50L
     }
 }

@@ -100,6 +100,8 @@ class PlaybackService : Service() {
         private const val VOLUME_STEP = 10
         private const val MAX_BACKOFF_MS = 10_000L
         private const val QUICK_SYNCS = 5
+        private const val QUICK_REJOINS = 6
+        private const val QUICK_REJOIN_GAP_MS = 300L
     }
 
     private val scope = CoroutineScope(
@@ -175,6 +177,12 @@ class PlaybackService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        engine.framesPerBurst = try {
+            (getSystemService(Context.AUDIO_SERVICE) as AudioManager)
+                .getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)?.toIntOrNull() ?: 0
+        } catch (_: Throwable) {
+            0
+        }
         engine.gain = PlaybackController.volume.value / 100f
         applyBufferSettings(PlaybackController.buffer.value)
         createMediaSession()
@@ -313,49 +321,55 @@ class PlaybackService : Service() {
     private suspend fun runSession(target: LinkTarget) {
         var backoff = 1000L
         var fatal: UserError? = null
+        // After a link that was up drops, rejoin the same host straight away (no /info, short connect timeout),
+        // keeping the queued sound and the clock sync, so a Wi-Fi blip costs well under 2 s.
+        var quickLeft = 0
+        var quick = false
         while (true) {
-            PlaybackController.update {
-                it.copy(
-                    status = if (it.status == PlayerStatus.RECONNECTING) PlayerStatus.RECONNECTING else PlayerStatus.CONNECTING,
-                    message = "Looking for ${target.display}…"
-                )
-            }
-            val info = withContext(Dispatchers.IO) { InfoClient.fetch(Net.infoHttp, target) }
-            if (info is InfoResult.Ok) {
-                pcName = info.info.pc
-                mirroring = info.info.rate > 0
-                hostKind = info.info.host
-                party = info.info.party
-                pinRequired = info.info.pin
-                sourceApp = if (info.info.source == "app") info.info.app else ""
-                val i = info.info
+            if (!quick) {
                 PlaybackController.update {
                     it.copy(
-                        pcName = pcName, hostKind = hostKind, party = party, error = null,
-                        hostVersion = i.version, protocol = i.protocol, pinRequired = i.pin, remote = i.remote,
-                        source = i.source, sourceApp = sourceApp
+                        status = if (it.status == PlayerStatus.RECONNECTING) PlayerStatus.RECONNECTING else PlayerStatus.CONNECTING,
+                        message = "Looking for ${target.display}…"
                     )
                 }
-                AppSettings.rememberHost(target.withoutPin(), pcName, hostKind)
-                AppLog.i("Host ${target.display}: ${hostKind.label} v${i.version} protocol ${i.protocol} pin=${i.pin} remote=${i.remote}")
-                if (i.pin && target.pin.isNullOrEmpty()) {
-                    fatal = Errors.pinNeeded()
-                    break
+                val info = withContext(Dispatchers.IO) { InfoClient.fetch(Net.infoHttp, target) }
+                if (info is InfoResult.Ok) {
+                    pcName = info.info.pc
+                    mirroring = info.info.rate > 0
+                    hostKind = info.info.host
+                    party = info.info.party
+                    pinRequired = info.info.pin
+                    sourceApp = if (info.info.source == "app") info.info.app else ""
+                    val i = info.info
+                    PlaybackController.update {
+                        it.copy(
+                            pcName = pcName, hostKind = hostKind, party = party, error = null,
+                            hostVersion = i.version, protocol = i.protocol, pinRequired = i.pin, remote = i.remote,
+                            source = i.source, sourceApp = sourceApp
+                        )
+                    }
+                    AppSettings.rememberHost(target.withoutPin(), pcName, hostKind)
+                    AppLog.i("Host ${target.display}: ${hostKind.label} v${i.version} protocol ${i.protocol} pin=${i.pin} remote=${i.remote}")
+                    if (i.pin && target.pin.isNullOrEmpty()) {
+                        fatal = Errors.pinNeeded()
+                        break
+                    }
+                } else {
+                    val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
+                    if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
+                        fatal = err
+                        break
+                    }
+                    waitAndRetry(backoff, err)
+                    backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
+                    continue
                 }
-            } else {
-                val err = Errors.from(info, applicationContext, target) ?: Errors.other("unknown")
-                if (info == InfoResult.WrongKey || info == InfoResult.NotDualEarbuds) {
-                    fatal = err
-                    break
-                }
-                waitAndRetry(backoff, err)
-                backoff = (backoff * 2).coerceAtMost(MAX_BACKOFF_MS)
-                continue
             }
 
-            val conn = StreamConnection(Net.http, target, Build.MODEL ?: "Android", connectionCallbacks)
+            val conn = StreamConnection(if (quick) Net.quickHttp else Net.http, target, Build.MODEL ?: "Android", connectionCallbacks)
             connection = conn
-            engine.resetClock()
+            if (quick) engine.onReconnect() else engine.resetClock()
             PlaybackController.sender = { text -> conn.send(text) }
             val end = conn.runUntilClosed()
             syncJob?.cancel()
@@ -364,21 +378,35 @@ class PlaybackService : Service() {
                 connection = null
                 PlaybackController.sender = null
             }
-            engine.flush()
-            AppLog.i("Link ended: opened=${end.opened} http=${end.httpCode} ${end.reason}")
+            AppLog.i("Link ended: opened=${end.opened} http=${end.httpCode} quick=$quick ${end.reason}")
 
             val kicked = kickReason
             if (kicked != null) {
                 // Protocol v3: never auto-reconnect after a kick.
+                engine.flush()
                 fatal = Errors.kicked(kicked)
                 break
             }
             if (end.httpCode == 403) {
                 // /info accepted the key, so with a room PIN a 403 means the PIN is wrong. Never retried.
+                engine.flush()
                 fatal = if (pinRequired) Errors.wrongPin() else Errors.wrongKey()
                 break
             }
-            if (end.opened) backoff = 1000L
+            if (end.opened) {
+                backoff = 1000L
+                quickLeft = QUICK_REJOINS
+            }
+            if (end.httpCode == 0 && quickLeft > 0) {
+                quickLeft--
+                val first = !quick || end.opened
+                quick = true
+                PlaybackController.update { it.copy(status = PlayerStatus.RECONNECTING, message = "Reconnecting…") }
+                if (!first) delay(QUICK_REJOIN_GAP_MS)
+                continue
+            }
+            quick = false
+            engine.flush()
             val err = when (end.httpCode) {
                 503 -> Errors.serverFull()
                 0 -> if (end.opened) {
