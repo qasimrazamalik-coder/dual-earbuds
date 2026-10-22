@@ -44,8 +44,8 @@ own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its
 | ![Settings with updates and network options](docs/images/settings-dark.png) | ![Light theme](docs/images/home-light.png) |
 | **Party mode with room PIN** | **Smart features** |
 | ![Party mode with a room PIN and talk-over](docs/images/phones-pin-dark.png) | ![On-device smart features: noise cancelling, smart EQ, dialogue boost, smart buffer, hearing profiles](docs/images/settings-smart-light.png) |
-| **Laptop to laptop** | **Appearance** |
-| ![Listen to another laptop or phone](docs/images/listen-to-device-dark.png) | ![System, light or dark theme](docs/images/settings-appearance-light.png) |
+| **Laptop to laptop, phone to laptop** | **Setup check** |
+| ![Listen to another laptop or phone](docs/images/listen-to-device-dark.png) | ![Setup check: network, firewall, Wi-Fi band, earbuds, calibration, power](docs/images/setup-check-light.png) |
 
 <details>
 <summary>Installer screens</summary>
