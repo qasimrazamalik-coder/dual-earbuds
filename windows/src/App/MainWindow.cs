@@ -16,15 +16,18 @@ using WinForms = System.Windows.Forms;
 namespace DualEarbuds
 {
     // The window's content; also rendered on its own for screenshots.
+    // One 48 px header bar: brand over the nav rail, then the page name and a live mono readout
+    // ("LIVE  48 kHz · P 92 ms · 4 ears · sync ±3 ms"), then the window buttons. No page titles below it.
     public class MainView : Grid
     {
         public readonly Controller Ctl;
         readonly Dictionary<string, IPage> pages = new Dictionary<string, IPage>();
         readonly Dictionary<string, RadioButton> navButtons = new Dictionary<string, RadioButton>();
+        readonly Dictionary<string, string> titles = new Dictionary<string, string>();
         readonly ContentControl host = new ContentControl();
         readonly ScrollViewer scroller;
-        readonly Ellipse footDot;
-        readonly TextBlock footText;
+        readonly TextBlock pageName, readout, checkCount;
+        readonly Ellipse liveDot;
         public readonly Grid TitleBar;
         public readonly Button MinButton, MaxButton, CloseButton;
         public readonly Path MaxIcon;
@@ -35,34 +38,55 @@ namespace DualEarbuds
         public event Action ResetRequested;
         public event Action ExitRequested;   // the updater started the installer: close the app
 
+        public const double HeaderHeight = 48;
+
         public MainView(Controller ctl)
         {
             Ctl = ctl;
             SetResourceReference(BackgroundProperty, "Bg");
             TextElement_SetFont(this);
-            RowDefinitions.Add(new RowDefinition { Height = new GridLength(44) });
+            RowDefinitions.Add(new RowDefinition { Height = new GridLength(HeaderHeight) });
             RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(232) });
+            ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(208) });
             ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            // title bar
+            // header bar
             TitleBar = new Grid();
+            TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(208) });
+            TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var brand = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(18, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
-            brand.Children.Add(Ui.Logo(22));
-            var bt = Ui.Heading("Dual Earbuds", 14);
-            bt.Margin = new Thickness(10, 0, 8, 0);
+            TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var brand = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(16, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+            brand.Children.Add(Ui.Logo(18));
+            var bt = Ui.Text("Dual Earbuds", 13, FontWeights.SemiBold, "Text");
+            bt.Margin = new Thickness(8, 0, 6, 0);
             bt.VerticalAlignment = VerticalAlignment.Center;
+            bt.TextWrapping = TextWrapping.NoWrap;
             brand.Children.Add(bt);
-            var ver = new Border { CornerRadius = new CornerRadius(6), Padding = new Thickness(6, 1, 6, 1), VerticalAlignment = VerticalAlignment.Center };
-            ver.SetResourceReference(Border.BackgroundProperty, "AccentSoft");
-            var vt = Ui.Text("v" + AppInfo.Version, 10.5, FontWeights.Bold, "Accent");
-            ver.Child = vt;
-            brand.Children.Add(ver);
+            var vt = Ui.Mono(AppInfo.Version, 11, "Muted");
+            vt.VerticalAlignment = VerticalAlignment.Center;
+            brand.Children.Add(vt);
             TitleBar.Children.Add(brand);
 
-            var caps = new StackPanel { Orientation = Orientation.Horizontal };
+            pageName = Ui.Text("", 15, FontWeights.SemiBold, "Text");
+            pageName.TextWrapping = TextWrapping.NoWrap;
+            pageName.VerticalAlignment = VerticalAlignment.Center;
+            pageName.Margin = new Thickness(24, 0, 16, 0);
+            Grid.SetColumn(pageName, 1);
+            TitleBar.Children.Add(pageName);
+
+            var live = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
+            liveDot = new Ellipse { Width = 6, Height = 6, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            liveDot.SetResourceReference(Shape.FillProperty, "Accent");
+            live.Children.Add(liveDot);
+            readout = Ui.Mono("", 12, "Muted");
+            readout.VerticalAlignment = VerticalAlignment.Center;
+            live.Children.Add(readout);
+            Grid.SetColumn(live, 3);
+            TitleBar.Children.Add(live);
+
+            var caps = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Top };
             MinButton = Caption(Icons.Minimize, "Caption", "Minimize");
             MaxIcon = CaptionIcon(Icons.Maximize);
             MaxButton = new Button { Content = MaxIcon, ToolTip = "Maximize" };
@@ -72,46 +96,40 @@ namespace DualEarbuds
             caps.Children.Add(MaxButton);
             caps.Children.Add(CloseButton);
             foreach (UIElement b in caps.Children) WindowChrome.SetIsHitTestVisibleInChrome(b, true);
-            Grid.SetColumn(caps, 1);
+            Grid.SetColumn(caps, 4);
             TitleBar.Children.Add(caps);
+            var hair = new Border { Height = 1, VerticalAlignment = VerticalAlignment.Bottom };
+            hair.SetResourceReference(Border.BackgroundProperty, "Line");
+            Grid.SetColumnSpan(hair, 5);
+            TitleBar.Children.Add(hair);
             Grid.SetColumnSpan(TitleBar, 2);
             Children.Add(TitleBar);
 
             // navigation rail
-            var nav = new DockPanel { Margin = new Thickness(14, 6, 10, 16), LastChildFill = false };
-            var foot = new Border { CornerRadius = new CornerRadius(12), Padding = new Thickness(12, 10, 12, 10) };
-            foot.SetResourceReference(Border.BackgroundProperty, "Surface");
-            var footRow = new StackPanel { Orientation = Orientation.Horizontal };
-            footDot = new Ellipse { Width = 9, Height = 9, Margin = new Thickness(0, 0, 9, 0), VerticalAlignment = VerticalAlignment.Center };
-            footText = Ui.Text("Stopped", 12.5, FontWeights.SemiBold, "Text");
-            footRow.Children.Add(footDot);
-            footRow.Children.Add(footText);
-            foot.Child = footRow;
-            DockPanel.SetDock(foot, Dock.Bottom);
-            nav.Children.Add(foot);
-            var items = new StackPanel();
+            var rail = new Border { BorderThickness = new Thickness(0, 0, 1, 0) };
+            rail.SetResourceReference(Border.BorderBrushProperty, "Line");
+            rail.SetResourceReference(Border.BackgroundProperty, "Bg");
+            var items = new StackPanel { Margin = new Thickness(10, 12, 10, 16) };
             AddNav(items, "home", "Home", Icons.Home, false);
-            AddNav(items, "phones", "Phones", Icons.Phone, false);
+            AddNav(items, "phones", "Listeners", Icons.Phone, false);
             AddNav(items, "listen", "Listen", Icons.Listen, true);
+            checkCount = AddNav(items, "setup-check", "Setup check", Icons.Check, true);
             AddNav(items, "settings", "Settings", Icons.Tune, false);
             AddNav(items, "diagnostics", "Diagnostics", Icons.Pulse, true);
             AddNav(items, "about", "About", Icons.Info, false);
-            DockPanel.SetDock(items, Dock.Top);
-            nav.Children.Add(items);
-            Grid.SetRow(nav, 1);
-            Children.Add(nav);
+            rail.Child = items;
+            Grid.SetRow(rail, 1);
+            Children.Add(rail);
 
             // content
             scroller = new ScrollViewer { VerticalScrollBarVisibility = ScrollBarVisibility.Auto, Content = host, Focusable = false };
-            var contentBorder = new Border { CornerRadius = new CornerRadius(18, 0, 0, 0), BorderThickness = new Thickness(1, 1, 0, 0), Child = scroller };
-            contentBorder.SetResourceReference(Border.BackgroundProperty, "Bg");
-            contentBorder.SetResourceReference(Border.BorderBrushProperty, "Line");
-            Grid.SetRow(contentBorder, 1);
-            Grid.SetColumn(contentBorder, 1);
-            Children.Add(contentBorder);
+            Grid.SetRow(scroller, 1);
+            Grid.SetColumn(scroller, 1);
+            Children.Add(scroller);
 
             ctl.DevicesChanged += () => { foreach (var p in pages.Values) p.Rebuild(); };
             ctl.StateChanged += RefreshAll;
+            ctl.ChecksChanged += () => { IPage p; if (pages.TryGetValue("setup-check", out p)) p.Rebuild(); RefreshAll(); };
             ctl.UpdateChanged += () => { IPage p; if (pages.TryGetValue("settings", out p)) p.Refresh(); };
             Navigate("home");
         }
@@ -131,29 +149,40 @@ namespace DualEarbuds
 
         static Path CaptionIcon(string data)
         {
-            var p = new Path { Data = Geometry.Parse(data), Width = 10, Height = 10, Stretch = Stretch.Uniform, StrokeThickness = 1.2, SnapsToDevicePixels = true };
+            var p = new Path { Data = Geometry.Parse(data), Width = 10, Height = 10, Stretch = Stretch.Uniform, StrokeThickness = 1, SnapsToDevicePixels = true };
             p.SetBinding(Shape.StrokeProperty, new System.Windows.Data.Binding("Foreground") { RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.FindAncestor, typeof(Button), 1) });
             return p;
         }
 
-        void AddNav(Panel parent, string key, string label, string icon, bool strokeIcon)
+        // Returns the muted count shown at the right of the item (empty by default).
+        TextBlock AddNav(Panel parent, string key, string label, string icon, bool strokeIcon)
         {
-            var row = new StackPanel { Orientation = Orientation.Horizontal };
-            var ic = Ui.Icon(icon, 18, "Muted", strokeIcon);
-            ic.Margin = new Thickness(0, 0, 12, 0);
+            titles[key] = label;
+            var row = new Grid();
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var ic = Ui.Icon(icon, 16, "Muted", strokeIcon);
+            ic.Margin = new Thickness(0, 0, 10, 0);
             row.Children.Add(ic);
-            var t = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center, FontWeight = FontWeights.SemiBold };
+            var t = new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center };
+            Grid.SetColumn(t, 1);
             row.Children.Add(t);
-            var rb = new RadioButton { Content = row, GroupName = "nav" };
+            var count = Ui.Mono("", 11.5, "Muted");
+            count.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(count, 2);
+            row.Children.Add(count);
+            var rb = new RadioButton { Content = row, GroupName = "nav", HorizontalContentAlignment = HorizontalAlignment.Stretch };
             rb.SetResourceReference(StyleProperty, "Nav");
             rb.Checked += (s, e) =>
             {
-                ic.SetResourceReference(strokeIcon ? Shape.StrokeProperty : Shape.FillProperty, "Accent");
+                ic.SetResourceReference(strokeIcon ? Shape.StrokeProperty : Shape.FillProperty, "Text");
                 Navigate(key);
             };
             rb.Unchecked += (s, e) => ic.SetResourceReference(strokeIcon ? Shape.StrokeProperty : Shape.FillProperty, "Muted");
             navButtons[key] = rb;
             parent.Children.Add(rb);
+            return count;
         }
 
         IPage Page(string key)
@@ -164,6 +193,7 @@ namespace DualEarbuds
             {
                 case "phones": p = new PhonesPage(Ctl); break;
                 case "listen": p = new ListenPage(Ctl); break;
+                case "setup-check": p = new SetupCheckPage(Ctl, Navigate); break;
                 case "settings":
                     p = new SettingsPage(Ctl,
                         m => { var h = ThemeRequested; if (h != null) h(m); },
@@ -179,6 +209,8 @@ namespace DualEarbuds
             return p;
         }
 
+        public string Current { get { return current; } }
+
         public void Navigate(string key)
         {
             if (current == key) return;
@@ -187,9 +219,12 @@ namespace DualEarbuds
             current = key;
             RadioButton rb;
             if (navButtons.TryGetValue(key, out rb) && rb.IsChecked != true) rb.IsChecked = true;
+            string title;
+            pageName.Text = titles.TryGetValue(key, out title) ? title : "";
             var p = Page(key);
             p.Refresh();
             if (p is ListenPage) ((ListenPage)p).Shown();
+            if (p is SetupCheckPage) ((SetupCheckPage)p).Shown();
             host.Content = p.Root;
             scroller.ScrollToTop();
         }
@@ -224,23 +259,19 @@ namespace DualEarbuds
         {
             IPage p;
             if (current != null && pages.TryGetValue(current, out p)) p.Refresh();
-            bool on = Ctl.Running;
-            if (Ctl.Listening)
-            {
-                bool ok = Ctl.ListenStateNow == ListenState.Playing;
-                footText.Text = ok ? "Listening" : "Listening · " + (Ctl.ListenStateNow == ListenState.HostPaused ? "host paused" : "connecting");
-                footDot.SetResourceReference(Shape.FillProperty, ok ? "Good" : "Warn");
-                return;
-            }
-            footText.Text = on ? (Ctl.StatusKind == StateKind.Problem ? "Mirroring · check outputs" : Ctl.Talking ? "Mirroring · talking" : "Mirroring") : (Ctl.WantRunning ? "Waiting for sound" : "Stopped");
-            footDot.SetResourceReference(Shape.FillProperty, on ? (Ctl.StatusKind == StateKind.Problem ? "Warn" : "Good") : (Ctl.WantRunning ? "Warn" : "Muted"));
+            bool live;
+            readout.Text = Ctl.Readout(out live);
+            liveDot.Visibility = live ? Visibility.Visible : Visibility.Collapsed;
+            readout.SetResourceReference(TextBlock.ForegroundProperty, live ? "Text" : "Muted");
+            int attention = SetupCheck.Attention(Ctl.Checks());
+            checkCount.Text = attention > 0 ? attention.ToString(System.Globalization.CultureInfo.InvariantCulture) : "";
         }
 
         public void RebuildPhones()
         {
             IPage p;
             if (pages.TryGetValue("phones", out p)) p.Rebuild();
-            if (pages.TryGetValue("home", out p)) p.Refresh();
+            if (pages.TryGetValue("home", out p)) p.Rebuild();
         }
 
         public void Animate()
@@ -292,7 +323,7 @@ namespace DualEarbuds
             Icon = IconFactory.WindowIcon();
             WindowChrome.SetWindowChrome(this, new WindowChrome
             {
-                CaptionHeight = 44,
+                CaptionHeight = MainView.HeaderHeight,
                 ResizeBorderThickness = new Thickness(6),
                 GlassFrameThickness = new Thickness(0, 0, 0, 1),
                 CornerRadius = new CornerRadius(0),
@@ -319,7 +350,7 @@ namespace DualEarbuds
 
             CreateTray();
             ctl.StateChanged += UpdateTray;
-            ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Open Settings > Updates to install it.");
+            ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Settings > Updates installs it.");
 
             fast = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
             // the sound keeps running minimized or in the tray; only the meters stop drawing
@@ -354,7 +385,7 @@ namespace DualEarbuds
             if (msg == WM_HOTKEY && wParam.ToInt32() == HotkeyId)
             {
                 ctl.Toggle();
-                ShowTrayTip(ctl.Running || ctl.WantRunning ? "Mirroring started" : "Mirroring stopped", null);
+                ShowTrayTip(ctl.Running || ctl.WantRunning ? "Sharing started" : "Sharing stopped", null);
                 handled = true;
             }
             return IntPtr.Zero;
@@ -373,13 +404,19 @@ namespace DualEarbuds
 
         void CreateTray()
         {
-            var menu = new WinForms.ContextMenuStrip();
+            var menu = new WinForms.ContextMenuStrip { ShowImageMargin = false, Font = new System.Drawing.Font("Segoe UI", 9f), Padding = new WinForms.Padding(2) };
+            trayState = new WinForms.ToolStripMenuItem("Stopped") { Enabled = false };
+            menu.Items.Add(trayState);
+            menu.Items.Add(new WinForms.ToolStripSeparator());
             menu.Items.Add("Open Dual Earbuds", null, (s, e) => ShowFromTray());
-            trayToggle = new WinForms.ToolStripMenuItem("Start mirroring", null, (s, e) => ctl.Toggle());
+            trayToggle = new WinForms.ToolStripMenuItem("Start sharing", null, (s, e) => ctl.Toggle());
             menu.Items.Add(trayToggle);
-            menu.Items.Add("Copy phone link", null, (s, e) => { var u = ctl.LinkUrl; if (u != null) try { Clipboard.SetText(u); } catch { } });
+            menu.Items.Add("Copy link", null, (s, e) => { var u = ctl.LinkUrl; if (u != null) try { Clipboard.SetText(u); } catch { } });
+            menu.Items.Add("Setup check", null, (s, e) => { ShowFromTray(); View.Navigate("setup-check"); });
             menu.Items.Add(new WinForms.ToolStripSeparator());
             menu.Items.Add("Exit", null, (s, e) => ExitApp());
+            menu.Opening += (s, e) => menu.Renderer = new TrayRenderer(Theme.IsDark);
+            menu.Renderer = new TrayRenderer(Theme.IsDark);
             tray = new WinForms.NotifyIcon { Icon = IconFactory.TrayIcon(), Text = "Dual Earbuds", ContextMenuStrip = menu, Visible = true };
             tray.DoubleClick += (s, e) => ShowFromTray();
             tray.BalloonTipClicked += (s, e) =>
@@ -391,12 +428,18 @@ namespace DualEarbuds
             UpdateTray();
         }
 
+        WinForms.ToolStripMenuItem trayState;
+
         void UpdateTray()
         {
             if (tray == null) return;
             bool on = ctl.Running || ctl.WantRunning;
-            trayToggle.Text = on ? "Stop mirroring" : "Start mirroring";
-            string t = ctl.Running ? "Dual Earbuds - mirroring" : (ctl.WantRunning ? "Dual Earbuds - waiting" : "Dual Earbuds - stopped");
+            trayToggle.Text = on ? "Stop sharing" : "Start sharing";
+            trayToggle.Enabled = !ctl.Listening;
+            bool live;
+            string r = ctl.Readout(out live);
+            trayState.Text = r;
+            string t = "Dual Earbuds \u00b7 " + (ctl.Listening ? "listening" : ctl.Running ? "sharing" : ctl.WantRunning ? "waiting for sound" : "stopped");
             tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
         }
 
@@ -424,7 +467,7 @@ namespace DualEarbuds
                 {
                     ctl.Settings.TrayTipShown = true;
                     ctl.MarkDirty();
-                    ShowTrayTip("Still running", "Dual Earbuds keeps playing here. Right-click the icon to exit.");
+                    ShowTrayTip("Still running", "The sound keeps playing. Right-click this icon to exit.");
                 }
                 return;
             }
@@ -491,5 +534,42 @@ namespace DualEarbuds
             View.ResetPages();
             if (wasOn) ctl.Start(true);
         }
+    }
+
+    // The tray menu in the app's palette (flat, 1 px border, no gradients).
+    class TrayRenderer : WinForms.ToolStripProfessionalRenderer
+    {
+        readonly bool dark;
+        public TrayRenderer(bool dark) : base(new TrayColors(dark)) { this.dark = dark; RoundedEdges = false; }
+
+        protected override void OnRenderItemText(WinForms.ToolStripItemTextRenderEventArgs e)
+        {
+            e.TextColor = !e.Item.Enabled ? (dark ? System.Drawing.Color.FromArgb(0x9A, 0xA3, 0xB0) : System.Drawing.Color.FromArgb(0x57, 0x60, 0x70))
+                                          : (dark ? System.Drawing.Color.FromArgb(0xE7, 0xEA, 0xEF) : System.Drawing.Color.FromArgb(0x12, 0x17, 0x22));
+            base.OnRenderItemText(e);
+        }
+    }
+
+    class TrayColors : WinForms.ProfessionalColorTable
+    {
+        readonly System.Drawing.Color bg, line, hover;
+        public TrayColors(bool dark)
+        {
+            bg = dark ? System.Drawing.Color.FromArgb(0x13, 0x17, 0x1E) : System.Drawing.Color.White;
+            line = dark ? System.Drawing.Color.FromArgb(0x26, 0x2C, 0x36) : System.Drawing.Color.FromArgb(0xDF, 0xE3, 0xE8);
+            hover = dark ? System.Drawing.Color.FromArgb(0x1A, 0x1F, 0x28) : System.Drawing.Color.FromArgb(0xF0, 0xF2, 0xF5);
+            UseSystemColors = false;
+        }
+        public override System.Drawing.Color ToolStripDropDownBackground { get { return bg; } }
+        public override System.Drawing.Color MenuBorder { get { return line; } }
+        public override System.Drawing.Color MenuItemBorder { get { return hover; } }
+        public override System.Drawing.Color MenuItemSelected { get { return hover; } }
+        public override System.Drawing.Color MenuItemSelectedGradientBegin { get { return hover; } }
+        public override System.Drawing.Color MenuItemSelectedGradientEnd { get { return hover; } }
+        public override System.Drawing.Color SeparatorDark { get { return line; } }
+        public override System.Drawing.Color SeparatorLight { get { return bg; } }
+        public override System.Drawing.Color ImageMarginGradientBegin { get { return bg; } }
+        public override System.Drawing.Color ImageMarginGradientMiddle { get { return bg; } }
+        public override System.Drawing.Color ImageMarginGradientEnd { get { return bg; } }
     }
 }

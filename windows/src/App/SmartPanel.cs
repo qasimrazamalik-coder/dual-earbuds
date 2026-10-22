@@ -22,25 +22,18 @@ namespace DualEarbuds
         {
             this.ctl = ctl;
             var s = ctl.Settings;
-            var card = new StackPanel();
-            var intro = Ui.Text("Everything here runs on this laptop - no cloud, no account, nothing leaves your network. Each one is optional; a choice you make by hand always wins.", 12.5, FontWeights.Normal, "Muted");
-            intro.Margin = new Thickness(0, 0, 0, 8);
-            card.Children.Add(intro);
-
-            card.Children.Add(Choice("Mic noise cancelling", "Cleans fans, traffic and keyboard noise out of your voice when you talk over the music.",
+            var p = new RowPanel();
+            p.Add(Choice("Mic noise cancelling", "Removes fans, traffic and keys from your voice when you talk over the sound.",
                 new[] { "Off", "Light", "Strong" }, new[] { "off", "light", "strong" }, s.Noise, v => { s.Noise = v; ctl.SmartSettingsChanged(); }));
-            card.Children.Add(PageKit.Divider());
-            card.Children.Add(Choice("Smart EQ", "Picks the EQ for outputs set to Auto: by the app that plays (Netflix, Spotify, Zoom...), by how the sound sounds, or both.",
+            p.Add(Choice("Smart EQ", "Picks the EQ of outputs set to auto: by the app that plays, by how it sounds, or both.",
                 new[] { "Off", "By app", "By sound", "Both" }, new[] { "off", "app", "sound", "both" }, s.SmartEq, v => { s.SmartEq = v; ctl.SmartSettingsChanged(); }));
-            card.Children.Add(PageKit.Divider());
-            card.Children.Add(Choice("Dialogue boost", "Clearer voices over music and effects on this laptop's outputs. Night also evens out loud and quiet parts.",
+            p.Add(Choice("Dialogue boost", "Clearer voices on this laptop's outputs. Night also evens out loud and quiet parts.",
                 new[] { "Off", "Light", "Strong", "Night" }, new[] { "off", "light", "strong", "night" }, s.Dialogue, v => { s.Dialogue = v; ctl.SmartSettingsChanged(); }));
-            card.Children.Add(PageKit.Divider());
-            card.Children.Add(Choice("Smart buffer", "When listening to another device: Smart learns this network and keeps the delay as low as is safe; Steady uses fixed rules; Manual is yours.",
+            p.Add(Choice("Buffer when listening", "Smart learns this Wi-Fi and keeps the delay as low as is safe. Steady uses fixed rules. Manual is yours.",
                 new[] { "Smart", "Steady", "Manual" }, new[] { "smart", "steady", "manual" }, s.Buffer, v => { s.Buffer = v; ctl.SmartSettingsChanged(); UpdateManual(); }));
             Slider ms;
-            manualRow = Ui.LabeledSlider("Buffer", JitterBuffer.MinMs, JitterBuffer.MaxMs, s.BufferMs, " ms", out ms, out manualVal);
-            manualRow.Margin = new Thickness(0, 6, 0, 4);
+            var slider = Ui.LabeledSlider("Buffer", JitterBuffer.MinMs, JitterBuffer.MaxMs, s.BufferMs, " ms", out ms, out manualVal);
+            slider.Width = 300;
             ms.SmallChange = 10;
             ms.ValueChanged += (o, e) =>
             {
@@ -49,29 +42,17 @@ namespace DualEarbuds
                 s.BufferMs = v;
                 ctl.SmartSettingsChanged();
             };
-            card.Children.Add(manualRow);
-            card.Children.Add(PageKit.Divider());
+            manualRow = Kit.Row("Manual buffer", null, slider);
+            p.Add(manualRow);
 
             // hearing profiles
-            var hh = new Grid { Margin = new Thickness(0, 6, 0, 6) };
-            hh.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            hh.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var hl = new StackPanel { Margin = new Thickness(0, 0, 20, 0) };
-            hl.Children.Add(Ui.Text("Hearing profiles", 14, FontWeights.SemiBold, "Text"));
-            var hd = Ui.Text("A short listening test per person; the result gently tunes the EQ of the output they use (pick it on the Home page). Not a medical hearing test.", 12.5, FontWeights.Normal, "Muted");
-            hd.Margin = new Thickness(0, 2, 0, 0);
-            hl.Children.Add(hd);
-            hh.Children.Add(hl);
-            var newBtn = Ui.Button("New profile", "Ghost", (o, e) => StartTest(null));
-            newBtn.VerticalAlignment = VerticalAlignment.Top;
-            Grid.SetColumn(newBtn, 1);
-            hh.Children.Add(newBtn);
-            card.Children.Add(hh);
+            var newBtn = Kit.Secondary("New profile", (o, e) => StartTest(null));
+            p.Add(Kit.Row("Hearing profiles", "A short listening test per person gently tunes the EQ of the output they use. Not a medical hearing test.", newBtn));
             profileList = new StackPanel();
-            card.Children.Add(profileList);
+            p.Add(profileList);
             testPanel = new StackPanel { Visibility = Visibility.Collapsed };
-            card.Children.Add(testPanel);
-            Root.Children.Add(Ui.Card(card));
+            p.Add(testPanel);
+            Root.Children.Add(p.Root);
             UpdateManual();
             FillProfiles();
         }
@@ -80,23 +61,8 @@ namespace DualEarbuds
 
         static FrameworkElement Choice(string title, string text, string[] labels, string[] values, string current, Action<string> pick)
         {
-            var sp = new StackPanel { Margin = new Thickness(0, 6, 0, 6) };
-            var top = new Grid();
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            top.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            var left = new StackPanel { Margin = new Thickness(0, 0, 20, 0) };
-            left.Children.Add(Ui.Text(title, 14, FontWeights.SemiBold, "Text"));
-            var d = Ui.Text(text, 12.5, FontWeights.Normal, "Muted");
-            d.Margin = new Thickness(0, 2, 0, 0);
-            left.Children.Add(d);
-            top.Children.Add(left);
             int sel = Math.Max(0, Array.IndexOf(values, current));
-            var seg = PageKit.Segmented("smart-" + title, labels, sel, i => pick(values[i]));
-            seg.VerticalAlignment = VerticalAlignment.Center;
-            Grid.SetColumn(seg, 1);
-            top.Children.Add(seg);
-            sp.Children.Add(top);
-            return sp;
+            return Kit.Row(title, text, Kit.Segmented("smart-" + title, labels, sel, i => pick(values[i])));
         }
 
         void FillProfiles()
@@ -105,29 +71,19 @@ namespace DualEarbuds
             foreach (var p in ctl.Settings.Profiles)
             {
                 var prof = p;
-                var row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-                var info = new StackPanel();
-                info.Children.Add(Ui.Text(p.Name, 13.5, FontWeights.SemiBold, "Text"));
-                info.Children.Add(Ui.Text(Describe(p), 12, FontWeights.Normal, "Muted"));
-                row.Children.Add(info);
-                var retest = Ui.Button("Retest", "Ghost", (o, e) => StartTest(prof.Name));
-                retest.Padding = new Thickness(12, 5, 12, 5);
-                Grid.SetColumn(retest, 1);
-                row.Children.Add(retest);
-                var del = Ui.Button("Delete", "Ghost", (o, e) =>
+                var btns = new StackPanel { Orientation = Orientation.Horizontal };
+                btns.Children.Add(Kit.Quiet("Retest", (o, e) => StartTest(prof.Name)));
+                var del = Kit.Quiet("Delete", (o, e) =>
                 {
-                    if (MessageBox.Show("Delete the hearing profile \"" + prof.Name + "\"? Outputs using it go back to no profile.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
+                    if (MessageBox.Show("Delete the hearing profile \"" + prof.Name + "\"? Outputs using it go back to none.", "Dual Earbuds", MessageBoxButton.OKCancel, MessageBoxImage.Question) != MessageBoxResult.OK) return;
                     ctl.DeleteProfile(prof.Name);
                     FillProfiles();
                     ctl.UpdateStates();
                 });
-                del.Padding = new Thickness(12, 5, 12, 5);
-                del.Margin = new Thickness(8, 0, 0, 0);
-                Grid.SetColumn(del, 2);
-                row.Children.Add(del);
+                del.Margin = new Thickness(4, 0, 0, 0);
+                btns.Children.Add(del);
+                var row = Kit.Row(p.Name, Describe(p), btns);
+                row.Margin = new Thickness(16, 0, 0, 0);
                 profileList.Children.Add(row);
             }
         }
@@ -137,7 +93,7 @@ namespace DualEarbuds
             double maxL = 0, maxR = 0;
             for (int i = 0; i < 7; i++) { maxL = Math.Max(maxL, p.LeftDb[i]); maxR = Math.Max(maxR, p.RightDb[i]); }
             if (maxL < 0.1 && maxR < 0.1) return "No boost needed";
-            return "Boost up to +" + Math.Round(maxL, 1) + " dB left, +" + Math.Round(maxR, 1) + " dB right (mostly high tones)";
+            return "Up to +" + Math.Round(maxL, 1) + " dB left, +" + Math.Round(maxR, 1) + " dB right, mostly high tones";
         }
 
         // ------------------------------------------------------------------ hearing test
@@ -182,11 +138,11 @@ namespace DualEarbuds
             ShowSetup();
         }
 
+        // The test runs inside the panel, as an inset area on Surface2 (no extra card).
         Border Frame(UIElement child)
         {
-            var b = new Border { CornerRadius = new CornerRadius(14), Padding = new Thickness(18, 16, 18, 16), BorderThickness = new Thickness(1), Margin = new Thickness(0, 12, 0, 4), Child = child };
+            var b = new Border { Padding = new Thickness(16, 14, 16, 14), Child = child };
             b.SetResourceReference(Border.BackgroundProperty, "Surface2");
-            b.SetResourceReference(Border.BorderBrushProperty, "Accent");
             return b;
         }
 
@@ -194,29 +150,29 @@ namespace DualEarbuds
         {
             panel.Children.Clear();
             var sp = new StackPanel();
-            sp.Children.Add(Ui.Heading(name == null ? "New hearing profile" : "Retest " + name, 17));
-            var d = Ui.Text("Put both earbuds in, in a quiet room, and set the laptop volume to a comfortable level. You'll hear soft tones in one ear at a time - about 3 minutes. Not a medical hearing test.", 12.5, FontWeights.Normal, "Muted");
+            sp.Children.Add(Ui.Heading(name == null ? "New hearing profile" : "Retest " + name, 15));
+            var d = Kit.Hint("Both earbuds in, a quiet room, laptop volume at a comfortable level. Soft tones play in one ear at a time, about 3 minutes. Not a medical hearing test.");
             d.Margin = new Thickness(0, 4, 0, 12);
             sp.Children.Add(d);
             TextBox nameBox = null;
             if (name == null)
             {
                 nameBox = new TextBox { Width = 220, Text = "", MaxLength = 30 };
-                sp.Children.Add(PageKit.Row("Whose profile", null, nameBox));
+                sp.Children.Add(Kit.Row("Whose profile", null, nameBox));
             }
-            var pick = PageKit.Combo(260);
+            var pick = Kit.Combo(260);
             foreach (var o in outs) pick.Items.Add(new ComboBoxItem { Content = o.Name, Tag = o.Id });
             pick.SelectedIndex = 0;
-            sp.Children.Add(PageKit.Row("Test with", "The earbuds this person wears.", pick));
-            var err = Ui.Text("", 12.5, FontWeights.SemiBold, "Warn");
+            sp.Children.Add(Kit.Row("Test with", "The earbuds this person wears.", pick));
+            var err = Ui.Text("", 12, FontWeights.Normal, "Warn");
             sp.Children.Add(err);
             var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 10, 0, 0) };
-            var start = Ui.Button("Start the test", "Primary", (o, e) =>
+            var start = Kit.Primary("Start the test", (o, e) =>
             {
                 if (nameBox != null)
                 {
                     string n = nameBox.Text.Trim().Replace("|", " ");
-                    if (n.Length == 0) { err.Text = "Give the profile a name (for example the person's name)."; return; }
+                    if (n.Length == 0) { err.Text = "Give the profile a name, for example the person's."; return; }
                     if (ctl.Settings.FindProfile(n) != null) { err.Text = "There is already a profile called " + n + ". Use Retest on it instead."; return; }
                     name = n;
                 }
@@ -227,7 +183,7 @@ namespace DualEarbuds
                 ShowStep();
             });
             btns.Children.Add(start);
-            var cancel = Ui.Button("Cancel", "Ghost", (o, e) => finished(false));
+            var cancel = Kit.Quiet("Cancel", (o, e) => finished(false));
             cancel.Margin = new Thickness(8, 0, 0, 0);
             btns.Children.Add(cancel);
             sp.Children.Add(btns);
@@ -238,19 +194,19 @@ namespace DualEarbuds
         {
             panel.Children.Clear();
             var sp = new StackPanel();
-            progress = Ui.Text("", 11.5, FontWeights.Bold, "Accent");
+            progress = Ui.Mono("", 12, "Muted");
             sp.Children.Add(progress);
-            prompt = Ui.Heading("", 17);
+            prompt = Ui.Heading("", 15);
             prompt.Margin = new Thickness(0, 6, 0, 4);
             sp.Children.Add(prompt);
-            sp.Children.Add(Ui.Text("Answer for the tone you just heard (or didn't). Play it again as often as you like.", 12.5, FontWeights.Normal, "Muted"));
+            sp.Children.Add(Kit.Hint("Answer for the tone you just heard, or didn't. Play it again as often as you like."));
             var btns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 14, 0, 0) };
-            var yes = Ui.Button("I heard it", "Primary", (o, e) => Answer(true));
-            var no = Ui.Button("I can't hear it", "Ghost", (o, e) => Answer(false));
+            var yes = Kit.Primary("I heard it", (o, e) => Answer(true));
+            var no = Kit.Secondary("I can't hear it", (o, e) => Answer(false));
             no.Margin = new Thickness(8, 0, 0, 0);
-            var again = Ui.Button("Play again", "Ghost", (o, e) => Play());
+            var again = Kit.Quiet("Play again", (o, e) => Play());
             again.Margin = new Thickness(8, 0, 0, 0);
-            var stop = Ui.Button("Stop the test", "Ghost", (o, e) => finished(false));
+            var stop = Kit.Quiet("Stop the test", (o, e) => finished(false));
             stop.Margin = new Thickness(24, 0, 0, 0);
             btns.Children.Add(yes); btns.Children.Add(no); btns.Children.Add(again); btns.Children.Add(stop);
             sp.Children.Add(btns);
@@ -263,7 +219,7 @@ namespace DualEarbuds
         {
             int step = ear * 7 + freq + 1;
             double hz = HearingProfile.Freqs[freq];
-            progress.Text = "STEP " + step + " OF 14 · " + (ear == 0 ? "LEFT" : "RIGHT") + " EAR";
+            progress.Text = "step " + step + " of 14 \u00b7 " + (ear == 0 ? "left" : "right") + " ear \u00b7 " + (HearingProfile.Freqs[freq] >= 1000 ? (HearingProfile.Freqs[freq] / 1000) + " kHz" : HearingProfile.Freqs[freq] + " Hz");
             prompt.Text = "Can you hear the " + (hz >= 1000 ? (hz / 1000) + " kHz" : hz + " Hz") + " tone in your " + (ear == 0 ? "left" : "right") + " ear?";
         }
 
@@ -289,11 +245,11 @@ namespace DualEarbuds
             ctl.SetOutputProfile(output, p.Name);
             panel.Children.Clear();
             var sp = new StackPanel();
-            sp.Children.Add(Ui.Heading("Saved \"" + p.Name + "\"", 17));
-            var t = Ui.Text("It's now used on " + output.Name + ". You can switch it per output on the Home page, retest any time, or delete it. Not a medical hearing test - if you're worried about your hearing, see a doctor.", 12.5, FontWeights.Normal, "Muted");
+            sp.Children.Add(Ui.Heading("Saved \"" + p.Name + "\"", 15));
+            var t = Kit.Hint("Now used on " + output.Name + ". Change it per output on Home, retest or delete it here. Not a medical hearing test: if you're worried about your hearing, see a doctor.");
             t.Margin = new Thickness(0, 4, 0, 12);
             sp.Children.Add(t);
-            sp.Children.Add(Ui.Button("Done", "Primary", (o, e) => finished(true)));
+            sp.Children.Add(Kit.Primary("Done", (o, e) => finished(true)));
             panel.Children.Add(Frame(sp));
         }
     }
