@@ -7,7 +7,15 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
-    <!-- AudioPlaybackCapture requires RECORD_AUDIO; the microphone itself is only opened for talk-over -->
+    <!-- Setup check: "Allow" opens Android's own prompt to stop battery optimisation for this app -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Setup check: is Bluetooth on (Android 11 and older; 12+ needs no permission for this) -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH"
+        android:maxSdkVersion="30" />
+
+    <!-- AudioPlaybackCapture requires RECORD_AUDIO; the microphone itself is only opened for talk-over.
+         The microphone service type is only used while talk-over is on. -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />

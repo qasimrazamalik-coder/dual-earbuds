@@ -9,6 +9,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -33,6 +36,7 @@ import com.dualearbuds.host.audio.TalkMixer
 import com.dualearbuds.host.capture.AppCatalog
 import com.dualearbuds.host.capture.MicCapture
 import com.dualearbuds.host.capture.PlaybackCapture
+import com.dualearbuds.host.device.LocalOutputProbe
 import com.dualearbuds.host.net.Discovery
 import com.dualearbuds.host.net.NsdAdvertiser
 import com.dualearbuds.host.remote.MediaRemote
@@ -40,7 +44,9 @@ import com.dualearbuds.host.server.HostIdentity
 import com.dualearbuds.host.server.HostServer
 
 /**
- * Foreground service (type mediaProjection, plus microphone for talk-over) for "Share this phone".
+ * Foreground service (type mediaProjection; plus microphone only while talk-over is on) for "Share this phone".
+ * Holds a partial wake lock and a low-latency Wi-Fi lock ([HostLocks]) so sharing goes on with the
+ * screen off and on battery saver.
  * Owns the capture ([PlaybackCapture], Android 10+), the talk-over mic, the [HostServer]
  * (protocol v3 + v3.1), the mDNS advertisement and media-key remote control.
  * The phone keeps playing its own sound normally; capture only copies it.
@@ -54,9 +60,10 @@ class HostService : Service() {
         const val EXTRA_RESULT_DATA = "com.dualearbuds.host.extra.RESULT_DATA"
         const val CHANNEL_ID = "host_sharing"
         const val NOTIFICATION_ID = 4310
-        private const val VERSION = "3.1.0"
+        private const val VERSION = "3.2.0"
         private const val SILENCE_HINT_MS = 5_000L
         private const val SILENCE_LEVEL = 4 // |sample| at or below this counts as silence (about -78 dBFS)
+        private const val OUTPUT_POLL_MS = 4_000L // calibration can change while sharing
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -68,6 +75,7 @@ class HostService : Service() {
     private var nsd: NsdAdvertiser? = null
     private var remote: MediaRemote? = null
     private var inForeground = false
+    private var micForeground = false
     private val locks by lazy { HostLocks(this) }
     private val name by lazy { deviceName() }
 
@@ -81,7 +89,14 @@ class HostService : Service() {
     @Volatile private var noiseCancel = NoiseCancel.DEFAULT
     @Volatile private var resetDenoiser = false
     @Volatile private var capturing = false
-    @Volatile private var lastListenerCount = -1
+    @Volatile private var lastNotifKey = -1
+    private var outputCallback: AudioDeviceCallback? = null
+    private val outputPoll = object : Runnable {
+        override fun run() {
+            refreshLocalOutput()
+            main.postDelayed(this, OUTPUT_POLL_MS)
+        }
+    }
 
     private val page: ByteArray? by lazy {
         try {
@@ -103,7 +118,7 @@ class HostService : Service() {
             ACTION_START -> {
                 // startForegroundService() must be answered with startForeground() first, and on
                 // Android 14+ the mediaProjection type must be active before getMediaProjection().
-                if (!startForegroundSafely()) {
+                if (!startForegroundSafely(withMic = talking)) {
                     stopEverything("Android did not allow sharing to start. Open the app and try again.")
                     return START_NOT_STICKY
                 }
@@ -125,7 +140,7 @@ class HostService : Service() {
             ACTION_STOP -> stopEverything(null)
             else -> {
                 // Restarted without a projection token: it cannot be resumed, so clean up.
-                if (startForegroundSafely()) stopEverything(null) else stopSelf()
+                if (startForegroundSafely(withMic = talking)) stopEverything(null) else stopSelf()
             }
         }
         return START_NOT_STICKY
@@ -176,6 +191,13 @@ class HostService : Service() {
         remote = rem
         srv.onRemote = { action -> rem.perform(action) }
         srv.onChange = { onServerChanged(srv) }
+        // WebSocket writers and the UDP sender run at audio priority, like the capture thread.
+        srv.audioThreadSetup = {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Throwable) {
+            }
+        }
         applyToServer(srv, prefs)
         val port = try {
             srv.start(prefs.port)
@@ -188,6 +210,7 @@ class HostService : Service() {
         startCapture(proj, prefs.app)?.let { return it }
 
         locks.acquire()
+        watchLocalOutput()
         nsd = NsdAdvertiser(this)
         HostController.engine = engine
         HostController.refreshNetwork(this)
@@ -323,11 +346,55 @@ class HostService : Service() {
         return true
     }
 
+    // ---------------------------------------------------------------- host local need (v3.2)
+
+    /** Follows this phone's own output (earbuds connect/disconnect, calibration) for the common deadline. */
+    private fun watchLocalOutput() {
+        refreshLocalOutput()
+        val am = getSystemService(AudioManager::class.java)
+        if (am != null && outputCallback == null) {
+            val cb = object : AudioDeviceCallback() {
+                override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = refreshLocalOutput()
+                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) = refreshLocalOutput()
+            }
+            try {
+                am.registerAudioDeviceCallback(cb, main)
+                outputCallback = cb
+            } catch (_: Throwable) {
+            }
+        }
+        main.removeCallbacks(outputPoll)
+        main.postDelayed(outputPoll, OUTPUT_POLL_MS)
+    }
+
+    private fun unwatchLocalOutput() {
+        main.removeCallbacks(outputPoll)
+        val cb = outputCallback ?: return
+        outputCallback = null
+        try {
+            getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun refreshLocalOutput() {
+        val srv = server ?: return
+        val out = try {
+            LocalOutputProbe.current(this)
+        } catch (_: Throwable) {
+            return
+        }
+        srv.setLocalNeed(out.needMs)
+        HostController.reportLocalOutput(out)
+    }
+
     private fun onServerChanged(srv: HostServer) {
         val list = srv.listeners()
         HostController.reportListeners(list)
-        if (list.size != lastListenerCount) {
-            lastListenerCount = list.size
+        HostController.reportPlayout(srv.playoutMs)
+        val key = list.size * 1000 + srv.playoutMs
+        if (key != lastNotifKey) {
+            lastNotifKey = key
             main.post { postNotification() }
         }
     }
@@ -367,10 +434,13 @@ class HostService : Service() {
                     resetDenoiser = true
                     talking = true
                     srv.setTalking(true)
+                    // Microphone service type now, so talk-over keeps working with the screen off.
+                    startForegroundSafely(withMic = true)
                 } else {
                     talking = false
                     mic.stop()
                     srv.setTalking(false)
+                    if (micForeground) startForegroundSafely(withMic = false)
                 }
                 postNotification()
             }
@@ -414,12 +484,14 @@ class HostService : Service() {
             } catch (_: Throwable) {
             }
             inForeground = false
+            micForeground = false
         }
         stopSelf()
     }
 
     private fun teardown() {
         if (HostController.engine === engine) HostController.engine = null
+        unwatchLocalOutput()
         talking = false
         mic.stop()
         stopCapture()
@@ -450,7 +522,7 @@ class HostService : Service() {
             }
         }
         projectionCallback = null
-        lastListenerCount = -1
+        lastNotifKey = -1
         locks.release()
     }
 
@@ -481,26 +553,28 @@ class HostService : Service() {
         }
     }
 
-    private fun startForegroundSafely(): Boolean {
-        if (inForeground) return true
+    /**
+     * Starts (or updates) the foreground service. Type mediaProjection always; plus microphone only
+     * while talk-over is on ([withMic]), so Android shows the mic indicator only when the mic is used.
+     * If Android refuses the microphone type, carries on with mediaProjection only.
+     */
+    private fun startForegroundSafely(withMic: Boolean = false): Boolean {
         val projectionType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-        // Also the microphone type, so talk-over keeps working with the screen off. It needs
-        // RECORD_AUDIO (which capture needs anyway); if Android refuses it, start without it.
-        val withMic = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission()) {
+        val micType = if (withMic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission()) {
             projectionType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         } else {
             projectionType
         }
-        for (type in if (withMic != projectionType) listOf(withMic, projectionType) else listOf(projectionType)) {
+        for (type in if (micType != projectionType) listOf(micType, projectionType) else listOf(projectionType)) {
             try {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
                 inForeground = true
+                micForeground = type != projectionType
                 return true
             } catch (_: Throwable) {
             }
         }
-        inForeground = false
-        return false
+        return inForeground
     }
 
     private fun postNotification() {
@@ -530,10 +604,11 @@ class HostService : Service() {
         )
         val count = server?.listenerCount() ?: 0
         var text = when (count) {
-            0 -> "Waiting for listeners to join"
+            0 -> "Waiting for listeners"
             1 -> "1 listener"
             else -> "$count listeners"
         }
+        server?.playoutMs?.let { if (count > 0) text += " · P $it ms" }
         if (talking) text += " · Talk-over on"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.host_ic_stat_share)
@@ -547,7 +622,7 @@ class HostService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(R.drawable.host_ic_stop, "Stop", stopIntent)
+            .addAction(R.drawable.host_ic_stop, "Stop sharing", stopIntent)
             .build()
     }
 }

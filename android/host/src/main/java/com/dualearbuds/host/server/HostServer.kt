@@ -19,14 +19,26 @@ data class HostLimits(
     val maxHeaderBytes: Int = 8 * 1024,
     val maxMessageBytes: Int = 4 * 1024,
     val idleTimeoutMs: Int = 30_000,
-    val queueMs: Int = 600,
+    /** Per-listener WebSocket audio queue; beyond it the oldest packet is dropped (and counted). */
+    val queueMs: Int = 300,
+    /** TCP send buffer per listener: small, so a slow listener can't build seconds of backlog. */
+    val sendBufferBytes: Int = 64 * 1024,
     val pingIntervalMs: Long = 2_000,
     val clockIntervalMs: Long = 1_000,
     val writeStallMs: Long = 1_200,
     val guessMaxDistinct: Int = 10,
     val guessWindowMs: Long = 60_000,
     val guessLockMs: Long = 5 * 60_000,
-    val remotePerSecond: Double = 5.0
+    val remotePerSecond: Double = 5.0,
+    /** v3.2 UDP audio for native listeners (Android, Windows). */
+    val udp: Boolean = true,
+    /** No keepalive for this long: stop sending UDP to that listener. */
+    val udpExpireMs: Long = 5_000,
+    /** UDP send queue; older packets are dropped (and counted) beyond it. */
+    val udpQueueMs: Int = 300,
+    /** Keepalives accepted per IP (listeners send one per second). */
+    val keepalivePerSecond: Double = 4.0,
+    val keepaliveBurst: Double = 8.0
 )
 
 /** Who this host is, as reported in `/info` and `hello`. */
@@ -40,7 +52,8 @@ data class HostIdentity(
  * Host side of Dual Earbuds link protocol v3 (+ v3.1 additions) on plain sockets: HTTP/1.1 and
  * RFC 6455 WebSocket on one port. Free of Android APIs so it runs in JVM unit tests.
  * One accept thread, one short-lived thread per HTTP request, a reader + writer thread per listener
- * (max 16), and one housekeeping thread for ping (2 s), clock (1 s) and stalled writers.
+ * (max 16), and one housekeeping thread for ping (2 s), clock (1 s), the common deadline P (v3.2)
+ * and stalled writers.
  *
  * [sendAudio] must be called from a single thread (the capture thread).
  */
@@ -86,8 +99,18 @@ class HostServer(
     @Volatile
     private var sourceApp: String? = null
 
+    /** The common deadline P (v3.2) now in force, announced with `playout`. */
     @Volatile
     var playoutMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
+        private set
+
+    /**
+     * Host local need (v3.2): how late this phone's own ear hears the captured app (its earbuds'
+     * calibrated latency, or 180 ms Bluetooth / 20 ms wired). P never goes below it.
+     */
+    @Volatile
+    var localNeedMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
+        private set
 
     /** Current sample rate, 0 while not sharing. */
     @Volatile
@@ -100,6 +123,22 @@ class HostServer(
 
     val maxClients: Int get() = if (party) limits.maxClientsParty else limits.maxClients
 
+    /** UDP audio port (same number as [port]), or 0 when UDP is off or could not bind. */
+    val udpPort: Int get() = udp.port
+
+    /** Packets the UDP sender dropped because it fell behind (should stay 0). */
+    val udpDropped: Long get() = udp.droppedPackets.get()
+
+    /** Keepalives ignored (rate limit, malformed, unknown token). */
+    val udpIgnored: Long get() = udp.ignoredKeepalives.get()
+
+    /**
+     * Run at the start of every audio thread the server makes (WebSocket writers, UDP sender), e.g.
+     * to raise it to THREAD_PRIORITY_URGENT_AUDIO on Android. Set before [start].
+     */
+    @Volatile
+    var audioThreadSetup: () -> Unit = {}
+
     private val startedAt = clock()
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -110,23 +149,33 @@ class HostServer(
     private val guard = GuessGuard(clock, limits.guessMaxDistinct, limits.guessWindowMs, limits.guessLockMs)
     private val remoteLimiter = RateLimiter(limits.remotePerSecond, limits.remotePerSecond, clock)
     private val clockTrack = ClockTrack()
+    private val playout = Playout()
     private val clientsLock = Any()
 
     @Volatile
     private var clients: Array<ListenerSession> = emptyArray()
 
     // Audio frame pool: frames are shared by all listeners and reused round-robin. The pool covers
-    // well over queue (600 ms) + write-stall limit, so a frame is never rewritten while queued or sending.
+    // well over queue (300 ms) + write-stall limit, so a frame is never rewritten while queued or sending.
     private var pool: Array<ByteArray> = emptyArray()
     private var poolIndex = 0
     private var poolFrameLen = 0
     private val seq = AtomicInteger(0)
+
+    private val udp = UdpAudio(
+        limits = limits,
+        clock = clock,
+        sessions = { clients },
+        onTransportChange = { onChange?.invoke() },
+        threadSetup = { audioThreadSetup() }
+    )
 
     private val owner = object : SessionOwner {
         override val limits: HostLimits get() = this@HostServer.limits
         override fun nowMs(): Long = clock()
         override fun onText(session: ListenerSession, text: String) = handleText(session, text)
         override fun onClosed(session: ListenerSession) = removeClient(session)
+        override fun audioThreadSetup() = this@HostServer.audioThreadSetup()
     }
 
     /** Host time used on the wire (`ping.t`, `sync.h`, `clock.h`): ms since this server was made. */
@@ -164,6 +213,7 @@ class HostServer(
         val bound = ss ?: throw (lastError ?: IOException("No free port"))
         serverSocket = bound
         port = bound.localPort
+        if (limits.udp) udp.start(port) // fails quietly: listeners then get WebSocket audio
         running.set(true)
         acceptThread = Thread({ acceptLoop(bound) }, "host-accept").apply {
             isDaemon = true
@@ -183,6 +233,7 @@ class HostServer(
         } catch (_: IOException) {
         }
         serverSocket = null
+        udp.stop()
         // Polite close (listeners may auto-reconnect when sharing resumes); force after a short wait.
         for (c in clients) c.sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_GOING_AWAY, "Host stopped"), closeAfter = true)
         val until = clock() + STOP_DRAIN_MS
@@ -227,6 +278,11 @@ class HostServer(
     fun setPin(newPin: String?) {
         require(newPin == null || RoomPin.isValid(newPin)) { "PIN must be 4-6 digits" }
         pin = newPin
+    }
+
+    /** Sets the host local need (ms, 0–400); P follows within one housekeeping tick. */
+    fun setLocalNeed(ms: Int) {
+        localNeedMs = ms.coerceIn(0, Playout.MAX_MS)
     }
 
     fun setRemoteAllowed(on: Boolean) {
@@ -306,6 +362,12 @@ class HostServer(
         clockTrack.record(s, capturedAtHostMs)
         val targets = clients
         if (targets.isEmpty()) return
+        // v3.2: listeners with working UDP get no WebSocket audio.
+        val now = clock()
+        var viaUdp = 0
+        for (c in targets) if (c.usesUdp(now)) viaUdp++
+        if (viaUdp > 0) udp.offer(s, r, pcm, off, len)
+        if (viaUdp == targets.size) return
         val payloadLen = AudioPacket.HEADER_SIZE + len
         val frameLen = WsCodec.headerSize(payloadLen) + payloadLen
         if (frameLen != poolFrameLen || pool.isEmpty()) {
@@ -318,7 +380,7 @@ class HostServer(
         val h = WsCodec.writeHeader(buf, 0, WsCodec.OP_BINARY, payloadLen)
         AudioPacket.writeHeader(buf, h, r, s)
         System.arraycopy(pcm, off, buf, h + AudioPacket.HEADER_SIZE, len)
-        for (c in targets) c.offerAudio(buf)
+        for (c in targets) if (!c.usesUdp(now)) c.offerAudio(buf)
     }
 
     // ------------------------------------------------------------------ listener messages
@@ -344,6 +406,8 @@ class HostServer(
                 st.underruns?.let { session.underruns = it }
                 st.playing?.let { session.playing = it }
                 st.synced?.let { session.syncedHint = it }
+                st.needMs?.let { session.needMs = it }
+                st.syncErrMs?.let { session.syncErrMs = it }
                 onChange?.invoke()
             }
             "sync" -> {
@@ -352,6 +416,13 @@ class HostServer(
                 val first = session.lastSyncAt == 0L
                 session.lastSyncAt = clock()
                 if (first) onChange?.invoke()
+            }
+            "udp" -> {
+                // v3.2: the listener got no UDP (ok=false: use the WebSocket) or wants UDP again (ok=true).
+                val ok = m.bool("ok") ?: return
+                if (session.udpRefused == !ok) return
+                session.udpRefused = !ok
+                onChange?.invoke()
             }
             "remote" -> {
                 if (!remoteAllowed) return
@@ -528,7 +599,13 @@ class HostServer(
         }
         val name = sanitizeName(req.query["name"] ?: "")
         val session = ListenerSession(nextId.getAndIncrement(), socket, input, output, client, name, address, owner)
-        session.send(HostMessages.hello(facts()))
+        // UDP audio only for native listeners; browsers keep WebSocket audio.
+        val udpPort = udp.port
+        session.udpOffered = client != "web" && udpPort > 0
+        session.send(
+            if (session.udpOffered) HostMessages.hello(facts(), udpPort, UdpPacket.tokenHex(session.token))
+            else HostMessages.hello(facts())
+        )
         if (talking) session.send(HostMessages.talk(true))
         synchronized(clientsLock) {
             if (clients.size >= maxClients) {
@@ -545,6 +622,10 @@ class HostServer(
             clients = clients + session
         }
         socket.soTimeout = limits.idleTimeoutMs
+        try {
+            socket.sendBufferSize = limits.sendBufferBytes
+        } catch (_: IOException) {
+        }
         session.lastHeard = clock()
         session.startWriter()
         onChange?.invoke()
@@ -570,10 +651,17 @@ class HostServer(
                 return
             }
             val now = clock()
+            var udpExpired = false
             for (c in clients) {
                 val started = c.writeStartedAt
                 if (started != 0L && now - started > limits.writeStallMs) c.close()
+                // No keepalive for 5 s: forget the UDP address, audio goes back to the WebSocket.
+                if (c.udpAddress != null && now - c.udpHeardAt > limits.udpExpireMs) {
+                    c.udpAddress = null
+                    udpExpired = true
+                }
             }
+            if (udpExpired) onChange?.invoke()
             if (now >= nextPing) {
                 nextPing = now + limits.pingIntervalMs
                 broadcastText(HostMessages.ping(hostMs()))
@@ -582,6 +670,27 @@ class HostServer(
                 nextClock = now + limits.clockIntervalMs
                 if (rate > 0) clockTrack.clockMessage()?.let { broadcastText(it) }
             }
+            updatePlayout(now)
+        }
+    }
+
+    /** Recomputes P from the synced listeners' needs and the local need; announces a change. */
+    private fun updatePlayout(now: Long) {
+        val all = clients
+        var anyoneSynced = false
+        val needs = IntArray(all.size)
+        var n = 0
+        for (c in all) {
+            val info = c.info(now)
+            if (!info.synced) continue
+            anyoneSynced = true
+            needs[n++] = c.needMs ?: HostMessages.DEFAULT_PLAYOUT_MS
+        }
+        val target = Playout.target(needs.asIterable().take(n), localNeedMs)
+        if (playout.step(target, now, anyoneSynced)) {
+            playoutMs = playout.currentMs
+            broadcastText(HostMessages.playout(playoutMs))
+            onChange?.invoke()
         }
     }
 
@@ -618,7 +727,7 @@ class HostServer(
     }
 
     companion object {
-        /** 256 × 10 ms = 2.56 s of frames, > 600 ms queue + 1.2 s write stall + housekeeping tick. */
+        /** 256 × 10 ms = 2.56 s of frames, > 300 ms queue + 1.2 s write stall + housekeeping tick. */
         private const val POOL_SIZE = 256
         private const val HOUSEKEEPING_TICK_MS = 100L
         private const val STOP_DRAIN_MS = 300L

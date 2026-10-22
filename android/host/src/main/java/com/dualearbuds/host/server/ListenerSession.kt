@@ -3,6 +3,7 @@ package com.dualearbuds.host.server
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.InetSocketAddress
 import java.net.Socket
 import java.net.SocketTimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
@@ -23,7 +24,13 @@ data class ListenerInfo(
     val rttMs: Int,
     val dropped: Long,
     /** The listener is doing clock sync (v3.1): it sent `sync` recently or said so in `status`. */
-    val synced: Boolean
+    val synced: Boolean,
+    /** v3.2 `needMs` from its status, or null when it doesn't report one. */
+    val needMs: Int? = null,
+    /** Offset from the common deadline (+ = late), or null when unknown. */
+    val syncErrMs: Int? = null,
+    /** How audio reaches it: "udp" or "ws". */
+    val transport: String = "ws"
 ) {
     val displayName: String get() = device.ifBlank { name.ifBlank { "Listener" } }
 }
@@ -34,6 +41,8 @@ internal interface SessionOwner {
     fun nowMs(): Long
     fun onText(session: ListenerSession, text: String)
     fun onClosed(session: ListenerSession)
+    /** Raises the calling (writer) thread to audio priority where the platform allows it. */
+    fun audioThreadSetup() {}
 }
 
 /**
@@ -66,6 +75,31 @@ internal class ListenerSession(
     @Volatile var playing = false
     @Volatile var syncedHint: Boolean? = null
     @Volatile var rttMs = -1
+    @Volatile var needMs: Int? = null
+    @Volatile var syncErrMs: Int? = null
+
+    // ---- UDP audio (v3.2)
+    /** Random per WebSocket session; proves a UDP keepalive comes from this session. */
+    val token: ByteArray = UdpPacket.newToken()
+    /** `hello` offered UDP (native client and the host's UDP socket is up). */
+    @Volatile var udpOffered = false
+    /** Learned from the latest keepalive. */
+    @Volatile var udpAddress: InetSocketAddress? = null
+    @Volatile var udpHeardAt = 0L
+    /** The listener said `{"type":"udp","ok":false}`: send audio over the WebSocket. */
+    @Volatile var udpRefused = false
+
+    /** Audio goes over UDP now: offered, not refused, and a keepalive within the last 5 s. */
+    fun usesUdp(now: Long): Boolean =
+        udpOffered && !udpRefused && udpAddress != null && now - udpHeardAt <= limits.udpExpireMs
+
+    /** Where to send UDP audio now, or null. */
+    fun udpTarget(now: Long): InetSocketAddress? = if (usesUdp(now)) udpAddress else null
+
+    fun matchesToken(buf: ByteArray, off: Int): Boolean {
+        for (i in token.indices) if (buf[off + i] != token[i]) return false
+        return true
+    }
     @Volatile var dropped = 0L
 
     val isClosed: Boolean get() = closed.get()
@@ -74,7 +108,10 @@ internal class ListenerSession(
         val recentSync = lastSyncAt != 0L && now - lastSyncAt <= SYNC_FRESH_MS
         return ListenerInfo(
             id, name, client, address, device, earbuds, battery, volume, bufferMs, underruns, playing, rttMs, dropped,
-            synced = syncedHint ?: recentSync
+            synced = syncedHint ?: recentSync,
+            needMs = needMs,
+            syncErrMs = syncErrMs,
+            transport = if (usesUdp(now)) "udp" else "ws"
         )
     }
 
@@ -97,6 +134,10 @@ internal class ListenerSession(
     }
 
     private fun writerLoop() {
+        try {
+            owner.audioThreadSetup()
+        } catch (_: Throwable) {
+        }
         try {
             while (!closed.get()) {
                 val item = outbox.take(1000) ?: continue

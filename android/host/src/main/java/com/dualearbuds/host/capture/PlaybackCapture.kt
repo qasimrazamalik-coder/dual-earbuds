@@ -17,6 +17,20 @@ import androidx.annotation.RequiresApi
 internal object PlaybackCapture {
     const val SAMPLE_RATE = 48_000
 
+    /** One 10 ms packet: what the capture thread reads per call. */
+    const val PACKET_BYTES = SAMPLE_RATE / 100 * 4
+
+    /**
+     * AudioRecord's own buffer: at least 2× the minimum and 100 ms, so a late wake-up of the capture
+     * thread (screen off, battery saver) is absorbed instead of losing sound. It adds no delay: the
+     * thread reads 10 ms at a time as soon as each is there.
+     */
+    fun bufferBytes(): Int {
+        val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
+        val packets = maxOf(2 * maxOf(minBuf, 0), PACKET_BYTES * 10)
+        return (packets + PACKET_BYTES - 1) / PACKET_BYTES * PACKET_BYTES
+    }
+
     /** Returns an initialized AudioRecord or null. The caller must hold RECORD_AUDIO. */
     @SuppressLint("MissingPermission")
     @RequiresApi(Build.VERSION_CODES.Q)
@@ -32,11 +46,9 @@ internal object PlaybackCapture {
                 .setSampleRate(SAMPLE_RATE)
                 .setChannelMask(AudioFormat.CHANNEL_IN_STEREO)
                 .build()
-            val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
-            val packet = SAMPLE_RATE / 100 * 4
             val rec = AudioRecord.Builder()
                 .setAudioFormat(format)
-                .setBufferSizeInBytes(maxOf(minBuf, packet * 8))
+                .setBufferSizeInBytes(bufferBytes())
                 .setAudioPlaybackCaptureConfig(builder.build())
                 .build()
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
