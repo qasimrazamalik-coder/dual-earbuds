@@ -117,12 +117,17 @@ No. Only the optional update check uses the internet.
 
 CI builds, tests and publishes both apps on every tagged release.
 
+Interop check (Android host ↔ Windows listener, Windows host ↔ Android listener, UDP loss and fallback, browser path),
+on Linux with mono, a JDK 17+ and the Kotlin 2.0 compiler jars (Gradle's own `lib/` works):
+`KOTLIN_LIB=/opt/gradle-8.14.3/lib tests/interop/run.sh` — see the header of [run.sh](tests/interop/run.sh).
+
 ```
 dual-earbuds/
 ├── windows/   Windows app (src/Engine, src/App, src/Setup), tests, build script
 ├── android/   Android app (app/) and phone-to-phone host module (host/)
 ├── shared/    browser player page served by every host
 ├── docs/      protocol, screenshots
+├── tests/     interop harness (all implementations of the link protocol against each other)
 └── assets/    logo
 ```
 

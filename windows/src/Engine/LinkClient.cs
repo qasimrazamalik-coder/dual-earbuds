@@ -697,6 +697,7 @@ namespace DualEarbuds
         volatile IPEndPoint udpHost;
         long udpPackets, udpRecovered, wsPackets;
         public bool DisableUdp;                     // tests / troubleshooting: WebSocket audio only
+        public Func<byte[], int, bool> UdpDropForTest;   // tests: simulated Wi-Fi loss (true = this datagram is lost)
 
         public string Transport { get { return udpHealth.Active((long)NowMs) ? "udp" : "ws"; } }
         public long UdpPackets { get { return Interlocked.Read(ref udpPackets); } }
@@ -769,6 +770,8 @@ namespace DualEarbuds
                     try { n = sock.ReceiveFrom(buf, ref from); }
                     catch (SocketException) { if (udpSock != sock) return; Thread.Sleep(5); continue; }
                     catch (ObjectDisposedException) { return; }
+                    var drop = UdpDropForTest;
+                    if (drop != null && drop(buf, n)) continue;
                     var ep = from as IPEndPoint;
                     var host = udpHost;
                     if (ep == null || host == null) continue;
