@@ -864,6 +864,7 @@ class PlaybackService : Service() {
                 .put("playing", st.status == PlayerStatus.PLAYING && !userMuted)
             val need = engineStats.needMs
             if (need != null) json.put("needMs", need)
+            if (engineStats.synced) json.put("syncErrMs", Math.round(engineStats.syncErrorMs).toInt())
             if (conn.send(json.toString()) && need != null) sentNeedMs = need
         } catch (_: Throwable) {
         }
