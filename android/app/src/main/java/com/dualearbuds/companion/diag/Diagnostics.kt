@@ -1,14 +1,16 @@
 package com.dualearbuds.companion.diag
 
+import android.content.Context
 import android.os.Build
 import com.dualearbuds.companion.BuildConfig
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.data.SoundSettings
+import com.dualearbuds.companion.power.PowerState
 import com.dualearbuds.companion.service.PlaybackController
 
 /** Gathers "Copy diagnostics" text. The link key and PIN are never included (see [Redact]). */
 object Diagnostics {
-    fun collect(): String {
+    fun collect(context: Context? = null): String {
         val p = PlaybackController.state.value
         val b = PlaybackController.buffer.value
         val e = EarbudsMonitor.state.value
@@ -40,7 +42,12 @@ object Diagnostics {
                 eq = (SoundSettings.eqManual.value?.label ?: "Auto") + " → " + p.eqInUse.label +
                     " · Smart EQ ${SoundSettings.smartEq.value.label}",
                 dialogue = SoundSettings.dialogue.value.label,
-                logLines = AppLog.ring.snapshot()
+                logLines = AppLog.ring.snapshot(),
+                transport = p.transport,
+                playoutMs = p.playoutMs,
+                needMs = p.needMs,
+                usedLatency = p.usedLatencyMs?.let { String.format(java.util.Locale.US, "%.0f ms (%s)", it, p.latencySource?.label ?: "?") } ?: "",
+                power = context?.let { PowerState.read(it).summary() } ?: ""
             )
         )
     }

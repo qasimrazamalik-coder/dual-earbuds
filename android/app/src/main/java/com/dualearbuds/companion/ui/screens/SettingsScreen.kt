@@ -121,7 +121,7 @@ fun SettingsScreen(
 private fun copyDiagnostics(context: Context) {
     try {
         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-        cm.setPrimaryClip(ClipData.newPlainText("Dual Earbuds diagnostics", Diagnostics.collect()))
+        cm.setPrimaryClip(ClipData.newPlainText("Dual Earbuds diagnostics", Diagnostics.collect(context)))
         Toast.makeText(context, "Diagnostics copied", Toast.LENGTH_SHORT).show()
     } catch (_: Throwable) {
         Toast.makeText(context, "Couldn't copy diagnostics", Toast.LENGTH_SHORT).show()

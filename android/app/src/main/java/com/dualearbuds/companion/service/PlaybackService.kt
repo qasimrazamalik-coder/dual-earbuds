@@ -4,8 +4,10 @@ import android.Manifest
 import android.app.Notification
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.media.AudioManager
@@ -59,6 +61,7 @@ import com.dualearbuds.companion.net.UdpPolicy
 import com.dualearbuds.companion.net.UdpSignal
 import com.dualearbuds.companion.net.UdpWire
 import com.dualearbuds.companion.net.UserError
+import com.dualearbuds.companion.power.PowerState
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
@@ -125,6 +128,10 @@ class PlaybackService : Service() {
     @Volatile
     private var focusMuted = false
 
+    /** When the transient focus loss began (elapsedRealtime), 0 when not muted for focus. */
+    @Volatile
+    private var focusMutedAt = 0L
+
     @Volatile
     private var userMuted = false
 
@@ -155,6 +162,17 @@ class PlaybackService : Service() {
     private var sourceApp = ""
 
     private var syncJob: Job? = null
+    private var powerReceiverRegistered = false
+
+    /** Battery saver switched: note it (diagnostics, Now Playing) and make sure the locks are still held. */
+    private val powerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            val facts = PowerState.read(applicationContext)
+            AppLog.i("Power: ${facts.summary()}")
+            PlaybackController.update { it.copy(powerSave = facts.powerSave, backgroundRestricted = facts.backgroundRestricted) }
+            if (sessionJob?.isActive == true) acquireLocks()
+        }
+    }
 
     private val packets = AtomicLong()
     private val lost = AtomicLong()
@@ -187,6 +205,16 @@ class PlaybackService : Service() {
         applyBufferSettings(PlaybackController.buffer.value)
         createMediaSession()
         startObservers()
+        try {
+            ContextCompat.registerReceiver(
+                this,
+                powerReceiver,
+                IntentFilter(PowerManager.ACTION_POWER_SAVE_MODE_CHANGED),
+                ContextCompat.RECEIVER_NOT_EXPORTED
+            )
+            powerReceiverRegistered = true
+        } catch (_: Throwable) {
+        }
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -234,6 +262,13 @@ class PlaybackService : Service() {
         sessionJob?.cancel()
         sessionJob = null
         stopUdp()
+        if (powerReceiverRegistered) {
+            try {
+                unregisterReceiver(powerReceiver)
+            } catch (_: Throwable) {
+            }
+            powerReceiverRegistered = false
+        }
         connection?.close()
         connection = null
         engine.stop()
@@ -279,6 +314,8 @@ class PlaybackService : Service() {
         requestFocus()
         mediaSession?.isActive = true
         updateMediaSession()
+        val power = PowerState.read(applicationContext)
+        AppLog.i("Power: ${power.summary()}")
 
         applyBufferSettings(PlaybackController.buffer.value)
         engine.gain = PlaybackController.volume.value / 100f
@@ -294,7 +331,9 @@ class PlaybackService : Service() {
                 party = false,
                 packets = 0, lost = 0, dropped = 0, underruns = 0, userMuted = false,
                 remote = false, talking = false, source = "all", sourceApp = "", hostEq = null,
-                synced = false, concealed = 0, pinRequired = false
+                synced = false, concealed = 0, pinRequired = false,
+                powerSave = power.powerSave, backgroundRestricted = power.backgroundRestricted,
+                transport = "", needMs = null
             )
         }
         sessionJob = scope.launch {
@@ -685,6 +724,24 @@ class PlaybackService : Service() {
             ) { a, b, c, d -> listOf(a, b, c, d) }.collect { applySound() }
         }
 
+        // An app that took transient focus and never gave it back must not mute us forever: after 20 s, and only
+        // when no call is going on, take focus back and play again.
+        scope.launch {
+            while (isActive) {
+                delay(5_000)
+                val since = focusMutedAt
+                if (!focusMuted || since == 0L || SystemClock.elapsedRealtime() - since < 20_000) continue
+                val am = getSystemService(Context.AUDIO_SERVICE) as? AudioManager ?: continue
+                val inCall = am.mode == AudioManager.MODE_IN_CALL || am.mode == AudioManager.MODE_IN_COMMUNICATION ||
+                    am.mode == AudioManager.MODE_RINGTONE
+                if (!inCall && sessionJob?.isActive == true) {
+                    AppLog.i("Audio focus not returned after 20 s: playing again")
+                    withContext(Dispatchers.Main) { requestFocus() }
+                    focusMutedAt = 0L
+                }
+            }
+        }
+
         // Live level for the meter: ~12 updates per second, only while a session runs.
         scope.launch {
             while (isActive) {
@@ -1049,12 +1106,15 @@ class PlaybackService : Service() {
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         when (change) {
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
-                // Phone call / navigation prompt: go quiet until it's over.
+                // Phone call / voice prompt: go quiet until it's over. The link and the buffer stay up, so the
+                // sound is back the moment focus returns.
                 focusMuted = true
+                focusMutedAt = SystemClock.elapsedRealtime()
                 applyMute()
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 focusMuted = false
+                focusMutedAt = 0L
                 applyMute()
             }
             AudioManager.AUDIOFOCUS_LOSS -> {
@@ -1095,6 +1155,7 @@ class PlaybackService : Service() {
         }
         focusRequest = null
         focusMuted = false
+        focusMutedAt = 0L
     }
 
     // ---------------------------------------------------------------- locks

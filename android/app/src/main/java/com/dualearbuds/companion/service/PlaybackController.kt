@@ -65,7 +65,10 @@ data class PlayerState(
     val usedLatencyMs: Double? = null,
     val latencySource: LatencySource? = null,
     /** v3.2: how audio arrives right now: "UDP", "WS", or "" while not connected. */
-    val transport: String = ""
+    val transport: String = "",
+    /** Battery saver is on / this app's background work is restricted (read when playback starts and on change). */
+    val powerSave: Boolean = false,
+    val backgroundRestricted: Boolean = false
 ) {
     /** True while the service is (trying to be) playing — i.e. between Start and Stop. */
     val running: Boolean
