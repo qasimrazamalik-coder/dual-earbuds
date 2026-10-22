@@ -271,7 +271,7 @@ namespace DualEarbuds
         {
             IPage p;
             if (pages.TryGetValue("phones", out p)) p.Rebuild();
-            if (pages.TryGetValue("home", out p)) p.Rebuild();
+            if (pages.TryGetValue("home", out p)) p.Refresh();   // listener rows update in place; output rows stay
         }
 
         public void Animate()

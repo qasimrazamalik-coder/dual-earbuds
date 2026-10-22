@@ -799,6 +799,8 @@ namespace DualEarbuds
 
         public void Refresh()
         {
+            ListenerRow lr;
+            foreach (var p in ctl.Phones) if (rows.TryGetValue(p.Id ?? "", out lr)) lr.Update(p, ctl.Party);
             updating = true;
             enable.IsChecked = ctl.Settings.PhoneLink;
             party.IsChecked = ctl.Party;
