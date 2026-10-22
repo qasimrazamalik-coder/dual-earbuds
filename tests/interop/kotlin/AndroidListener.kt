@@ -250,6 +250,8 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
     val droppedDatagrams = AtomicLong()
     val badTone = AtomicLong()
     @Volatile var wrapped = false
+    @Volatile var helloPc = ""
+    @Volatile var helloHost = HostKind.UNKNOWN
     val statusSent = AtomicLong()
     @Volatile var lastStatus = ""
     @Volatile var hostPlayout = -1
@@ -293,7 +295,7 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
             sendStatus()
             startSyncLoop()
         }
-        override fun onHello(pc: String, rate: Int, host: HostKind, party: Boolean) { mirroring = rate > 0 }
+        override fun onHello(pc: String, rate: Int, host: HostKind, party: Boolean) { mirroring = rate > 0; helloPc = pc; helloHost = host }
         override fun onMirroring(mirroring: Boolean, rate: Int) { this@ListenerSim.mirroring = mirroring; if (!mirroring) engine.flush() }
         override fun onParty(on: Boolean) = Unit
         override fun onControlVolume(volume: Int) = sendStatus()
@@ -455,6 +457,9 @@ object AndroidListener {
 
         runBlocking {
             if (pin != null) {
+                val badKey = ListenerSim(LinkTarget(host, port, if (key == "ZZZZ2345") "YYYY2345" else "ZZZZ2345", pin), r, 0.0, -1)
+                val (res0, _) = badKey.runOnce(4000)
+                r.check(res0.contains("WrongKey"), "wrong link key is rejected", res0)
                 val wrong = ListenerSim(LinkTarget(host, port, key, if (pin == "1111") "2222" else "1111"), r, 0.0, -1)
                 val (res, _) = wrong.runOnce(4000)
                 r.check(res == "wrongPin", "wrong PIN is rejected", res)
@@ -505,6 +510,9 @@ object AndroidListener {
             val st = sim.engine.stats()
             r.info("last status: ${sim.lastStatus}")
             r.info("packets=${sim.packets} ws=${sim.wsPackets} udpDatagrams=${sim.udpDatagrams} dropped=${sim.droppedDatagrams} lost=${sim.lost} P=${sim.hostPlayout} need=${st.needMs} events=${sim.udpEvents}")
+            val expectHost = when (a.str("expect-host")) { "android" -> HostKind.PHONE; "windows" -> HostKind.LAPTOP; else -> null }
+            r.check(sim.helloPc.isNotEmpty() && (expectHost == null || sim.helloHost == expectHost), "hello parsed (pc, host kind, playoutMs)",
+                "${sim.helloPc} / ${sim.helloHost} / P ${sim.hostPlayout}")
             val outage = if (fallbackMs > 0) fallbackMs / 1000.0 else 0.0 // packets sent while UDP was blocked are gone
             r.check(sim.packets.get() > (seconds - outage) * 100 * 0.7, "audio flows", "${sim.packets} packets in ${seconds}s" + if (outage > 0) " (${"%.1f".format(outage)} s blocked)" else "")
             r.check(sim.badTone.get() == 0L, "PCM is the 1 kHz tone (byte order, layout)", "${sim.badTone} odd packets")

@@ -5,7 +5,7 @@
 #   A  Android host (HostServer, Kotlin)      -> Windows listener (LinkClient, C#)
 #   B  Windows host (PhoneLink, C#)           -> Android listener (StreamConnection/UdpAudio + JVM driver, Kotlin)
 #   C  both hosts with 10 % random UDP loss at the listener, plus a browser-style client (client=web)
-# Each pairing checks: key + PIN auth (wrong / missing / right PIN), hello, UDP negotiation (token, keepalive), audio
+# Each pairing checks: key + PIN auth (wrong key, wrong / missing / right PIN), hello, UDP negotiation (token, keepalive), audio
 # over UDP and none on the WebSocket, continuous sequence numbers, clock sync against the host's real clock, status
 # needMs + syncErrMs, host P following needMs, the uint32 sequence wrap, and WebSocket fallback within ~2 s when
 # UDP is blocked.
@@ -78,9 +78,9 @@ pairing() {
   local pp=""
   if [ -n "${PROBE:-}" ]; then (sleep 1; web_probe --port "$PORT" ${PIN:+--pin "$PIN"} --seconds 4 > "$pl" 2>&1) & pp=$!; fi
   if [ "$host" = kotlin ]; then
-    csharp --mode listen --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} "$@" > "$ll" 2>&1
+    csharp --mode listen --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host android "$@" > "$ll" 2>&1
   else
-    kotlin_listener --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} "$@" > "$ll" 2>&1
+    kotlin_listener --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host windows "$@" > "$ll" 2>&1
   fi
   local lr=$?
   local pr=0

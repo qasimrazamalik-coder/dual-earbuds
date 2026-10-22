@@ -157,6 +157,11 @@ static class InteropDriver
 
         if (pin != null)
         {
+            using (var badKey = new LinkClient(new LinkTarget { Host = host, Port = port, Key = key == "ZZZZ2345" ? "YYYY2345" : "ZZZZ2345" }, pin, "Wrong key"))
+            {
+                badKey.Start();
+                Check(WaitFor(() => badKey.State == ListenState.WrongKey, 6000), "wrong link key is rejected", badKey.State.ToString());
+            }
             using (var wrong = new LinkClient(target, pin == "1111" ? "2222" : "1111", "Wrong PIN"))
             {
                 wrong.Start();
@@ -259,6 +264,8 @@ static class InteropDriver
         Info("state=" + c.State + " packets=" + c.Packets + " ws=" + c.WsPackets + " udp=" + c.UdpPackets + " recovered=" + c.UdpRecovered +
              " dropped=" + dropped + " lost=" + c.Lost + " concealed=" + c.Concealed + " P=" + c.PlayoutMs + " need=" + c.NeedMs + " transport=" + c.Transport);
         double outage = fallbackMs > 0 ? fallbackMs / 1000.0 : 0;   // packets sent while UDP was blocked are gone
+        string expectHost = Arg(a, "expect-host", null);
+        Check(c.HostName.Length > 0 && (expectHost == null || c.HostKind == expectHost), "hello parsed (pc, host kind, playoutMs)", c.HostName + " / " + c.HostKind + " / P " + c.PlayoutMs);
         Check(c.Packets > (seconds - outage) * 100 * 0.7, "audio flows", c.Packets + " packets in " + seconds + " s" + (outage > 0 ? " (" + F(outage) + " s blocked)" : ""));
         Check(Interlocked.Read(ref badTone) == 0, "PCM is the 1 kHz tone (byte order, layout)", badTone + " odd packets");
         Check(udpAt >= 0, "UDP negotiated (hello udp+token, keepalive)", null);
