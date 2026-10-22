@@ -1,4 +1,4 @@
-# Dual Earbuds — Link Protocol v3 (with v3.1 additions)
+# Dual Earbuds — Link Protocol v3 (with v3.1 and v3.2 additions)
 
 The shared contract between every **host** (the Windows app, or an Android phone in *Share this phone* mode)
 and every **listener** (the Android app, the Windows app in *Listen to another device* mode — laptop to laptop —,
@@ -157,6 +157,54 @@ All optional; a listener or host that does not know them ignores them.
 ### Equalizer
 
 - Listener-local presets `flat|bass|voice|movie`. The host may suggest one: `{"type":"control","eq":"movie"}`.
+
+## v3.2 additions — one deadline for every ear, and a transport that doesn't stall
+
+### Common deadline (fixes "phones lag behind the laptop")
+
+- Every ear — the host's own outputs included — hears the sample captured at host time `t` at `t + P`.
+  `P` (playout) is chosen by the host, not fixed at 120 ms.
+- Listeners report what they need in `status`: `"needMs":<jitterP99 + outputLatency + 10>`
+  (jitter p99 over the last 30 s of packet arrivals; outputLatency calibrated or from the platform).
+- The host sets `P = clamp(max(needMs of listeners in sync mode, host local need), 40, 400)` where host local need =
+  the slowest *ticked* local output's latency (+ the Windows mixer buffer). It announces
+  `{"type":"playout","ms":P}` when P changes; increases apply at once, decreases at most 5 ms per second
+  (no audible jumps); a listener can't pull P above 400.
+- Windows host: each local output is delayed by `P − its outputLatency` (plus its manual Delay), so the laptop's
+  earbuds play at the same moment as every phone.
+- Android host: the captured app's own sound plays on the host phone immediately and cannot be delayed. The host
+  therefore uses its own earbuds' calibrated latency as its local need, so listeners line up with the host's ear.
+  If the host's earbuds aren't calibrated, assume 180 ms for Bluetooth, 20 ms for wired/speaker.
+- `hello` keeps `playoutMs` (= current P). Listeners from v3.1 that ignore `playout` still work (they use hello's value).
+
+### UDP audio (native listeners)
+
+TCP stalls the whole stream for a retransmit whenever Wi-Fi drops one frame; that is the "buffering".
+Native listeners (Android, Windows) therefore get audio over UDP; the WebSocket stays for control and as fallback.
+Browsers keep WebSocket audio.
+
+- `hello` carries `"udp":<port>` (the host binds a UDP socket on the same port number as TCP).
+- Listener → host (UDP, every 1 s and once at start): `DE3U` + 1 byte type 1 + 16-byte session token
+  (`hello.token`, random per WebSocket session). The host learns the listener's UDP address from it and starts
+  sending; if no keepalive arrives for 5 s it stops sending UDP to that listener.
+- Host → listener UDP datagram: `DE3A` + uint32 seq + int32 rate + 10 ms PCM (same as the WS packet body), followed by
+  **the previous packet again** (seq−1, same layout) — simple redundancy, so a single lost datagram costs nothing.
+  Datagram ≈ 3.9 KB (fragmented by IP; fine on LAN). Listeners dedupe by seq.
+- If the listener receives no UDP within 2 s of `hello`, it sends `{"type":"udp","ok":false}` and the host sends
+  audio over the WebSocket as before. The listener may switch to UDP later with `{"type":"udp","ok":true}`.
+- While UDP works, the host sends no binary audio on that WebSocket.
+- Security: the token proves the UDP sender is the WebSocket session that passed key/PIN checks; datagrams with an
+  unknown token are dropped silently. Rate-limit keepalives per IP.
+
+### Network and device hygiene (both platforms)
+
+- Sockets: TCP_NODELAY on; small send buffers on the host (≤ 64 KB per listener) so a slow listener can't build
+  seconds of backlog; real-time thread priority for capture, send and playback threads (Windows MMCSS "Pro Audio",
+  Android `THREAD_PRIORITY_URGENT_AUDIO`).
+- Android: `WifiManager.WifiLock` `WIFI_MODE_FULL_LOW_LATENCY` (API 29+, else `HIGH_PERF`) while hosting or listening,
+  a partial wake lock, foreground service, AudioTrack `PERFORMANCE_MODE_LOW_LATENCY`.
+- Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED | ES_CONTINUOUS)` while sharing/listening; opt the process out of
+  power throttling (EcoQoS) so battery saver doesn't stretch timers.
 
 ## Limits
 
