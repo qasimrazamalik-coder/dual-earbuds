@@ -105,7 +105,20 @@ function plcCrossfade(L,R,frames,rate){
 // Clock sync (protocol v3.1): offset = h - (c + now)/2 from the lowest-RTT of the last 8 sync replies;
 // packet seq is due at host time h(seq) + playoutMs. Small errors trim playbackRate by at most 0.5 %,
 // beyond 40 ms the playhead jumps. Without sync (old host) the Buffer slider rules as before.
-const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false};
+const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN};
+// Protocol v3.2 needMs: how late packets arrive versus a steady 10 ms schedule (p99 over 30 s) + output
+// latency + 10. The host sets the common deadline (playout) from every listener's need and announces it.
+const LATE={base:null,seq0:0,vals:[],max:3000};
+function noteLate(seq,now){
+  if(LATE.base===null){LATE.base=now;LATE.seq0=seq;return;}
+  const d=(seq-LATE.seq0)|0;
+  if(d<-1000||d>1000000){LATE.base=now;LATE.seq0=seq;return;}
+  let late=now-(LATE.base+d*10);
+  if(late<0){LATE.base+=late;late=0;}
+  LATE.vals.push(late);if(LATE.vals.length>LATE.max)LATE.vals.shift();
+}
+function lateP99(){if(!LATE.vals.length)return 0;const a=LATE.vals.slice().sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.floor(a.length*0.99))];}
+function needMs(){const out=ctx?(ctx.outputLatency||ctx.baseLatency||0)*1000:0;return Math.ceil(Math.max(lateP99()+10,30)+out+15);}
 function syncSend(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'sync',c:performance.now()}));}
 function syncTick(){syncSend();SYNC.quick++;clearTimeout(SYNC.timer);if(running)SYNC.timer=setTimeout(syncTick,SYNC.quick<5?200:2000);}
 function onSync(m){
@@ -128,6 +141,7 @@ function schedule(b,frames,rate,seq){
   let pr=1;
   if(due>=now+0.03){
     const err=playhead-due;               // > 0: we would play late
+    SYNC.err=err;
     if(playhead<now+0.02||Math.abs(err)>0.04){playhead=due;SYNC.trimming=false;}
     else{
       if(!SYNC.trimming&&Math.abs(err)>0.005)SYNC.trimming=true;
@@ -152,7 +166,9 @@ $('buf').oninput=()=>{showVals();save('buf',$('buf').value);sendStatus();};
 function setDot(c){$('dot').className='dot'+(c?' '+c:'');}
 function sendStatus(){
   if(!ws||ws.readyState!==1)return;
-  ws.send(JSON.stringify({type:'status',device:'Phone browser',earbuds:'',battery:-1,volume:Number($('vol').value),bufferMs:Number($('buf').value),underruns:0,playing:running&&packets>0}));
+  const st={type:'status',device:'Phone browser',earbuds:'',battery:-1,volume:Number($('vol').value),bufferMs:Number($('buf').value),underruns:0,playing:running&&packets>0,needMs:needMs()};
+  if(SYNC.ok&&SYNC.seq0>=0&&!isNaN(SYNC.err))st.syncErrMs=Math.round(SYNC.err*1000);
+  ws.send(JSON.stringify(st));
 }
 function setupMedia(){
   if(!('mediaSession' in navigator))return;
@@ -177,6 +193,7 @@ function onAudio(buf){
     if(d>1&&d<1000){gap=d-1;lost+=gap;}
   }
   lastSeq=seq;
+  noteLate(seq,performance.now());
   if(PLC.n&&PLC.n!==frames)PLC.n=0;        // the rate changed: start fresh
   for(let i=0;i<Math.min(gap,MAX_CONCEAL);i++){
     const cb=ctx.createBuffer(2,frames,rate);
@@ -195,6 +212,7 @@ function onAudio(buf){
 function onText(t){
   let m;try{m=JSON.parse(t);}catch(e){return;}
   if(m.type==='hello'){pcName=m.pc||'';if(typeof m.playoutMs==='number')SYNC.playout=Math.max(30,Math.min(1000,m.playoutMs));$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
+  else if(m.type==='playout'&&typeof m.ms==='number'){SYNC.playout=Math.max(30,Math.min(1000,m.ms));}
   else if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',t:m.t}));}
   else if(m.type==='sync'&&typeof m.c==='number'&&typeof m.h==='number'){onSync(m);}
   else if(m.type==='clock'&&typeof m.seq==='number'&&typeof m.h==='number'){SYNC.seq0=m.seq>>>0;SYNC.h0=m.h;}
@@ -252,13 +270,13 @@ async function start(){
       }else gain.connect(ctx.destination);
     }else if(useElement){try{await $('out').play();}catch(e){}}
     gain.gain.value=Number($('vol').value)/100;
-    running=true;packets=0;lost=0;lastSeq=-1;playhead=0;PLC.n=0;PLC.gap=false;
+    running=true;packets=0;lost=0;lastSeq=-1;playhead=0;PLC.n=0;PLC.gap=false;LATE.base=null;LATE.vals=[];
     $('go').textContent='Stop';$('go').className='big stop';
     connect();
-    statusTimer=setInterval(sendStatus,5000);
+    statusTimer=setInterval(sendStatus,3000);
     uiTimer=setInterval(()=>{
       $('pk').textContent=packets+' packets';$('lost').textContent=lost+' lost';
-      if(ctx)$('lat').textContent='buffer '+Math.max(0,Math.round((playhead-ctx.currentTime)*1000))+' ms';
+      if(ctx)$('lat').textContent=(SYNC.ok&&SYNC.seq0>=0?'P '+SYNC.playout+' ms · ':'')+'buffer '+Math.max(0,Math.round((playhead-ctx.currentTime)*1000))+' ms';
       if(ws&&ws.readyState===1&&packets>0)$('st').textContent=(SYNC.ok&&SYNC.seq0>=0?'Playing in step with the host.':'Playing.')+' You can lock the phone now.';
     },1000);
   }catch(e){$('st').textContent='Could not start audio: '+e.message;}
