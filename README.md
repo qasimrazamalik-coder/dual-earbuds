@@ -16,28 +16,24 @@ Watch a movie together, share music on a trip, run a silent party. Free, open so
 
 ---
 
-## Why Dual Earbuds?
+## What it does
 
-Windows and most phones send stereo sound to **only one pair of Bluetooth earbuds at a time**.
-Dual Earbuds gets around that the simple way: it plays the sound on every output your laptop can
-reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own earbuds.
+Windows and most phones send stereo audio to one pair of Bluetooth earbuds at a time. Dual Earbuds
+captures what a laptop or Android phone is playing and plays it on several outputs at once: the laptop's
+own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its own earbuds.
 
-- 🎧 **Two, three, ten pairs.** Laptop earbuds + any number of phones (up to 16 in Party mode).
-- 🎬 **Works with Netflix, YouTube, Spotify, games** — anything your laptop plays.
-- 📱 **Phone-to-phone.** Share your Android phone's music or YouTube with friends' phones (Android 10+).
-- 💻 **Laptop-to-laptop.** A second Windows laptop can listen and play to its own earbuds or speakers.
-- 🔗 **Join with a QR code or a link.** Open the link in any browser — phone, laptop, tablet or iPhone — and it plays, no install needed.
-- 🔒 **Private by design.** Local network only; every link has a secret key; devices that guess keys get locked out. Optional **room PIN** for Party mode.
-- ⚡ **In sync.** 10 ms audio packets, clock sync so every device plays the same moment, one-tap **earbud calibration**, and smooth recovery from dropped Wi-Fi packets.
-- 📡 **Finds each other.** Phones and laptops on the same Wi-Fi show up automatically; a hotspot helper for café and university Wi-Fi.
-- 🎚️ **Share everything or one app.** The whole laptop/phone, or only Spotify, YouTube, a game…
-- 🎙️ **Talk-over.** The host can speak to everyone (with mic noise cancelling); listeners can pause/skip if the host allows it.
-- 🧠 **Smart features (on-device, optional).** Smart EQ by app or by sound, dialogue boost and night mode, a smart buffer that learns your Wi-Fi, and per-person hearing profiles. No cloud, no account.
-- 🌗 **Light, dark or follow the system** on Windows and Android.
-- 🌙 **Keeps playing with the screen off** on Xiaomi, Redmi, POCO, Realme, OPPO, Samsung and others.
-- 🔋 **Shows earbuds battery** where the device reports it.
-- 🔄 **Updates itself** from GitHub releases, only when you say yes.
-- 🪶 **Lightweight.** Windows app under 1 MB, nothing extra to install (uses .NET Framework 4.8 built into Windows).
+| | |
+|---|---|
+| **Pairs** | Laptop outputs plus up to 8 listeners, 16 in Party mode |
+| **Hosts** | Windows laptop (any sound, including Netflix in the browser), Android 10+ phone |
+| **Listeners** | Android app, Windows app (laptop to laptop, phone to laptop), any browser via link, including iPhone |
+| **Sync** | One deadline for every ear: the host picks the playout delay from what each listener needs, delays its own outputs to match, and every device calibrates its earbuds' latency |
+| **Transport** | 10 ms PCM packets; UDP with redundancy for native listeners, WebSocket fallback and for browsers |
+| **Joining** | Automatic discovery on the same network, QR code, or a pasted link; optional room PIN |
+| **Source** | Whole device or a single app (Windows 10 build 20348+/11, Android capture rules apply) |
+| **On-device processing** | Optional smart EQ, dialogue boost, night mode, adaptive buffer, hearing profiles, mic noise suppression for talk-over |
+| **Privacy** | Local network only, per-link secret key, guessing lockout, no account, no cloud |
+| **Footprint** | Windows app under 1 MB on .NET Framework 4.8 (built into Windows); signed APK with in-app updates |
 
 ## Screenshots
 
@@ -69,9 +65,17 @@ reach, and streams it over **Wi-Fi or a hotspot** to phones, each with its own e
    └──► earbuds pair 1 (Bluetooth)        …up to 16 phones
 ```
 
-1. The Windows app captures what the laptop is playing (WASAPI loopback) and plays it on every output you tick.
-2. Phones scan a QR code and receive the same sound over the local network ([protocol](docs/protocol.md)).
-3. A per-device **Delay** lines up earbuds that lag; the phone's adaptive buffer keeps it smooth.
+1. The host (Windows laptop or Android phone) captures what it is playing and stamps every 10 ms packet with its clock.
+2. Listeners sync their clocks to the host and report how much delay they need for their Wi-Fi and earbuds.
+3. The host picks one deadline that covers everyone, delays its own outputs to it, and every ear plays each packet at
+   that moment ([protocol](docs/protocol.md)).
+
+### For the best sound and sync
+
+- Use a 5 GHz Wi-Fi network or a phone/laptop hotspot; keep listeners in the same room.
+- Calibrate each pair of earbuds once (hold an earbud to the mic, tap **Calibrate**).
+- On phones, prefer AAC or SBC over LDAC (Developer options → Bluetooth audio codec); LDAC adds delay.
+- Let the app run unrestricted in the background (the app's **Setup check** shows what to change on Samsung, Xiaomi/Redmi, Realme/OPPO).
 
 ## Get started
 
