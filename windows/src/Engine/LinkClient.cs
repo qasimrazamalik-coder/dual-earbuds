@@ -271,7 +271,10 @@ namespace DualEarbuds
 
         void RunLoop()
         {
-            int backoff = 1000;
+            // A Wi-Fi blip: try again within a quarter second, then back off. The jitter buffer, the clock sync and
+            // the sequence numbers are kept across a rejoin, so sync doesn't start over (a host restart is detected).
+            int backoff = 250;
+            bool everConnected = false;
             while (!stop)
             {
                 SetState(state == ListenState.Idle ? ListenState.Connecting : ListenState.Reconnecting, null);
@@ -288,12 +291,18 @@ namespace DualEarbuds
                         w.ConnectAsync(new Uri(target.WsUrl(pin, deviceName)), cts.Token).Wait();
                     }
                     connected = true;
-                    backoff = 1000;
-                    haveSeq = false;
-                    sync.Reset();
-                    packetClock.Reset();
-                    Buffer.Reset((long)NowMs);
-                    Log.Info("Listening to " + target.HostPort);
+                    backoff = 250;
+                    lastHostMessage = (long)NowMs;
+                    if (!everConnected)
+                    {
+                        haveSeq = false;
+                        sync.Reset();
+                        packetClock.Reset();
+                        Buffer.Reset((long)NowMs);
+                    }
+                    else { rejoined = true; Interlocked.Increment(ref rejoins); }
+                    everConnected = true;
+                    Log.Info((rejoined ? "Rejoined " : "Listening to ") + target.HostPort);
                     SendText("{\"type\":\"sync\",\"c\":" + Num(NowMs) + "}");
                     Receive(w);
                 }
@@ -326,7 +335,7 @@ namespace DualEarbuds
                 if (refusal == "503") { SetState(ListenState.Full, "The host already has as many listeners as it allows."); Sleep(10000); continue; }
                 SetState(ListenState.Reconnecting, refusal == "unreachable" ? "Can't reach " + target.HostPort + " - is the other device sharing, on the same Wi-Fi?" : "Connection lost.");
                 Sleep(backoff);
-                backoff = Math.Min(10000, backoff * 2);
+                backoff = Math.Min(8000, backoff * 2);
             }
             if (state != ListenState.Kicked && state != ListenState.NeedPin && state != ListenState.WrongPin && state != ListenState.WrongKey)
                 SetState(ListenState.Idle, null);
@@ -334,8 +343,15 @@ namespace DualEarbuds
 
         void Sleep(int ms)
         {
-            for (int i = 0; i < ms / 100 && !stop; i++) Thread.Sleep(100);
+            for (int i = 0; i < Math.Max(1, ms / 50) && !stop; i++) Thread.Sleep(50);
         }
+
+        // rejoin bookkeeping
+        volatile bool rejoined;
+        long rejoins;
+        long lastHostMessage;
+        public long Rejoins { get { return Interlocked.Read(ref rejoins); } }
+        public const int HostSilentMs = 6000;   // the host pings every 2 s: three missed means the link is dead
 
         static string Flatten(Exception ex)
         {
@@ -395,6 +411,7 @@ namespace DualEarbuds
                     if (got >= buf.Length && !r.EndOfMessage) throw new IOException("message too large");
                 }
                 while (!r.EndOfMessage);
+                Interlocked.Exchange(ref lastHostMessage, (long)NowMs);
                 if (r.MessageType == WebSocketMessageType.Binary) OnAudio(buf, got);
                 else OnText(Encoding.UTF8.GetString(buf, 0, got));
             }
@@ -550,7 +567,7 @@ namespace DualEarbuds
             SendText(string.Format(CultureInfo.InvariantCulture,
                 "{{\"type\":\"status\",\"device\":\"{0}\",\"earbuds\":\"{1}\",\"battery\":{2},\"volume\":{3},\"bufferMs\":{4},\"underruns\":{5},\"playing\":{6},\"needMs\":{7}{8}}}",
                 MiniJson.Escape(deviceName), MiniJson.Escape(Earbuds ?? ""), Battery, hostVolume, bufferMs, Underruns, playing ? "true" : "false",
-                NeedMs, double.IsNaN(off) ? "" : ",\"offsetMs\":" + ((int)Math.Round(off)).ToString(CultureInfo.InvariantCulture)));
+                NeedMs, double.IsNaN(off) ? "" : ",\"syncErrMs\":" + ((int)Math.Round(off)).ToString(CultureInfo.InvariantCulture)));
         }
 
         void TickLoop()
@@ -570,6 +587,14 @@ namespace DualEarbuds
                     lastSync = now;
                     quickSyncs++;
                     SendText("{\"type\":\"sync\",\"c\":" + Num(NowMs) + "}");
+                }
+                if (now - Interlocked.Read(ref lastHostMessage) > HostSilentMs)
+                {
+                    // a half-open connection (Wi-Fi changed under it): drop it and rejoin
+                    Log.Info("Listen: nothing from " + target.HostPort + " for 6 s - rejoining");
+                    Interlocked.Exchange(ref lastHostMessage, now);
+                    try { w.Abort(); } catch { }
+                    continue;
                 }
                 if (udpSock != null && now - lastKeepalive >= UdpAudio.KeepaliveEveryMs) { lastKeepalive = now; SendKeepalive(); }
                 if (udpHealth.Tick(now) == UdpAction.SendOkFalse)
@@ -603,6 +628,13 @@ namespace DualEarbuds
         // Both paths (UDP and WebSocket) end here, one at a time; duplicates are dropped by sequence number.
         void OnPacket(byte[] b, int pcmAt, int frames, int r, uint seq)
         {
+            if (rejoined)
+            {
+                rejoined = false;
+                int d = unchecked((int)(seq - lastSeq));
+                // the host restarted (its numbers began again): a fresh stream and a fresh clock mapping
+                if (haveSeq && (d <= 0 || d > 1000)) { haveSeq = false; packetClock.Reset(); }
+            }
             if (r != rate || plc == null || plc.PacketFrames != PhoneLink.PacketFrames(r))
             {
                 rate = r;

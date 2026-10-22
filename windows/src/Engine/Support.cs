@@ -130,6 +130,7 @@ namespace DualEarbuds
         public string HostPort;   // "ip:port"
         public string Key;
         public string Name = "";
+        public string Kind = "windows";   // "android" = a phone that shares
         public string Link { get { return "http://" + HostPort + "/?k=" + Key; } }
     }
 
@@ -186,10 +187,12 @@ namespace DualEarbuds
         static bool OneOf(string v, string[] set) { return Array.IndexOf(set, v) >= 0; }
 
         // Most recent first, no duplicates (same address), at most 5.
-        public void AddRecent(string hostPort, string key, string name)
+        public void AddRecent(string hostPort, string key, string name) { AddRecent(hostPort, key, name, "windows"); }
+
+        public void AddRecent(string hostPort, string key, string name, string kind)
         {
             Recent.RemoveAll(r => string.Equals(r.HostPort, hostPort, StringComparison.OrdinalIgnoreCase));
-            Recent.Insert(0, new RecentHost { HostPort = hostPort, Key = key.ToUpperInvariant(), Name = Clean(name) });
+            Recent.Insert(0, new RecentHost { HostPort = hostPort, Key = key.ToUpperInvariant(), Name = Clean(name), Kind = kind == "android" ? "android" : "windows" });
             while (Recent.Count > MaxRecent) Recent.RemoveAt(Recent.Count - 1);
         }
 
@@ -279,7 +282,7 @@ namespace DualEarbuds
                                 break;
                             case "recent":
                                 if (p.Length >= 3 && DualEarbuds.LinkKey.IsValid(p[2]) && s.Recent.Count < MaxRecent)
-                                    s.Recent.Add(new RecentHost { HostPort = v, Key = p[2].ToUpperInvariant(), Name = p.Length >= 4 ? p[3] : "" });
+                                    s.Recent.Add(new RecentHost { HostPort = v, Key = p[2].ToUpperInvariant(), Name = p.Length >= 4 ? p[3] : "", Kind = p.Length >= 5 && p[4] == "android" ? "android" : "windows" });
                                 break;
                             case "listenout": if (v.Length > 0 && !s.ListenOutputs.Contains(v)) s.ListenOutputs.Add(v); break;
                             case "outfx":
@@ -350,7 +353,7 @@ namespace DualEarbuds
                 foreach (var kv in LatencyByName)
                     lines.Add("latency2\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
                 foreach (var hp in Profiles) lines.Add("profile\t" + hp.Serialize());
-                foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name));
+                foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name) + "\t" + r.Kind);
                 foreach (var id in ListenOutputs) lines.Add("listenout\t" + id);
                 foreach (var kv in Outs)
                 {

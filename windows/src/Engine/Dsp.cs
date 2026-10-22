@@ -654,19 +654,21 @@ namespace DualEarbuds
     // Token bucket: at most `perSecond` events per second, bursts up to the same number.
     public class RateLimiter
     {
-        readonly double perSecond;
+        readonly double perSecond, burst;
         double tokens;
         long last;
         bool started;
 
-        public RateLimiter(double perSecond) { this.perSecond = perSecond; tokens = perSecond; }
+        public RateLimiter(double perSecond) : this(perSecond, perSecond) { }
+
+        public RateLimiter(double perSecond, double burst) { this.perSecond = perSecond; this.burst = burst; tokens = burst; }
 
         public bool Allow(long nowMs)
         {
             if (!started) { started = true; last = nowMs; }
             double dt = Math.Max(0, nowMs - last) / 1000.0;
             last = nowMs;
-            tokens = Math.Min(perSecond, tokens + dt * perSecond);
+            tokens = Math.Min(burst, tokens + dt * perSecond);
             if (tokens >= 1) { tokens -= 1; return true; }
             return false;
         }

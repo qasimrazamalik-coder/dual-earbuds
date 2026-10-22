@@ -69,7 +69,7 @@ namespace DualEarbuds
         readonly object udpSendLk = new object();
         readonly Dictionary<string, PhoneConn> byToken = new Dictionary<string, PhoneConn>();
         readonly Dictionary<string, RateLimiter> keepaliveLimit = new Dictionary<string, RateLimiter>();
-        public const int KeepalivesPerSecond = 5;
+        public const int KeepalivesPerSecond = 4, KeepaliveBurst = 8;
         public const int UdpSendBuffer = 256 * 1024;   // shared by all listeners (~16 KB each at 16)
         public bool UdpAvailable { get { return udp != null; } }
         long udpDatagrams, udpDropped;
@@ -285,7 +285,7 @@ namespace DualEarbuds
                 if (!keepaliveLimit.TryGetValue(ip, out r))
                 {
                     if (keepaliveLimit.Count > 256) keepaliveLimit.Clear();   // bounded memory
-                    r = new RateLimiter(KeepalivesPerSecond);
+                    r = new RateLimiter(KeepalivesPerSecond, KeepaliveBurst);
                     keepaliveLimit[ip] = r;
                 }
                 return r.Allow(NowMs);
@@ -928,7 +928,7 @@ namespace DualEarbuds
                     MiniJson.GetInt(d, "underruns", -1),
                     MiniJson.GetBool(d, "playing", false),
                     MiniJson.GetInt(d, "needMs", -1),
-                    MiniJson.GetInt(d, "offsetMs", int.MinValue));
+                    MiniJson.GetInt(d, "syncErrMs", MiniJson.GetInt(d, "offsetMs", int.MinValue)));
             }
         }
 

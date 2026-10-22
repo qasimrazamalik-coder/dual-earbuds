@@ -84,6 +84,8 @@ static class EngineTests
         Run("v3.2 UDP security: unknown tokens, keepalive rate limit", TestUdpSecurity);
         Run("Host send path: a stalled listener never blocks capture", TestStalledListener);
         Run("Wi-Fi band from netsh", TestWifiParse);
+        Run("Laptop to laptop: instant rejoin keeps buffer and sync", TestRejoin);
+        Run("Phone to laptop: an Android host's hello", TestAndroidHost);
         Run("Setup check rows", TestSetupCheck);
         Run("Power mode names", TestPowerModes);
         Run("Bursty Wi-Fi: 200 ms gaps then bursts, buffer mode", () => TestBursty(false));
@@ -2193,5 +2195,95 @@ There is 1 interface on the system:
         Check(st != null && !Power.Awake, "reading power state never throws (no Windows here)");
         Power.KeepAwake(true);
         Check(Realtime.Enter("Pro Audio") == IntPtr.Zero, "MMCSS is a no-op where it doesn't exist");
+    }
+
+    static void TestRejoin()
+    {
+        var cs = new ClockSync();
+        cs.Add(0, 1000, 10);
+        Check(Math.Abs(cs.Offset - 995) < 0.01, "clock offset");
+        cs.Add(100, 1100, 110);
+        Check(cs.Samples == 2, "consistent sample kept");
+        cs.Add(200, 50, 210);   // the host restarted: its clock is near 0 again
+        Check(cs.Samples == 1 && Math.Abs(cs.Offset - (50 - 205)) < 0.01, "host restart -> sync starts over");
+
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Buffer.Mode = BufferMode.Steady;
+            c.Start();
+            Pump(host, () => done);
+            Check(WaitFor(() => c.State == ListenState.Playing && c.Synced, 5000), "playing and synced");
+            c.Buffer.OnUnderrun(0); c.Buffer.OnUnderrun(0);
+            int target = c.Buffer.TargetMs;
+            var sw = Stopwatch.StartNew();
+            host.DisconnectAll();   // like a Wi-Fi blip that reset the connection
+            Check(WaitFor(() => c.Rejoins >= 1 && c.State == ListenState.Playing, 4000), "rejoins");
+            long ms = sw.ElapsedMilliseconds;
+            Check(ms < 2000, "within 2 s (" + ms + " ms)");
+            Check(c.Synced, "sync kept across the rejoin");
+            Check(c.Buffer.TargetMs >= target, "jitter buffer kept (" + c.Buffer.TargetMs + " ms)");
+            long p0 = c.Packets;
+            Check(WaitFor(() => c.Packets > p0 + 50, 3000), "audio flows again");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    // A phone in "Share this phone" mode: host "android", sourceApp in hello's "app", no udp field.
+    static void TestAndroidHost()
+    {
+        int port = FreePort();
+        var srv = new TcpListener(IPAddress.Loopback, port);
+        srv.Start();
+        bool done = false;
+        var th = new Thread(() =>
+        {
+            try
+            {
+                using (var tc = srv.AcceptTcpClient())
+                {
+                    var ns = tc.GetStream();
+                    var sb = new StringBuilder();
+                    var b1 = new byte[1];
+                    while (!sb.ToString().EndsWith("\r\n\r\n") && ns.Read(b1, 0, 1) > 0) sb.Append((char)b1[0]);
+                    string head = sb.ToString();
+                    int ki = head.IndexOf("Sec-WebSocket-Key:", StringComparison.OrdinalIgnoreCase);
+                    string key = head.Substring(ki + 18, head.IndexOf("\r\n", ki) - ki - 18).Trim();
+                    byte[] resp = Encoding.ASCII.GetBytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + PhoneLink.AcceptKey(key) + "\r\n\r\n");
+                    ns.Write(resp, 0, resp.Length);
+                    var hello = PhoneLink.BuildTextFrame("{\"type\":\"hello\",\"protocol\":3,\"pc\":\"Pixel 8\",\"version\":\"3.2.0\",\"host\":\"android\",\"rate\":48000,\"party\":false,\"playoutMs\":180,\"source\":\"app\",\"app\":\"YouTube\"}");
+                    ns.Write(hello, 0, hello.Length);
+                    var pcm = new float[960];
+                    uint seq = 0;
+                    while (!done)
+                    {
+                        var f = PhoneLink.BuildAudioFrame(pcm, 480, 48000, seq++);
+                        ns.Write(f, 0, f.Length);
+                        if (seq % 50 == 0) { var ping = PhoneLink.BuildTextFrame("{\"type\":\"ping\",\"t\":1}"); ns.Write(ping, 0, ping.Length); }
+                        Thread.Sleep(10);
+                    }
+                }
+            }
+            catch { }
+        }) { IsBackground = true };
+        th.Start();
+        LinkClient c = null;
+        try
+        {
+            c = JoinLoopback(port);
+            c.Start();
+            Check(WaitFor(() => c.State == ListenState.Playing && c.Packets > 30, 5000), "plays a phone's sound (" + c.State + ")");
+            Check(c.HostKind == "android" && c.HostName == "Pixel 8", "knows it's a phone");
+            Check(c.Source == "app" && c.SourceApp == "YouTube", "shared app from hello");
+            Check(c.PlayoutMs == 180, "uses the phone's playout");
+            Check(c.Transport == "ws" && c.UdpPackets == 0, "no udp field -> WebSocket audio");
+        }
+        finally { done = true; if (c != null) c.Dispose(); srv.Stop(); }
     }
 }

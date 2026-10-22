@@ -946,8 +946,8 @@ namespace DualEarbuds
             if (c.State == ListenState.Playing || c.State == ListenState.HostPaused)
             {
                 var t = c.Target;
-                bool known = Settings.Recent.Count > 0 && Settings.Recent[0].HostPort == t.HostPort && Settings.Recent[0].Key == t.Key && Settings.Recent[0].Name == c.HostName;
-                if (!known) { Settings.AddRecent(t.HostPort, t.Key, c.HostName); dirty = true; }
+                bool known = Settings.Recent.Count > 0 && Settings.Recent[0].HostPort == t.HostPort && Settings.Recent[0].Key == t.Key && Settings.Recent[0].Name == c.HostName && Settings.Recent[0].Kind == c.HostKind;
+                if (!known) { Settings.AddRecent(t.HostPort, t.Key, c.HostName, c.HostKind); dirty = true; }
             }
             Raise(ListenChanged);
             UpdateStates();
