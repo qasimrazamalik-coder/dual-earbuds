@@ -127,6 +127,7 @@ internal fun NowPlayingSection(player: PlayerState, onStop: () -> Unit, onRetry:
                         player.running -> SecondaryButton("Stop", onStop)
                         error?.kind == ErrorKind.PIN_NEEDED || error?.kind == ErrorKind.WRONG_PIN -> PrimaryButton("Enter PIN", onEnterPin)
                         player.target != null && error?.kind != ErrorKind.KICKED -> PrimaryButton("Try again", onRetry)
+                        else -> Unit
                     }
                 }
             }
