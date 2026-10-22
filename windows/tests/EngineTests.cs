@@ -1818,6 +1818,20 @@ static class EngineTests
         u.OnClock(400, 2300);
         Check(u.Tick(2400) == UdpAction.SendOkFalse, "host 3 s ahead of what UDP delivered -> ok:false");
 
+        // UDP stops right after a clock message: the verdict comes 1.5 s later, not at the second clock message after that
+        var b = new UdpHealth();
+        b.OnHello(0, true);
+        for (uint i = 0; i < 200; i++) b.OnUdp(i, i * 10);
+        b.OnClock(201, 2010);
+        b.OnClock(301, 3010);
+        Check(b.Tick(3400) == UdpAction.None, "1.4 s without UDP -> keep it");
+        Check(b.Tick(3600) == UdpAction.SendOkFalse, "1.6 s without UDP while the host produces -> ok:false (within 2 s)");
+        var s = new UdpHealth();
+        s.OnHello(0, true);
+        for (uint i = 0; i < 250; i++) s.OnUdp(i, i * 10);
+        s.OnClock(201, 2010);
+        Check(s.Tick(3400) == UdpAction.None && s.Tick(3600) == UdpAction.None, "host stopped producing (no more clock) -> no switch");
+
         var w = new UdpHealth();
         w.OnHello(0, true);
         for (uint i = 0; i < 100; i++) w.OnUdp(i, i * 10);

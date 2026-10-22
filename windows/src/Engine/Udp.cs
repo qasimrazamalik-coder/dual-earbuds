@@ -145,7 +145,8 @@ namespace DualEarbuds
     // Listener side: is UDP audio arriving, or should the host go back to WebSocket audio?
     // "No UDP within 2 s of hello" is only judged while the host is actually producing sound (WebSocket audio
     // arriving, or the clock message's seq moving on): a host that plays nothing sends nothing on either path.
-    // Once UDP worked, it is given up only when the host has produced 1.5 s more than UDP delivered.
+    // Once UDP worked, it is given up only when the host has produced 1.5 s more than UDP delivered (the host's
+    // sequence is the last clock message's, moved on by the time since; so the verdict doesn't wait for the next one).
     public class UdpHealth
     {
         public const int BehindPackets = 150;
@@ -198,7 +199,8 @@ namespace DualEarbuds
             if (haveUdp)
             {
                 bool clockFresh = haveClock && now - clockAt < 1500;
-                if (clockFresh && now - lastUdpAt >= 1000 && unchecked((int)(clockSeq - lastUdpSeq)) > BehindPackets)
+                uint hostSeq = unchecked(clockSeq + (uint)((now - clockAt) / PhoneLink.PacketMs));
+                if (clockFresh && now - lastUdpAt >= 1000 && unchecked((int)(hostSeq - lastUdpSeq)) > BehindPackets)
                 {
                     refused = true;
                     return UdpAction.SendOkFalse;
