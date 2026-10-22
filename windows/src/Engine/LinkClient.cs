@@ -135,9 +135,11 @@ namespace DualEarbuds
                 double heardAt = hostNow + queuedMs + OutputLatencyMs;
                 // protocol: heard at h(seq) + playoutMs + delay (submitted outputLatency earlier); Delay always makes it later
                 double error = heardAt - (playAtHost + DelayMs);
-                // never steer the queue below what the network needs; a late host plays late, not choppy
+                // Late: never drop so much that the queue falls below what the network needs (a deadline that is
+                // too short for this Wi-Fi plays late, not choppy). Early is never "fixed" by this rule: after a
+                // burst the queue is short exactly because the packets before it played on time.
                 double minQueue = jitterTargetMs;
-                if (queuedMs - error < minQueue) error = queuedMs - minQueue;
+                if (error > 0 && queuedMs - error < minQueue) error = Math.Max(0, queuedMs - minQueue);
                 LastErrorMs = error;
                 double ratio;
                 int adj = trim.Decide(error, rate, out ratio);
@@ -255,7 +257,19 @@ namespace DualEarbuds
         void Raise() { var h = Changed; if (h != null) { try { h(); } catch (Exception ex) { Log.Warn("Listen event: " + ex.Message); } } }
 
         // ------------------------------------------------------------------ connection
+        static LinkClient()
+        {
+            try { ServicePointManager.UseNagleAlgorithm = false; } catch { }   // small control messages go out at once
+        }
+
         void Run()
+        {
+            IntPtr mmcss = Realtime.Enter("Pro Audio");   // this thread receives the WebSocket audio
+            try { RunLoop(); }
+            finally { Realtime.Leave(mmcss); }
+        }
+
+        void RunLoop()
         {
             int backoff = 1000;
             while (!stop)

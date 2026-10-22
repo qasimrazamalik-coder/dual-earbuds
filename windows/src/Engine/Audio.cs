@@ -95,6 +95,9 @@ namespace DualEarbuds
 
         // Times the device ran dry while playing (network listening counts these; mirroring ignores them).
         public int Underruns { get { return Thread.VolatileRead(ref underruns); } }
+        int seenUnderrunsTest;
+        public void SetPaddingForTest(int frames) { Thread.VolatileWrite(ref padding, frames); }
+        public int NewUnderrunsForTest() { int u = Underruns, d = u - seenUnderrunsTest; seenUnderrunsTest = u; return d; }
 
         public long SourceFrames { get { return Interlocked.Read(ref sourceFrames); } }
         public float TakePeak() { float p = peak; peak = 0; return p; }

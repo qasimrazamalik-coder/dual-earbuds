@@ -82,6 +82,9 @@ static class EngineTests
         Run("v3.2 UDP loopback: 10 % loss, redundancy hides single losses", TestUdpLoss);
         Run("v3.2 UDP loopback: no UDP -> falls back to the WebSocket", TestUdpFallback);
         Run("v3.2 UDP security: unknown tokens, keepalive rate limit", TestUdpSecurity);
+        Run("Host send path: a stalled listener never blocks capture", TestStalledListener);
+        Run("Bursty Wi-Fi: 200 ms gaps then bursts, buffer mode", () => TestBursty(false));
+        Run("Bursty Wi-Fi: 200 ms gaps then bursts, synced to the deadline", () => TestBursty(true));
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -1985,5 +1988,103 @@ static class EngineTests
             w.Dispose();
         }
         finally { done = true; host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ bursty arrival
+    // Wi-Fi power save and retransmits deliver nothing for 200 ms, then 20 packets at once. Once the smart buffer
+    // (or the deadline, in sync mode) has adapted, the ear must hear no dropouts. The device is simulated:
+    // a 40 ms buffer drained every 10 ms, refilled like the WASAPI render loop does.
+    static void TestBursty(bool synced)
+    {
+        const int rate = 48000, per = 480, devCap = 1920;
+        var jb = new JitterBuffer();
+        jb.Reset(0);
+        var need = new JitterWindow(30000, 10);
+        var late = new LatenessTracker(10);
+        var st = new OutputStream("sim", rate, 0, 1f);
+        st.MarkRunningForTest();
+        var lo = new ListenerOutput("sim", "sim", st);
+        var tmp = new float[devCap * 2];
+        var pkt = new float[per * 2];
+        for (int i = 0; i < pkt.Length; i++) pkt[i] = 0.1f;
+        int pad = 0, dropoutsAfter = 0, dropoutsBefore = 0, seen = 0;
+        uint seq = 0;
+        const long adaptMs = 15000, endMs = 45000;
+        var arrivals = new Queue<long>();
+        // arrival schedule: packet s is captured at 10 s, delivered at the end of its 210 ms cycle
+        long cycle = 210;
+        for (long s = 0; s * 10 < endMs; s++) { long cap = s * 10; long at = (cap / cycle + 1) * cycle; arrivals.Enqueue(at); }
+        int playout = 120;
+        double worstSync = 0;
+        for (long now = 0; now < endMs; now++)
+        {
+            while (arrivals.Count > 0 && arrivals.Peek() <= now)
+            {
+                arrivals.Dequeue();
+                jb.OnPacket(now);
+                need.AddJitter(late.OnPacket(seq, now));
+                double hostNow = synced ? now : double.NaN;
+                double playAt = synced ? seq * 10.0 + playout : double.NaN;
+                if (synced && now >= adaptMs + 5000)
+                {
+                    // when this packet will really be heard: after everything queued before it (device buffer included)
+                    double heard = now + (st.QueuedFrames + pad) * 1000.0 / rate;
+                    worstSync = Math.Max(worstSync, Math.Abs(heard - playAt));
+                }
+                lo.Push(pkt, per, playAt, hostNow, jb.TargetMs, 1f);
+                seq++;
+            }
+            if (synced && now % 1000 == 0)
+            {
+                // the host follows this listener's needMs (decreases ramp; here only increases matter)
+                int n = (int)Math.Ceiling(Math.Max(need.P99 + 10, jb.TargetMs) + OutputTiming.CushionMs);
+                if (n > playout) playout = Math.Min(400, n);
+            }
+            if (now % 10 == 0)
+            {
+                // the device plays 10 ms
+                if (pad < per) { if (st.QueuedFrames > 0 || seen > 0) { if (now >= adaptMs) dropoutsAfter++; else dropoutsBefore++; } pad = 0; }
+                else pad -= per;
+                st.SetPaddingForTest(pad);
+                int n = st.Fill(tmp, devCap - pad, pad == 0);
+                if (n > 0) seen++;
+                pad += n;
+                st.SetPaddingForTest(pad);
+                if (st.NewUnderrunsForTest() > 0) jb.OnUnderrun(now);
+                jb.Tick(now);
+            }
+        }
+        Check(jb.TargetMs >= 190, "smart buffer learned the 200 ms gaps (" + jb.TargetMs + " ms)");
+        if (synced) Check(playout >= 200 && playout <= 400, "deadline grew to cover them (" + playout + " ms)");
+        if (synced) Check(worstSync <= 12, "and every packet is heard on the deadline (worst " + worstSync.ToString("0.0") + " ms off)");
+        Check(dropoutsAfter == 0, "no dropouts once adapted (" + dropoutsAfter + " after, " + dropoutsBefore + " while learning)");
+    }
+
+    static void TestStalledListener()
+    {
+        Check(PhoneLink.AudioQueueLimit * PhoneLink.PacketMs == 300, "per-listener queue holds 300 ms");
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback) { DisableUdpForTest = true };
+        host.Start();
+        try
+        {
+            host.SetMirroring(true, 48000);
+            var stalled = WsClient.Open(port, "k=ABCD2345&client=web&name=Stalled");   // never reads
+            Check(WaitFor(() => host.ClientCount == 1, 2000), "listener connected");
+            var buf = new float[480 * 2];
+            var sw = Stopwatch.StartNew();
+            long worst = 0;
+            for (int i = 0; i < 3000; i++)   // 30 s of sound, as fast as possible
+            {
+                long t0 = sw.ElapsedTicks;
+                host.Broadcast(buf, 480, 48000);
+                if (i >= 20) worst = Math.Max(worst, sw.ElapsedTicks - t0);   // after JIT warm-up
+            }
+            double worstMs = worst * 1000.0 / Stopwatch.Frequency;
+            Check(worstMs < 20, "Broadcast never waits for the network (worst " + worstMs.ToString("0.00") + " ms)");
+            Check(WaitFor(() => host.Snapshot()[0].PacketsDropped > 2000, 3000), "oldest packets dropped and counted (" + host.Snapshot()[0].PacketsDropped + ")");
+            stalled.Dispose();
+        }
+        finally { host.Stop(); }
     }
 }

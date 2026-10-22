@@ -1129,6 +1129,7 @@ namespace DualEarbuds
 
         void SendLoop()
         {
+            IntPtr mmcss = Realtime.Enter("Pro Audio");   // a send that waits on the scheduler is a late packet
             try
             {
                 while (!Closed)
@@ -1161,6 +1162,7 @@ namespace DualEarbuds
                 }
             }
             catch { }
+            finally { Realtime.Leave(mmcss); }
             Close();
         }
 
