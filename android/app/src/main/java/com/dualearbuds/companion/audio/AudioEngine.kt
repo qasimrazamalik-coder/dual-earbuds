@@ -7,6 +7,9 @@ import android.media.AudioTrack
 import android.os.Process
 import android.os.SystemClock
 import com.dualearbuds.companion.audio.sync.ClockSync
+import com.dualearbuds.companion.audio.sync.DeadlineNeed
+import com.dualearbuds.companion.audio.sync.LatencySmoother
+import com.dualearbuds.companion.audio.sync.OutputLatency
 import com.dualearbuds.companion.audio.sync.RateTrimmer
 import com.dualearbuds.companion.audio.sync.SyncAction
 import com.dualearbuds.companion.audio.sync.SyncPlanner
@@ -42,7 +45,15 @@ data class EngineStats(
     val offsetMs: Double?,
     val rttMs: Double?,
     val jitterP99Ms: Double,
-    val soundClass: SoundClass?
+    val soundClass: SoundClass?,
+    /** v3.2: p99 arrival jitter over the last 30 s (NaN before enough packets). */
+    val jitter30sMs: Double = Double.NaN,
+    /** v3.2: output latency used for needMs, and where it came from. */
+    val outputLatency: OutputLatency? = null,
+    /** v3.2: what this listener needs the host's playout P to be, or null before enough data. */
+    val needMs: Int? = null,
+    /** v3.2: the host's current playout P. */
+    val playoutMs: Double = 0.0
 )
 
 /**
@@ -64,9 +75,16 @@ class AudioEngine {
     @Volatile
     var muted: Boolean = false
 
-    /** Calibrated output latency of the current earbuds (ms), used only in synced playback. */
+    /**
+     * Calibrated latency of the current earbuds (ms) — the part the output timestamps don't report — or null when
+     * not calibrated. Synced playback plays that much earlier; needMs adds it to the timestamp latency.
+     */
     @Volatile
-    var outputLatencyMs: Double = 0.0
+    var calibratedLatencyMs: Double? = null
+
+    /** Fallback for "is the output Bluetooth" when the track can't say (earbuds connected per EarbudsMonitor). */
+    @Volatile
+    var assumeBluetooth: Boolean = false
 
     /** Peak level 0..1 of what was just played (after gain), with a short decay. For the UI meter only. */
     @Volatile
@@ -100,6 +118,16 @@ class AudioEngine {
 
     @Volatile
     private var syncErrorMs = 0.0
+
+    /** Smoothed "written frame → played" latency from AudioTrack.getTimestamp (audio thread writes it). */
+    private val tsLatency = LatencySmoother()
+
+    @Volatile
+    private var tsLatencyMs = Double.NaN
+
+    /** The track's routed output is Bluetooth (true/false), or null when unknown. */
+    @Volatile
+    private var routedBluetooth: Boolean? = null
 
     private val concealed = AtomicLong()
     private var lastPushSeq = -1L
@@ -215,6 +243,13 @@ class AudioEngine {
     }
 
     fun stats(): EngineStats = lock.withLock {
+        val hasTrack = trackRate > 0
+        val out = DeadlineNeed.outputLatency(
+            calibratedLatencyMs,
+            if (hasTrack) tsLatencyMs.takeIf { !it.isNaN() } else null,
+            routedBluetooth ?: assumeBluetooth
+        )
+        val j30 = jitter.jitterP99Over30sMs
         EngineStats(
             queuedMs = max(0, jitter.queuedMs.roundToInt()),
             targetMs = jitter.targetMs(),
@@ -229,7 +264,11 @@ class AudioEngine {
             offsetMs = clock.offsetMs,
             rttMs = clock.bestRttMs,
             jitterP99Ms = jitter.jitterP99Ms,
-            soundClass = chain.soundClass
+            soundClass = chain.soundClass,
+            jitter30sMs = j30,
+            outputLatency = out,
+            needMs = if (j30.isNaN()) null else DeadlineNeed.needMs(j30, out.ms),
+            playoutMs = clock.playoutMs
         )
     }
 
@@ -267,10 +306,22 @@ class AudioEngine {
         var appliedPreset: EqPreset? = null
         var appliedSession = -1
         var wasSynced = false
+        var nextRouteCheck = 0L
         try {
             while (flag.get()) {
+                // Output latency from the timestamp (for needMs) and whether the output is Bluetooth, ~1/s.
+                val pres = t?.let { presentationMs(it) }
+                if (pres != null && t != null && t.framesWritten > 0) {
+                    tsLatency.add(pres - nowMs())
+                    tsLatencyMs = tsLatency.valueMs
+                }
+                val nowEr = SystemClock.elapsedRealtime()
+                if (t != null && nowEr >= nextRouteCheck) {
+                    nextRouteCheck = nowEr + 1_000
+                    routedBluetooth = isBluetoothRoute(t.track)
+                }
                 // Synced playback needs the host clock and a working output timestamp.
-                val synced = t != null && lock.withLock { clock.isReady(nowMs()) } && presentationMs(t) != null
+                val synced = t != null && lock.withLock { clock.isReady(nowMs()) } && pres != null
                 if (synced != wasSynced) {
                     lock.withLock { jitter.synced = synced }
                     planner.reset()
@@ -297,6 +348,9 @@ class AudioEngine {
                         continue
                     }
                     t = Track(created, packet.rate)
+                    tsLatency.reset()
+                    tsLatencyMs = Double.NaN
+                    nextRouteCheck = 0L
                 }
                 val track = t ?: continue
 
@@ -323,7 +377,7 @@ class AudioEngine {
                 var n = src.size
                 var ratio = 1.0
                 if (synced && packet.seq >= 0) {
-                    val target = lock.withLock { clock.targetLocalMs(packet.seq, outputLatencyMs, delayMs.toDouble()) }
+                    val target = lock.withLock { clock.targetLocalMs(packet.seq, calibratedLatencyMs ?: 0.0, delayMs.toDouble()) }
                     val heardAt = presentationMs(track)
                     if (target != null && heardAt != null) {
                         val err = heardAt - target
@@ -383,6 +437,8 @@ class AudioEngine {
                 trackRate = 0
                 trackMs = 0
                 syncedNow = false
+                routedBluetooth = null
+                tsLatencyMs = Double.NaN
             }
             level = 0f
         }
@@ -399,6 +455,15 @@ class AudioEngine {
         } catch (_: Throwable) {
             null
         }
+    }
+
+    /** True for Bluetooth outputs (A2DP, SCO, LE audio, hearing aids), false for others, null when unknown. */
+    private fun isBluetoothRoute(track: AudioTrack): Boolean? = try {
+        val type = track.routedDevice?.type
+        // AudioDeviceInfo: 7 BLUETOOTH_SCO, 8 BLUETOOTH_A2DP, 23 HEARING_AID, 26 BLE_HEADSET, 27 BLE_SPEAKER, 30 BLE_BROADCAST
+        if (type == null) null else type in BLUETOOTH_TYPES
+    } catch (_: Throwable) {
+        null
     }
 
     /** Writes in 10 ms pieces so the track never holds more than it needs. Returns false on a track error. */
@@ -509,5 +574,6 @@ class AudioEngine {
     companion object {
         /** Errors beyond this mean the clock data is nonsense (host restarted…): play without correcting. */
         private const val MAX_SANE_ERROR_MS = 2_000.0
+        private val BLUETOOTH_TYPES = setOf(7, 8, 23, 26, 27, 30)
     }
 }

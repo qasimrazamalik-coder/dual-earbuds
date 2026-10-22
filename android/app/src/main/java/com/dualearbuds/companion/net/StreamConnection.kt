@@ -61,6 +61,9 @@ class StreamConnection(
 
         /** Source changed (in `state`, if the host sends it). */
         fun onSource(source: String, app: String) = Unit
+
+        /** v3.2 `playout`: the host's common deadline P changed (the host ramps it; we just follow). */
+        fun onPlayout(ms: Int) = Unit
     }
 
     private val active = AtomicBoolean(true)
@@ -222,6 +225,10 @@ class StreamConnection(
                 val seq = o.optLong("seq", -1L)
                 val h = o.optDouble("h", Double.NaN)
                 if (seq >= 0 && !h.isNaN()) callbacks.onClock(seq and 0xFFFFFFFFL, h)
+            }
+            "playout" -> {
+                val ms = o.optDouble("ms", Double.NaN)
+                if (!ms.isNaN()) callbacks.onPlayout(ms.toInt().coerceIn(20, 2_000))
             }
             "talk" -> callbacks.onTalk(o.optBoolean("on", false))
             "party" -> callbacks.onParty(o.optBoolean("on", false))

@@ -27,6 +27,7 @@ import androidx.media.AudioManagerCompat
 import com.dualearbuds.companion.MainActivity
 import com.dualearbuds.companion.R
 import com.dualearbuds.companion.audio.AudioEngine
+import com.dualearbuds.companion.audio.sync.DeadlineNeed
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.bt.EarbudsState
 import com.dualearbuds.companion.data.AppSettings
@@ -151,6 +152,10 @@ class PlaybackService : Service() {
 
     @Volatile
     private var lastSeq = -1L
+
+    /** needMs the host last heard from us (v3.2), null before the first report on this link. */
+    @Volatile
+    private var sentNeedMs: Int? = null
 
     // ---------------------------------------------------------------- lifecycle
 
@@ -407,6 +412,7 @@ class PlaybackService : Service() {
     private val connectionCallbacks = object : StreamConnection.Callbacks {
         override fun onOpened() {
             lastSeq = -1L
+            sentNeedMs = null
             engine.resetCounters() // `underruns` counts since connect
             PlaybackController.update {
                 it.copy(
@@ -447,7 +453,13 @@ class PlaybackService : Service() {
         override fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) {
             engine.setPlayoutMs(playoutMs.toDouble())
             if (source == "app" && app.isNotBlank()) sourceApp = app else if (source == "all") sourceApp = ""
-            PlaybackController.update { it.copy(remote = remote, source = source, sourceApp = sourceApp) }
+            PlaybackController.update { it.copy(remote = remote, source = source, sourceApp = sourceApp, playoutMs = playoutMs) }
+        }
+
+        override fun onPlayout(ms: Int) {
+            // v3.2: the host already ramps P (up at once, down ≤ 5 ms/s); the clock target follows it directly.
+            engine.setPlayoutMs(ms.toDouble())
+            PlaybackController.update { it.copy(playoutMs = ms) }
         }
 
         override fun onSource(source: String, app: String) {
@@ -525,7 +537,8 @@ class PlaybackService : Service() {
         val classify = smart == SmartEqMode.BY_SOUND || smart == SmartEqMode.BOTH
         engine.setSound(preset, left, right, SoundSettings.dialogue.value, classify)
         val latency = SoundSettings.latencyFor(output)
-        engine.outputLatencyMs = latency ?: 0.0
+        engine.calibratedLatencyMs = latency
+        engine.assumeBluetooth = earbuds.connected
         PlaybackController.update { if (it.eqInUse != preset || it.outputLatencyMs != latency) it.copy(eqInUse = preset, outputLatencyMs = latency) else it }
     }
 
@@ -595,9 +608,16 @@ class PlaybackService : Service() {
                         syncRttMs = s.rttMs,
                         concealed = s.concealed,
                         jitterP99Ms = s.jitterP99Ms,
-                        soundClass = s.soundClass
+                        soundClass = s.soundClass,
+                        needMs = s.needMs,
+                        usedLatencyMs = s.outputLatency?.ms,
+                        latencySource = s.outputLatency?.source,
+                        playoutMs = s.playoutMs.toInt()
                     )
                 }
+                // v3.2: tell the host as soon as what we need changes noticeably (it raises P at once).
+                val need = s.needMs
+                if (open && need != null && DeadlineNeed.worthReporting(sentNeedMs, need)) sendStatus()
             }
         }
 
@@ -660,7 +680,9 @@ class PlaybackService : Service() {
                 .put("bufferMs", engineStats.targetMs)
                 .put("underruns", engineStats.underruns)
                 .put("playing", st.status == PlayerStatus.PLAYING && !userMuted)
-            conn.send(json.toString())
+            val need = engineStats.needMs
+            if (need != null) json.put("needMs", need)
+            if (conn.send(json.toString()) && need != null) sentNeedMs = need
         } catch (_: Throwable) {
         }
     }

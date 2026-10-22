@@ -46,6 +46,9 @@ class JitterBuffer(
 
     private val queue = ArrayDeque<AudioPacket>()
 
+    /** Arrival jitter over the last 30 s, for v3.2 `needMs` (independent of the buffer mode). */
+    private val arrivals = ArrivalJitter()
+
     /** Milliseconds of sound waiting in the queue. */
     var queuedMs: Double = 0.0
         private set
@@ -79,6 +82,10 @@ class JitterBuffer(
     val jitterP99Ms: Double
         get() = smart.jitterP99Ms
 
+    /** p99 arrival jitter over the last 30 s (NaN until ~0.5 s of packets), for the v3.2 common deadline. */
+    val jitterP99Over30sMs: Double
+        get() = arrivals.p99Ms
+
     /** The buffer we fill to: smart/steady/manual, plus the manual delay. */
     fun targetMs(): Int = adaptiveMs + max(0, delayMs)
 
@@ -87,6 +94,7 @@ class JitterBuffer(
         clearQueue()
         steady.reset(now)
         smart.reset(now)
+        arrivals.reset(now)
         resetCounters()
     }
 
@@ -106,7 +114,10 @@ class JitterBuffer(
             }
             dryAt = -1
         }
-        if (packet.seq >= 0 && !packet.concealed) smart.onArrival(packet.seq, now)
+        if (packet.seq >= 0 && !packet.concealed) {
+            smart.onArrival(packet.seq, now)
+            arrivals.onArrival(packet.seq, now)
+        }
         queue.addLast(packet)
         queuedMs += packet.durationMs
         val target = if (synced) syncedHoldMs else targetMs()
