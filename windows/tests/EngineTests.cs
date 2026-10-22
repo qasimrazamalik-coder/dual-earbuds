@@ -1880,6 +1880,11 @@ static class EngineTests
             Check(c.WsPackets - ws0 <= 2, "no audio on the WebSocket while UDP works (" + (c.WsPackets - ws0) + ")");
             Check(c.Lost == 0 || c.Lost < 3, "nothing lost on loopback (" + c.Lost + ")");
             Check(host.UdpDatagramsSent > 50, "host counted its datagrams");
+            using (var web = WsClient.Open(port, "k=ABCD2345&client=web&name=Browser"))
+            {
+                string hello = web.NextText(20);
+                Check(hello != null && hello.Contains("\"hello\"") && !hello.Contains("\"udp\"") && !hello.Contains("\"token\""), "a browser's hello offers no UDP (native listeners only)");
+            }
         }
         finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
 

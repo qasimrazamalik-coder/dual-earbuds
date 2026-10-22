@@ -779,7 +779,8 @@ namespace DualEarbuds
                     try { ns.Write(resp, 0, resp.Length); }
                     catch { lock (lk) conns.Remove(conn); c.Close(); return; }
                     Register(conn);
-                    conn.EnqueueControl(BuildTextFrame(HelloJson(conn.Token)));
+                    // UDP audio is for native listeners only; browsers keep WebSocket audio (protocol v3.2)
+                    conn.EnqueueControl(BuildTextFrame(HelloJson(conn.Client == "web" ? null : conn.Token)));
                     string eq = suggestedEq;
                     if (eq != null) conn.EnqueueControl(BuildTextFrame(EqMessage(eq)));
                     if (talking) conn.EnqueueControl(BuildTextFrame(TalkMessage(true)));
