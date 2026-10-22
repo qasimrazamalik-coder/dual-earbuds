@@ -9,6 +9,9 @@ import android.app.Service
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.media.AudioDeviceCallback
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
@@ -33,6 +36,7 @@ import com.dualearbuds.host.audio.TalkMixer
 import com.dualearbuds.host.capture.AppCatalog
 import com.dualearbuds.host.capture.MicCapture
 import com.dualearbuds.host.capture.PlaybackCapture
+import com.dualearbuds.host.device.LocalOutputProbe
 import com.dualearbuds.host.net.Discovery
 import com.dualearbuds.host.net.NsdAdvertiser
 import com.dualearbuds.host.remote.MediaRemote
@@ -57,6 +61,7 @@ class HostService : Service() {
         private const val VERSION = "3.1.0"
         private const val SILENCE_HINT_MS = 5_000L
         private const val SILENCE_LEVEL = 4 // |sample| at or below this counts as silence (about -78 dBFS)
+        private const val OUTPUT_POLL_MS = 4_000L // calibration can change while sharing
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -82,6 +87,13 @@ class HostService : Service() {
     @Volatile private var resetDenoiser = false
     @Volatile private var capturing = false
     @Volatile private var lastListenerCount = -1
+    private var outputCallback: AudioDeviceCallback? = null
+    private val outputPoll = object : Runnable {
+        override fun run() {
+            refreshLocalOutput()
+            main.postDelayed(this, OUTPUT_POLL_MS)
+        }
+    }
 
     private val page: ByteArray? by lazy {
         try {
@@ -188,6 +200,7 @@ class HostService : Service() {
         startCapture(proj, prefs.app)?.let { return it }
 
         locks.acquire()
+        watchLocalOutput()
         nsd = NsdAdvertiser(this)
         HostController.engine = engine
         HostController.refreshNetwork(this)
@@ -323,9 +336,52 @@ class HostService : Service() {
         return true
     }
 
+    // ---------------------------------------------------------------- host local need (v3.2)
+
+    /** Follows this phone's own output (earbuds connect/disconnect, calibration) for the common deadline. */
+    private fun watchLocalOutput() {
+        refreshLocalOutput()
+        val am = getSystemService(AudioManager::class.java)
+        if (am != null && outputCallback == null) {
+            val cb = object : AudioDeviceCallback() {
+                override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>?) = refreshLocalOutput()
+                override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>?) = refreshLocalOutput()
+            }
+            try {
+                am.registerAudioDeviceCallback(cb, main)
+                outputCallback = cb
+            } catch (_: Throwable) {
+            }
+        }
+        main.removeCallbacks(outputPoll)
+        main.postDelayed(outputPoll, OUTPUT_POLL_MS)
+    }
+
+    private fun unwatchLocalOutput() {
+        main.removeCallbacks(outputPoll)
+        val cb = outputCallback ?: return
+        outputCallback = null
+        try {
+            getSystemService(AudioManager::class.java)?.unregisterAudioDeviceCallback(cb)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun refreshLocalOutput() {
+        val srv = server ?: return
+        val out = try {
+            LocalOutputProbe.current(this)
+        } catch (_: Throwable) {
+            return
+        }
+        srv.setLocalNeed(out.needMs)
+        HostController.reportLocalOutput(out)
+    }
+
     private fun onServerChanged(srv: HostServer) {
         val list = srv.listeners()
         HostController.reportListeners(list)
+        HostController.reportPlayout(srv.playoutMs)
         if (list.size != lastListenerCount) {
             lastListenerCount = list.size
             main.post { postNotification() }
@@ -420,6 +476,7 @@ class HostService : Service() {
 
     private fun teardown() {
         if (HostController.engine === engine) HostController.engine = null
+        unwatchLocalOutput()
         talking = false
         mic.stop()
         stopCapture()

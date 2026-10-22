@@ -33,10 +33,14 @@ data class ListenerStatus(
     val bufferMs: Int?,
     val underruns: Int?,
     val playing: Boolean?,
-    val synced: Boolean?
+    val synced: Boolean?,
+    /** v3.2: what this listener needs for the common deadline (jitter p99 + output latency + 10). */
+    val needMs: Int? = null,
+    /** This ear's offset from the common deadline in ms (+ = late), for the host's sync scope. */
+    val syncErrMs: Int? = null
 )
 
-/** JSON messages of protocol v3 + v3.1, host side. */
+/** JSON messages of protocol v3 + v3.1 + v3.2, host side. */
 object HostMessages {
     const val PROTOCOL = 3
     const val DEFAULT_PLAYOUT_MS = 120
@@ -91,6 +95,7 @@ object HostMessages {
     fun talk(on: Boolean) = MiniJson.obj("type" to "talk", "on" to on)
     fun clock(seq: Long, hostMs: Long) = MiniJson.obj("type" to "clock", "seq" to seq, "h" to hostMs)
     fun syncReply(c: Double, hostMs: Long) = MiniJson.obj("type" to "sync", "c" to c, "h" to hostMs)
+    fun playout(ms: Int) = MiniJson.obj("type" to "playout", "ms" to ms)
 
     /** Reads a `status` message, clamping every number to its protocol range. */
     fun parseStatus(m: Map<String, Any?>): ListenerStatus = ListenerStatus(
@@ -101,6 +106,8 @@ object HostMessages {
         bufferMs = m.num("bufferMs")?.toInt()?.coerceIn(0, 60_000),
         underruns = m.num("underruns")?.toInt()?.coerceAtLeast(0),
         playing = m.bool("playing"),
-        synced = m.bool("synced")
+        synced = m.bool("synced"),
+        needMs = m.num("needMs")?.takeIf { !it.isNaN() }?.toInt()?.coerceIn(0, Playout.MAX_MS),
+        syncErrMs = m.num("syncErrMs")?.takeIf { !it.isNaN() }?.toInt()?.coerceIn(-10_000, 10_000)
     )
 }

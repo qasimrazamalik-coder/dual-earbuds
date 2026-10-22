@@ -33,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -64,7 +65,14 @@ import kotlinx.coroutines.withContext
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HostScreen(onBack: () -> Unit) {
+fun HostScreen(
+    onBack: () -> Unit,
+    /** Optional: calibrated latency (ms) of this phone's own output by device name; see [HostConfig.localOutputLatencyMs]. */
+    localOutputLatencyMs: ((deviceName: String) -> Double?)? = null
+) {
+    if (localOutputLatencyMs != null) {
+        SideEffect { HostConfig.localOutputLatencyMs = localOutputLatencyMs }
+    }
     val context = LocalContext.current
     val state by HostController.state.collectAsStateWithLifecycle()
     val supported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q

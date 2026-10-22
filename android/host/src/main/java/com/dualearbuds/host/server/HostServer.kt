@@ -40,7 +40,8 @@ data class HostIdentity(
  * Host side of Dual Earbuds link protocol v3 (+ v3.1 additions) on plain sockets: HTTP/1.1 and
  * RFC 6455 WebSocket on one port. Free of Android APIs so it runs in JVM unit tests.
  * One accept thread, one short-lived thread per HTTP request, a reader + writer thread per listener
- * (max 16), and one housekeeping thread for ping (2 s), clock (1 s) and stalled writers.
+ * (max 16), and one housekeeping thread for ping (2 s), clock (1 s), the common deadline P (v3.2)
+ * and stalled writers.
  *
  * [sendAudio] must be called from a single thread (the capture thread).
  */
@@ -86,8 +87,18 @@ class HostServer(
     @Volatile
     private var sourceApp: String? = null
 
+    /** The common deadline P (v3.2) now in force, announced with `playout`. */
     @Volatile
     var playoutMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
+        private set
+
+    /**
+     * Host local need (v3.2): how late this phone's own ear hears the captured app (its earbuds'
+     * calibrated latency, or 180 ms Bluetooth / 20 ms wired). P never goes below it.
+     */
+    @Volatile
+    var localNeedMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
+        private set
 
     /** Current sample rate, 0 while not sharing. */
     @Volatile
@@ -110,6 +121,7 @@ class HostServer(
     private val guard = GuessGuard(clock, limits.guessMaxDistinct, limits.guessWindowMs, limits.guessLockMs)
     private val remoteLimiter = RateLimiter(limits.remotePerSecond, limits.remotePerSecond, clock)
     private val clockTrack = ClockTrack()
+    private val playout = Playout()
     private val clientsLock = Any()
 
     @Volatile
@@ -229,6 +241,11 @@ class HostServer(
         pin = newPin
     }
 
+    /** Sets the host local need (ms, 0–400); P follows within one housekeeping tick. */
+    fun setLocalNeed(ms: Int) {
+        localNeedMs = ms.coerceIn(0, Playout.MAX_MS)
+    }
+
     fun setRemoteAllowed(on: Boolean) {
         remoteAllowed = on
     }
@@ -344,6 +361,8 @@ class HostServer(
                 st.underruns?.let { session.underruns = it }
                 st.playing?.let { session.playing = it }
                 st.synced?.let { session.syncedHint = it }
+                st.needMs?.let { session.needMs = it }
+                st.syncErrMs?.let { session.syncErrMs = it }
                 onChange?.invoke()
             }
             "sync" -> {
@@ -582,6 +601,27 @@ class HostServer(
                 nextClock = now + limits.clockIntervalMs
                 if (rate > 0) clockTrack.clockMessage()?.let { broadcastText(it) }
             }
+            updatePlayout(now)
+        }
+    }
+
+    /** Recomputes P from the synced listeners' needs and the local need; announces a change. */
+    private fun updatePlayout(now: Long) {
+        val all = clients
+        var anyoneSynced = false
+        val needs = IntArray(all.size)
+        var n = 0
+        for (c in all) {
+            val info = c.info(now)
+            if (!info.synced) continue
+            anyoneSynced = true
+            needs[n++] = c.needMs ?: HostMessages.DEFAULT_PLAYOUT_MS
+        }
+        val target = Playout.target(needs.asIterable().take(n), localNeedMs)
+        if (playout.step(target, now, anyoneSynced)) {
+            playoutMs = playout.currentMs
+            broadcastText(HostMessages.playout(playoutMs))
+            onChange?.invoke()
         }
     }
 

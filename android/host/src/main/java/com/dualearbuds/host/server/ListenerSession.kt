@@ -23,7 +23,13 @@ data class ListenerInfo(
     val rttMs: Int,
     val dropped: Long,
     /** The listener is doing clock sync (v3.1): it sent `sync` recently or said so in `status`. */
-    val synced: Boolean
+    val synced: Boolean,
+    /** v3.2 `needMs` from its status, or null when it doesn't report one. */
+    val needMs: Int? = null,
+    /** Offset from the common deadline (+ = late), or null when unknown. */
+    val syncErrMs: Int? = null,
+    /** How audio reaches it: "udp" or "ws". */
+    val transport: String = "ws"
 ) {
     val displayName: String get() = device.ifBlank { name.ifBlank { "Listener" } }
 }
@@ -66,6 +72,8 @@ internal class ListenerSession(
     @Volatile var playing = false
     @Volatile var syncedHint: Boolean? = null
     @Volatile var rttMs = -1
+    @Volatile var needMs: Int? = null
+    @Volatile var syncErrMs: Int? = null
     @Volatile var dropped = 0L
 
     val isClosed: Boolean get() = closed.get()
@@ -74,7 +82,10 @@ internal class ListenerSession(
         val recentSync = lastSyncAt != 0L && now - lastSyncAt <= SYNC_FRESH_MS
         return ListenerInfo(
             id, name, client, address, device, earbuds, battery, volume, bufferMs, underruns, playing, rttMs, dropped,
-            synced = syncedHint ?: recentSync
+            synced = syncedHint ?: recentSync,
+            needMs = needMs,
+            syncErrMs = syncErrMs,
+            transport = "ws"
         )
     }
 

@@ -11,6 +11,7 @@ import com.dualearbuds.host.net.LinkBuilder
 import com.dualearbuds.host.net.NetKind
 import com.dualearbuds.host.server.LinkKey
 import com.dualearbuds.host.server.ListenerInfo
+import com.dualearbuds.host.server.LocalOutput
 import com.dualearbuds.host.server.RoomPin
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -32,7 +33,11 @@ data class HostUiState(
     val talking: Boolean = false,
     val listeners: List<ListenerInfo> = emptyList(),
     val silent: Boolean = false,
-    val error: String? = null
+    val error: String? = null,
+    /** Common deadline P in ms (v3.2) while sharing, else 0. */
+    val playoutMs: Int = 0,
+    /** This phone's own output (its earbuds, wired or speaker) while sharing. */
+    val localOutput: LocalOutput? = null
 ) {
     val address: HostAddress? get() = addresses.firstOrNull { it.address == chosenAddress } ?: addresses.firstOrNull()
     val netKind: NetKind get() = address?.kind ?: NetKind.NONE
@@ -188,7 +193,7 @@ object HostController {
         _state.update {
             it.copy(
                 status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, talking = false,
-                showChoice = null, error = error ?: it.error
+                showChoice = null, error = error ?: it.error, playoutMs = 0, localOutput = null
             )
         }
     }
@@ -199,6 +204,14 @@ object HostController {
 
     internal fun reportListeners(list: List<ListenerInfo>) {
         _state.update { if (it.listeners == list) it else it.copy(listeners = list) }
+    }
+
+    internal fun reportPlayout(ms: Int) {
+        _state.update { if (it.playoutMs == ms) it else it.copy(playoutMs = ms) }
+    }
+
+    internal fun reportLocalOutput(out: LocalOutput) {
+        _state.update { if (it.localOutput == out) it else it.copy(localOutput = out) }
     }
 
     internal fun reportSilent(silent: Boolean) {
