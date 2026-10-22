@@ -26,7 +26,16 @@ data class HostLimits(
     val guessMaxDistinct: Int = 10,
     val guessWindowMs: Long = 60_000,
     val guessLockMs: Long = 5 * 60_000,
-    val remotePerSecond: Double = 5.0
+    val remotePerSecond: Double = 5.0,
+    /** v3.2 UDP audio for native listeners (Android, Windows). */
+    val udp: Boolean = true,
+    /** No keepalive for this long: stop sending UDP to that listener. */
+    val udpExpireMs: Long = 5_000,
+    /** UDP send queue; older packets are dropped (and counted) beyond it. */
+    val udpQueueMs: Int = 300,
+    /** Keepalives accepted per IP (listeners send one per second). */
+    val keepalivePerSecond: Double = 4.0,
+    val keepaliveBurst: Double = 8.0
 )
 
 /** Who this host is, as reported in `/info` and `hello`. */
@@ -111,6 +120,22 @@ class HostServer(
 
     val maxClients: Int get() = if (party) limits.maxClientsParty else limits.maxClients
 
+    /** UDP audio port (same number as [port]), or 0 when UDP is off or could not bind. */
+    val udpPort: Int get() = udp.port
+
+    /** Packets the UDP sender dropped because it fell behind (should stay 0). */
+    val udpDropped: Long get() = udp.droppedPackets.get()
+
+    /** Keepalives ignored (rate limit, malformed, unknown token). */
+    val udpIgnored: Long get() = udp.ignoredKeepalives.get()
+
+    /**
+     * Run at the start of every audio thread the server makes (WebSocket writers, UDP sender), e.g.
+     * to raise it to THREAD_PRIORITY_URGENT_AUDIO on Android. Set before [start].
+     */
+    @Volatile
+    var audioThreadSetup: () -> Unit = {}
+
     private val startedAt = clock()
     private val running = AtomicBoolean(false)
     private var serverSocket: ServerSocket? = null
@@ -133,6 +158,14 @@ class HostServer(
     private var poolIndex = 0
     private var poolFrameLen = 0
     private val seq = AtomicInteger(0)
+
+    private val udp = UdpAudio(
+        limits = limits,
+        clock = clock,
+        sessions = { clients },
+        onTransportChange = { onChange?.invoke() },
+        threadSetup = { audioThreadSetup() }
+    )
 
     private val owner = object : SessionOwner {
         override val limits: HostLimits get() = this@HostServer.limits
@@ -176,6 +209,7 @@ class HostServer(
         val bound = ss ?: throw (lastError ?: IOException("No free port"))
         serverSocket = bound
         port = bound.localPort
+        if (limits.udp) udp.start(port) // fails quietly: listeners then get WebSocket audio
         running.set(true)
         acceptThread = Thread({ acceptLoop(bound) }, "host-accept").apply {
             isDaemon = true
@@ -195,6 +229,7 @@ class HostServer(
         } catch (_: IOException) {
         }
         serverSocket = null
+        udp.stop()
         // Polite close (listeners may auto-reconnect when sharing resumes); force after a short wait.
         for (c in clients) c.sendFrame(WsCodec.closeFrame(WsCodec.CLOSE_GOING_AWAY, "Host stopped"), closeAfter = true)
         val until = clock() + STOP_DRAIN_MS
@@ -323,6 +358,12 @@ class HostServer(
         clockTrack.record(s, capturedAtHostMs)
         val targets = clients
         if (targets.isEmpty()) return
+        // v3.2: listeners with working UDP get no WebSocket audio.
+        val now = clock()
+        var viaUdp = 0
+        for (c in targets) if (c.usesUdp(now)) viaUdp++
+        if (viaUdp > 0) udp.offer(s, r, pcm, off, len)
+        if (viaUdp == targets.size) return
         val payloadLen = AudioPacket.HEADER_SIZE + len
         val frameLen = WsCodec.headerSize(payloadLen) + payloadLen
         if (frameLen != poolFrameLen || pool.isEmpty()) {
@@ -335,7 +376,7 @@ class HostServer(
         val h = WsCodec.writeHeader(buf, 0, WsCodec.OP_BINARY, payloadLen)
         AudioPacket.writeHeader(buf, h, r, s)
         System.arraycopy(pcm, off, buf, h + AudioPacket.HEADER_SIZE, len)
-        for (c in targets) c.offerAudio(buf)
+        for (c in targets) if (!c.usesUdp(now)) c.offerAudio(buf)
     }
 
     // ------------------------------------------------------------------ listener messages
@@ -371,6 +412,13 @@ class HostServer(
                 val first = session.lastSyncAt == 0L
                 session.lastSyncAt = clock()
                 if (first) onChange?.invoke()
+            }
+            "udp" -> {
+                // v3.2: the listener got no UDP (ok=false: use the WebSocket) or wants UDP again (ok=true).
+                val ok = m.bool("ok") ?: return
+                if (session.udpRefused == !ok) return
+                session.udpRefused = !ok
+                onChange?.invoke()
             }
             "remote" -> {
                 if (!remoteAllowed) return
@@ -547,7 +595,13 @@ class HostServer(
         }
         val name = sanitizeName(req.query["name"] ?: "")
         val session = ListenerSession(nextId.getAndIncrement(), socket, input, output, client, name, address, owner)
-        session.send(HostMessages.hello(facts()))
+        // UDP audio only for native listeners; browsers keep WebSocket audio.
+        val udpPort = udp.port
+        session.udpOffered = client != "web" && udpPort > 0
+        session.send(
+            if (session.udpOffered) HostMessages.hello(facts(), udpPort, UdpPacket.tokenHex(session.token))
+            else HostMessages.hello(facts())
+        )
         if (talking) session.send(HostMessages.talk(true))
         synchronized(clientsLock) {
             if (clients.size >= maxClients) {
@@ -589,10 +643,17 @@ class HostServer(
                 return
             }
             val now = clock()
+            var udpExpired = false
             for (c in clients) {
                 val started = c.writeStartedAt
                 if (started != 0L && now - started > limits.writeStallMs) c.close()
+                // No keepalive for 5 s: forget the UDP address, audio goes back to the WebSocket.
+                if (c.udpAddress != null && now - c.udpHeardAt > limits.udpExpireMs) {
+                    c.udpAddress = null
+                    udpExpired = true
+                }
             }
+            if (udpExpired) onChange?.invoke()
             if (now >= nextPing) {
                 nextPing = now + limits.pingIntervalMs
                 broadcastText(HostMessages.ping(hostMs()))

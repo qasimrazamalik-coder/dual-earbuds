@@ -58,7 +58,7 @@ class HostService : Service() {
         const val EXTRA_RESULT_DATA = "com.dualearbuds.host.extra.RESULT_DATA"
         const val CHANNEL_ID = "host_sharing"
         const val NOTIFICATION_ID = 4310
-        private const val VERSION = "3.1.0"
+        private const val VERSION = "3.2.0"
         private const val SILENCE_HINT_MS = 5_000L
         private const val SILENCE_LEVEL = 4 // |sample| at or below this counts as silence (about -78 dBFS)
         private const val OUTPUT_POLL_MS = 4_000L // calibration can change while sharing

@@ -70,7 +70,8 @@ object HostMessages {
         return MiniJson.obj(*pairs.toTypedArray())
     }
 
-    fun hello(f: HostFacts): String {
+    /** `hello`; for native listeners with [udpPort] > 0 also `"udp":port,"token":"<32 hex>"` (v3.2). */
+    fun hello(f: HostFacts, udpPort: Int = 0, token: String? = null): String {
         val pairs = arrayListOf<Pair<String, Any?>>(
             "type" to "hello",
             "protocol" to PROTOCOL,
@@ -84,6 +85,10 @@ object HostMessages {
             "source" to f.source
         )
         if (f.source == "app" && !f.app.isNullOrBlank()) pairs += "app" to f.app
+        if (udpPort > 0 && token != null) {
+            pairs += "udp" to udpPort
+            pairs += "token" to token
+        }
         return MiniJson.obj(*pairs.toTypedArray())
     }
 
