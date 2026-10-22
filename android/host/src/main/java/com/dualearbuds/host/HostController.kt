@@ -68,6 +68,19 @@ object HostController {
 
     private var settings: HostSettings? = null
 
+    /** Notifications are asked at most once per app run (optional; the Setup check offers it again). */
+    @Volatile
+    internal var askedNotifications = false
+
+    private val permanentlyDenied = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Android won't show its prompt again for [permission]; only App info can grant it. */
+    internal fun markPermanentlyDenied(permission: String) {
+        permanentlyDenied += permission
+    }
+
+    internal fun isPermanentlyDenied(permission: String): Boolean = permission in permanentlyDenied
+
     private fun settings(context: Context): HostSettings =
         settings ?: HostSettings(context).also { settings = it }
 
