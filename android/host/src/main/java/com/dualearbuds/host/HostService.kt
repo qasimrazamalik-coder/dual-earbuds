@@ -44,7 +44,9 @@ import com.dualearbuds.host.server.HostIdentity
 import com.dualearbuds.host.server.HostServer
 
 /**
- * Foreground service (type mediaProjection, plus microphone for talk-over) for "Share this phone".
+ * Foreground service (type mediaProjection; plus microphone only while talk-over is on) for "Share this phone".
+ * Holds a partial wake lock and a low-latency Wi-Fi lock ([HostLocks]) so sharing goes on with the
+ * screen off and on battery saver.
  * Owns the capture ([PlaybackCapture], Android 10+), the talk-over mic, the [HostServer]
  * (protocol v3 + v3.1), the mDNS advertisement and media-key remote control.
  * The phone keeps playing its own sound normally; capture only copies it.
@@ -73,6 +75,7 @@ class HostService : Service() {
     private var nsd: NsdAdvertiser? = null
     private var remote: MediaRemote? = null
     private var inForeground = false
+    private var micForeground = false
     private val locks by lazy { HostLocks(this) }
     private val name by lazy { deviceName() }
 
@@ -86,7 +89,7 @@ class HostService : Service() {
     @Volatile private var noiseCancel = NoiseCancel.DEFAULT
     @Volatile private var resetDenoiser = false
     @Volatile private var capturing = false
-    @Volatile private var lastListenerCount = -1
+    @Volatile private var lastNotifKey = -1
     private var outputCallback: AudioDeviceCallback? = null
     private val outputPoll = object : Runnable {
         override fun run() {
@@ -115,7 +118,7 @@ class HostService : Service() {
             ACTION_START -> {
                 // startForegroundService() must be answered with startForeground() first, and on
                 // Android 14+ the mediaProjection type must be active before getMediaProjection().
-                if (!startForegroundSafely()) {
+                if (!startForegroundSafely(withMic = talking)) {
                     stopEverything("Android did not allow sharing to start. Open the app and try again.")
                     return START_NOT_STICKY
                 }
@@ -137,7 +140,7 @@ class HostService : Service() {
             ACTION_STOP -> stopEverything(null)
             else -> {
                 // Restarted without a projection token: it cannot be resumed, so clean up.
-                if (startForegroundSafely()) stopEverything(null) else stopSelf()
+                if (startForegroundSafely(withMic = talking)) stopEverything(null) else stopSelf()
             }
         }
         return START_NOT_STICKY
@@ -389,8 +392,9 @@ class HostService : Service() {
         val list = srv.listeners()
         HostController.reportListeners(list)
         HostController.reportPlayout(srv.playoutMs)
-        if (list.size != lastListenerCount) {
-            lastListenerCount = list.size
+        val key = list.size * 1000 + srv.playoutMs
+        if (key != lastNotifKey) {
+            lastNotifKey = key
             main.post { postNotification() }
         }
     }
@@ -430,10 +434,13 @@ class HostService : Service() {
                     resetDenoiser = true
                     talking = true
                     srv.setTalking(true)
+                    // Microphone service type now, so talk-over keeps working with the screen off.
+                    startForegroundSafely(withMic = true)
                 } else {
                     talking = false
                     mic.stop()
                     srv.setTalking(false)
+                    if (micForeground) startForegroundSafely(withMic = false)
                 }
                 postNotification()
             }
@@ -477,6 +484,7 @@ class HostService : Service() {
             } catch (_: Throwable) {
             }
             inForeground = false
+            micForeground = false
         }
         stopSelf()
     }
@@ -514,7 +522,7 @@ class HostService : Service() {
             }
         }
         projectionCallback = null
-        lastListenerCount = -1
+        lastNotifKey = -1
         locks.release()
     }
 
@@ -545,26 +553,28 @@ class HostService : Service() {
         }
     }
 
-    private fun startForegroundSafely(): Boolean {
-        if (inForeground) return true
+    /**
+     * Starts (or updates) the foreground service. Type mediaProjection always; plus microphone only
+     * while talk-over is on ([withMic]), so Android shows the mic indicator only when the mic is used.
+     * If Android refuses the microphone type, carries on with mediaProjection only.
+     */
+    private fun startForegroundSafely(withMic: Boolean = false): Boolean {
         val projectionType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-        // Also the microphone type, so talk-over keeps working with the screen off. It needs
-        // RECORD_AUDIO (which capture needs anyway); if Android refuses it, start without it.
-        val withMic = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission()) {
+        val micType = if (withMic && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && hasMicPermission()) {
             projectionType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
         } else {
             projectionType
         }
-        for (type in if (withMic != projectionType) listOf(withMic, projectionType) else listOf(projectionType)) {
+        for (type in if (micType != projectionType) listOf(micType, projectionType) else listOf(projectionType)) {
             try {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, buildNotification(), type)
                 inForeground = true
+                micForeground = type != projectionType
                 return true
             } catch (_: Throwable) {
             }
         }
-        inForeground = false
-        return false
+        return inForeground
     }
 
     private fun postNotification() {
@@ -594,10 +604,11 @@ class HostService : Service() {
         )
         val count = server?.listenerCount() ?: 0
         var text = when (count) {
-            0 -> "Waiting for listeners to join"
+            0 -> "Waiting for listeners"
             1 -> "1 listener"
             else -> "$count listeners"
         }
+        server?.playoutMs?.let { if (count > 0) text += " · P $it ms" }
         if (talking) text += " · Talk-over on"
         return NotificationCompat.Builder(this, CHANNEL_ID)
             .setSmallIcon(R.drawable.host_ic_stat_share)
@@ -611,7 +622,7 @@ class HostService : Service() {
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
-            .addAction(R.drawable.host_ic_stop, "Stop", stopIntent)
+            .addAction(R.drawable.host_ic_stop, "Stop sharing", stopIntent)
             .build()
     }
 }
