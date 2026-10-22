@@ -2,10 +2,7 @@ package com.dualearbuds.companion.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.data.SoundSettings
-import kotlin.math.roundToInt
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -69,12 +66,10 @@ fun AppNav() {
         composable(Routes.GUIDE) { GuideScreen(onBack = { back() }) }
         composable(Routes.ABOUT) { AboutScreen(onBack = { back() }) }
         composable(Routes.HOST) {
-            val earbuds by EarbudsMonitor.state.collectAsStateWithLifecycle()
-            val latencies by SoundSettings.outputLatency.collectAsStateWithLifecycle()
-            val calibrated = if (earbuds.connected) latencies[earbuds.name]?.roundToInt() else null
             HostScreen(
                 onBack = { back() },
-                localOutputLatencyMs = calibrated,
+                // the host asks per output device name; calibrated values are stored the same way
+                localOutputLatencyMs = { name -> SoundSettings.latencyFor(name) },
                 onCalibrate = { go(Routes.CALIBRATE) }
             )
         }
