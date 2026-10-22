@@ -64,6 +64,9 @@ class StreamConnection(
 
         /** v3.2 `playout`: the host's common deadline P changed (the host ramps it; we just follow). */
         fun onPlayout(ms: Int) = Unit
+
+        /** v3.2 `hello.udp` + `hello.token`: the host offers UDP audio on [port] for this session. */
+        fun onUdpOffer(port: Int, token: String) = Unit
     }
 
     private val active = AtomicBoolean(true)
@@ -77,6 +80,11 @@ class StreamConnection(
 
     val isOpen: Boolean
         get() = active.get() && opened.get()
+
+    /** Something else proved the host is alive (a UDP datagram): resets the silence watchdog. */
+    fun touch() {
+        if (opened.get()) lastMessageAt = SystemClock.elapsedRealtime()
+    }
 
     /** Sends a text frame. Thread-safe. Returns false when not connected. */
     fun send(text: String): Boolean {
@@ -209,6 +217,9 @@ class StreamConnection(
                     o.optString("source", "all").ifBlank { "all" },
                     o.optString("sourceApp", "").ifBlank { o.optString("app", "") }
                 )
+                val udpPort = o.optInt("udp", 0)
+                val token = o.optString("token", "")
+                if (udpPort in 1..65535 && token.isNotBlank()) callbacks.onUdpOffer(udpPort, token)
             }
             "state" -> {
                 callbacks.onMirroring(o.optBoolean("mirroring", true), o.optInt("rate", 0))

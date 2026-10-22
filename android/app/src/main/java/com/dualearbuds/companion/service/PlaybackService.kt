@@ -14,6 +14,8 @@ import android.os.Build
 import android.os.Bundle
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.Process
+import android.os.SystemClock
 import android.support.v4.media.MediaMetadataCompat
 import android.support.v4.media.session.MediaSessionCompat
 import android.support.v4.media.session.PlaybackStateCompat
@@ -50,7 +52,12 @@ import com.dualearbuds.companion.net.LinkParser
 import com.dualearbuds.companion.net.LinkTarget
 import com.dualearbuds.companion.net.Net
 import com.dualearbuds.companion.net.ParseResult
+import com.dualearbuds.companion.net.SeqGate
 import com.dualearbuds.companion.net.StreamConnection
+import com.dualearbuds.companion.net.UdpAudioReceiver
+import com.dualearbuds.companion.net.UdpPolicy
+import com.dualearbuds.companion.net.UdpSignal
+import com.dualearbuds.companion.net.UdpWire
 import com.dualearbuds.companion.net.UserError
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -153,6 +160,13 @@ class PlaybackService : Service() {
     @Volatile
     private var lastSeq = -1L
 
+    /** v3.2 UDP audio: receiver for the current session, when/if to fall back, and the dedupe gate. */
+    @Volatile
+    private var udp: UdpAudioReceiver? = null
+    private val udpPolicy = UdpPolicy()
+    private val gate = SeqGate()
+    private var udpJob: Job? = null
+
     /** needMs the host last heard from us (v3.2), null before the first report on this link. */
     @Volatile
     private var sentNeedMs: Int? = null
@@ -211,6 +225,7 @@ class PlaybackService : Service() {
     override fun onDestroy() {
         sessionJob?.cancel()
         sessionJob = null
+        stopUdp()
         connection?.close()
         connection = null
         engine.stop()
@@ -344,6 +359,7 @@ class PlaybackService : Service() {
             PlaybackController.sender = { text -> conn.send(text) }
             val end = conn.runUntilClosed()
             syncJob?.cancel()
+            stopUdp()
             if (connection === conn) {
                 connection = null
                 PlaybackController.sender = null
@@ -413,6 +429,7 @@ class PlaybackService : Service() {
         override fun onOpened() {
             lastSeq = -1L
             sentNeedMs = null
+            gate.reset()
             engine.resetCounters() // `underruns` counts since connect
             PlaybackController.update {
                 it.copy(
@@ -486,8 +503,15 @@ class PlaybackService : Service() {
             connection?.close()
         }
 
-        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) {
-            if (rate !in 8000..192000) return
+        override fun onUdpOffer(port: Int, token: String) = startUdp(port, token)
+
+        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) = deliver(rate, seq, samples)
+    }
+
+    /** One audio packet from either transport: deduped and kept in order by [gate], then counted and played. */
+    private fun deliver(rate: Int, seq: Long, samples: ShortArray) {
+        if (rate !in 8000..192000) return
+        gate.offer(seq) {
             val prev = lastSeq
             if (prev >= 0) {
                 val expected = (prev + 1) and 0xFFFFFFFFL
@@ -501,6 +525,74 @@ class PlaybackService : Service() {
             mirroring = true
             engine.push(rate, seq, samples)
         }
+    }
+
+    private val udpListener = object : UdpAudioReceiver.Listener {
+        override fun onDatagram(nowMs: Long) {
+            synchronized(udpPolicy) { udpPolicy.onDatagram(SystemClock.elapsedRealtime()) }
+            connection?.touch()
+        }
+
+        override fun onBlock(block: UdpWire.Block) = deliver(block.rate, block.seq, block.samples)
+
+        override fun onError(reason: String) {
+            AppLog.w("UDP unusable: $reason")
+        }
+    }
+
+    /** v3.2: hello offered UDP. Keepalives start at once; no datagram within 2 s → WebSocket audio. */
+    private fun startUdp(port: Int, tokenText: String) {
+        val token = UdpWire.parseToken(tokenText)
+        val target = currentTarget
+        if (token == null || target == null) {
+            AppLog.w("UDP offer ignored (token unreadable)")
+            return
+        }
+        udp?.close()
+        val rx = UdpAudioReceiver(
+            host = target.host,
+            port = port,
+            token = token,
+            listener = udpListener,
+            threadSetup = {
+                try {
+                    Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+                } catch (_: Throwable) {
+                }
+            }
+        )
+        udp = rx
+        synchronized(udpPolicy) { udpPolicy.onHello(SystemClock.elapsedRealtime()) }
+        rx.start()
+        AppLog.i("UDP audio offered on port $port")
+        udpJob?.cancel()
+        udpJob = scope.launch {
+            while (isActive) {
+                delay(250)
+                val conn = connection ?: break
+                if (!conn.isOpen) break
+                val signal = synchronized(udpPolicy) { udpPolicy.tick(SystemClock.elapsedRealtime(), mirroring) }
+                when (signal) {
+                    UdpSignal.SEND_OK_FALSE -> {
+                        conn.send("{\"type\":\"udp\",\"ok\":false}")
+                        AppLog.i("UDP: nothing received, audio over the WebSocket")
+                    }
+                    UdpSignal.SEND_OK_TRUE -> {
+                        conn.send("{\"type\":\"udp\",\"ok\":true}")
+                        AppLog.i("UDP: trying again")
+                    }
+                    UdpSignal.NONE -> Unit
+                }
+            }
+        }
+    }
+
+    private fun stopUdp() {
+        udpJob?.cancel()
+        udpJob = null
+        udp?.close()
+        udp = null
+        synchronized(udpPolicy) { udpPolicy.reset() }
     }
 
     /** v3.1 clock sync: 5 quick requests after connect, then one every 2 s. */
@@ -612,7 +704,12 @@ class PlaybackService : Service() {
                         needMs = s.needMs,
                         usedLatencyMs = s.outputLatency?.ms,
                         latencySource = s.outputLatency?.source,
-                        playoutMs = s.playoutMs.toInt()
+                        playoutMs = s.playoutMs.toInt(),
+                        transport = when {
+                            !open -> ""
+                            synchronized(udpPolicy) { udpPolicy.usingUdp } -> "UDP"
+                            else -> "WS"
+                        }
                     )
                 }
                 // v3.2: tell the host as soon as what we need changes noticeably (it raises P at once).
@@ -694,6 +791,7 @@ class PlaybackService : Service() {
         if (forget) Prefs.wantPlaying = false
         PlaybackController.sender = null
         syncJob?.cancel()
+        stopUdp()
         sessionJob?.cancel()
         sessionJob = null
         connection?.close()

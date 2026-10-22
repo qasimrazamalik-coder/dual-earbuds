@@ -63,7 +63,9 @@ data class PlayerState(
     val playoutMs: Int = 0,
     val needMs: Int? = null,
     val usedLatencyMs: Double? = null,
-    val latencySource: LatencySource? = null
+    val latencySource: LatencySource? = null,
+    /** v3.2: how audio arrives right now: "UDP", "WS", or "" while not connected. */
+    val transport: String = ""
 ) {
     /** True while the service is (trying to be) playing — i.e. between Start and Stop. */
     val running: Boolean
