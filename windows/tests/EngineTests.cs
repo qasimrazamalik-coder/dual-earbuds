@@ -313,7 +313,7 @@ static class EngineTests
             Check(page.StartsWith("HTTP/1.1 200") && page.Contains("Dual Earbuds") && page.Contains("mediaSession"), "page with key (any case)");
             string info = Http(port, "GET /info?k=ABCD2345 HTTP/1.1");
             Check(info.StartsWith("HTTP/1.1 200") && info.Contains("\"protocol\":3") && info.Contains("\"format\":\"s16le\""), "info json");
-            Check(info.Contains("\"host\":\"windows\"") && info.Contains("\"party\":false") && info.Contains("\"maxClients\":8") && info.Contains("\"version\":\"3.0.0\""), "info v3 fields");
+            Check(info.Contains("\"host\":\"windows\"") && info.Contains("\"party\":false") && info.Contains("\"maxClients\":8") && info.Contains("\"version\":\"" + AppInfo.Version + "\""), "info v3 fields");
             var infoJson = MiniJson.ParseObject(info.Substring(info.IndexOf("\r\n\r\n") + 4));
             Check(MiniJson.GetInt(infoJson, "protocol", 0) == 3 && MiniJson.GetString(infoJson, "app", "") == "DualEarbuds" && MiniJson.GetInt(infoJson, "rate", -1) == 0 && MiniJson.GetInt(infoJson, "channels", 0) == 2, "info json parses, rate 0 while not sharing");
             Check(page.Contains(WebPlayer.Html.Substring(0, 200)) && page.Length > WebPlayer.Html.Length, "served page is the embedded player");
@@ -822,7 +822,7 @@ static class EngineTests
         Check(Updater.CompareVersions("v10.0.0", "v9.9.9") > 0, "major wins");
         Check(Updater.CompareVersions("3.1", "3.1.0") == 0 && Updater.CompareVersions("3", "3.0.0") == 0, "missing parts are zero");
         Check(Updater.CompareVersions("v2.9.9", "3.0.0") < 0, "older");
-        Check(Updater.IsNewer("v3.0.1", AppInfo.Version) && !Updater.IsNewer("v3.0.0", "3.0.0") && !Updater.IsNewer("v2.5.0", "3.0.0"), "IsNewer");
+        Check(Updater.IsNewer("v99.0.1", AppInfo.Version) && !Updater.IsNewer("v3.0.0", "3.0.0") && !Updater.IsNewer("v2.5.0", "3.0.0"), "IsNewer");
         Check(Updater.ParseVersion("v3.1.0-beta.2") != null && Updater.ParseVersion("v3.1.0-beta.2")[1] == 1, "suffix ignored");
         Check(Updater.ParseVersion("latest") == null && Updater.ParseVersion("") == null && Updater.ParseVersion("1.2.3.4") == null && Updater.ParseVersion("v1..2") == null && Updater.ParseVersion("-1.0.0") == null, "garbage is not a version");
         Check(!Updater.IsNewer("nightly", "3.0.0") && Updater.CompareVersions("junk", "1.0.0") < 0, "garbage never counts as newer");
