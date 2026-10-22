@@ -33,6 +33,9 @@ namespace DualEarbuds
         public DateTime ConnectedAt;
         public long PacketsSent;
         public long PacketsDropped;
+        public int NeedMs;           // v3.2: what this listener needs for the common deadline (0 = not reported)
+        public int OffsetMs = int.MinValue;   // its offset from the deadline, when it reports one
+        public string Transport = "ws";       // "udp" while its audio goes over UDP
     }
 
     public class PhoneLink
@@ -126,7 +129,14 @@ namespace DualEarbuds
         volatile string source = "all", sourceApp;
         volatile string suggestedEq;         // null = no suggestion
         volatile bool talking;
-        public int PlayoutMs = DefaultPlayoutMs;
+        // v3.2 common deadline: P follows the listeners' needs and the host's own outputs.
+        readonly PlayoutPlanner planner = new PlayoutPlanner();
+        volatile int playoutMs = DefaultPlayoutMs;
+        volatile int localNeedMs;
+        public int PlayoutMs { get { return playoutMs; } }
+        // The slowest ticked local output's need (set by the app); 0 = no local output.
+        public int LocalNeedMs { get { return localNeedMs; } set { localNeedMs = Math.Max(0, value); } }
+        public event Action<int> PlayoutChanged;   // raised on the housekeeping thread
         // (listener id, action) for an allowed remote command; runs on that listener's read thread
         public Action<string, string> RemoteAction;
         long clockH = -1;                    // host ms when packet clockSeq was captured
@@ -306,7 +316,29 @@ namespace DualEarbuds
             return string.Format(CultureInfo.InvariantCulture,
                 "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7}",
                 AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, AppInfo.Host, mirroring ? rate : 0, party ? "true" : "false",
-                PlayoutMs, remoteControl ? "true" : "false") + SourceFields(false) + "}";
+                playoutMs, remoteControl ? "true" : "false") + SourceFields(false) + "}";
+        }
+
+        public static string PlayoutMessage(int ms) { return "{\"type\":\"playout\",\"ms\":" + ms.ToString(CultureInfo.InvariantCulture) + "}"; }
+
+        // Recomputes P (call about once a second); announces it when it changed.
+        public int UpdatePlayout(long now)
+        {
+            var needs = new List<int>();
+            lock (lk)
+                foreach (var c in conns)
+                    if (!c.Closed) { var n = c.SyncedNeed; if (n > 0) needs.Add(n); }
+            int target = PlayoutPlanner.Choose(needs, localNeedMs);
+            int was = playoutMs;
+            int p = planner.Step(target, now);
+            if (p != was)
+            {
+                playoutMs = p;
+                SendTextAll(PlayoutMessage(p));
+                var h = PlayoutChanged;
+                if (h != null) { try { h(p); } catch (Exception ex) { Log.Warn("Playout: " + ex.Message); } }
+            }
+            return p;
         }
 
         public static string SyncReply(double c, long h)
@@ -501,6 +533,7 @@ namespace DualEarbuds
                 uint cs;
                 lock (packLk) { cs = clockSeq; h = Interlocked.Read(ref clockH); }
                 if (h >= 0 && mirroring) SendTextAll(ClockMessage(cs, h));
+                UpdatePlayout(now);
                 if (++tick % 2 != 0) continue;
                 SendTextAll("{\"type\":\"ping\",\"t\":" + now.ToString(CultureInfo.InvariantCulture) + "}");
                 PhoneConn[] arr;
@@ -751,7 +784,9 @@ namespace DualEarbuds
                     MiniJson.GetInt(d, "volume", -1),
                     MiniJson.GetInt(d, "bufferMs", -1),
                     MiniJson.GetInt(d, "underruns", -1),
-                    MiniJson.GetBool(d, "playing", false));
+                    MiniJson.GetBool(d, "playing", false),
+                    MiniJson.GetInt(d, "needMs", -1),
+                    MiniJson.GetInt(d, "offsetMs", int.MinValue));
             }
         }
 
@@ -841,7 +876,8 @@ namespace DualEarbuds
                     Id = info.Id, Name = info.Name, Client = info.Client, Remote = info.Remote, Earbuds = info.Earbuds,
                     Battery = info.Battery, Volume = info.Volume, BufferMs = info.BufferMs, Underruns = info.Underruns, Playing = info.Playing,
                     RttMs = info.RttMs, ConnectedAt = info.ConnectedAt, PacketsSent = info.PacketsSent, PacketsDropped = info.PacketsDropped,
-                    Synced = info.Synced, RemoteCount = info.RemoteCount
+                    Synced = info.Synced, RemoteCount = info.RemoteCount, NeedMs = info.NeedMs, OffsetMs = info.OffsetMs,
+                    Transport = info.Transport
                 };
             }
         }
@@ -862,10 +898,16 @@ namespace DualEarbuds
 
         public void SetVolumeLocal(int volume) { lock (lk) info.Volume = volume; }
 
-        public void UpdateStatus(string device, string earbuds, int battery, int volume, int bufferMs, int underruns, bool playing)
+        // The need counted for P: only listeners that play on the host's clock (sync mode) can follow it.
+        // A synced listener that never reports needMs is a v3.1 listener: it assumes the old fixed 120 ms.
+        public int SyncedNeed { get { lock (lk) return !info.Synced ? 0 : info.NeedMs > 0 ? info.NeedMs : PhoneLink.DefaultPlayoutMs; } }
+
+        public void UpdateStatus(string device, string earbuds, int battery, int volume, int bufferMs, int underruns, bool playing, int needMs, int offsetMs)
         {
             lock (lk)
             {
+                if (needMs >= 0) info.NeedMs = Math.Min(5000, needMs);
+                info.OffsetMs = offsetMs == int.MinValue ? int.MinValue : Math.Max(-5000, Math.Min(5000, offsetMs));
                 if (!string.IsNullOrEmpty(device)) info.Name = device.Length > 60 ? device.Substring(0, 60) : device;
                 if (earbuds != null) info.Earbuds = earbuds.Length > 60 ? earbuds.Substring(0, 60) : earbuds;
                 info.Battery = battery >= 0 && battery <= 100 ? battery : -1;

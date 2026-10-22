@@ -102,7 +102,7 @@ namespace DualEarbuds
         public readonly OutputStream Stream;
         public volatile int DelayMs;            // manual Delay: always adds
         public volatile float Volume = 1f;      // this output's own volume
-        public double OutputLatencyMs;          // calibrated (push -> heard), 0 when unknown
+        public double OutputLatencyMs;          // device buffer -> heard: calibrated, or estimated (OutputTiming)
         readonly SyncTrim trim = new SyncTrim();
         readonly StereoResampler rs = new StereoResampler();
         float[] work = new float[4096];
@@ -129,7 +129,8 @@ namespace DualEarbuds
             if (!double.IsNaN(playAtHost))
             {
                 if (!s.SyncMode) { s.SyncMode = true; s.SetBufferMs(0); lastBufferMs = 0; }
-                double queuedMs = s.QueuedFrames * 1000.0 / rate;
+                // everything still ahead of the ear: our queue plus what already sits in the device buffer
+                double queuedMs = (s.QueuedFrames + s.PaddingFrames) * 1000.0 / rate;
                 double heardAt = hostNow + queuedMs + OutputLatencyMs;
                 // protocol: heard at h(seq) + playoutMs + delay (submitted outputLatency earlier); Delay always makes it later
                 double error = heardAt - (playAtHost + DelayMs);
@@ -166,7 +167,7 @@ namespace DualEarbuds
         readonly CancellationTokenSource stopCts = new CancellationTokenSource();
         volatile ClientWebSocket ws;
         volatile ListenState state = ListenState.Idle;
-        volatile string hostName = "", detail = "";
+        volatile string hostName = "", detail = "", hostKind = "windows";
         volatile bool kicked, hostSharing, talking, remoteAllowed;
         volatile string source = "all", sourceApp, suggestedEq;
         volatile int playoutMs = PhoneLink.DefaultPlayoutMs, hostVolume = 100, rate;
@@ -174,6 +175,9 @@ namespace DualEarbuds
         long packets, concealed, lost;
 
         readonly ClockSync sync = new ClockSync();
+        // v3.2: what this laptop needs for the common deadline (jitter p99 over 30 s + output latency + 10)
+        readonly JitterWindow needJitter = new JitterWindow(30000, PhoneLink.PacketMs);
+        readonly LatenessTracker lateness = new LatenessTracker(PhoneLink.PacketMs);
         readonly PacketClock packetClock = new PacketClock();
         public readonly JitterBuffer Buffer = new JitterBuffer();
         Concealer plc;
@@ -204,6 +208,7 @@ namespace DualEarbuds
         public LinkTarget Target { get { return target; } }
         public ListenState State { get { return state; } }
         public string HostName { get { return hostName; } }
+        public string HostKind { get { return hostKind; } }   // "android" for a phone that shares
         public string Detail { get { return detail; } }
         public bool HostTalking { get { return talking; } }
         public bool RemoteAllowed { get { return remoteAllowed; } }
@@ -404,6 +409,7 @@ namespace DualEarbuds
             {
                 case "hello":
                     hostName = MiniJson.GetString(d, "pc", "") ?? "";
+                    hostKind = MiniJson.GetString(d, "host", "windows") == "android" ? "android" : "windows";
                     int po = MiniJson.GetInt(d, "playoutMs", PhoneLink.DefaultPlayoutMs);
                     playoutMs = Math.Max(30, Math.Min(1000, po));
                     remoteAllowed = MiniJson.GetBool(d, "remote", false);
@@ -445,6 +451,10 @@ namespace DualEarbuds
                         Raise();
                     }
                     break;
+                case "playout":
+                    int pm = MiniJson.GetInt(d, "ms", -1);
+                    if (pm > 0) { playoutMs = Math.Max(30, Math.Min(1000, pm)); Raise(); }
+                    break;
                 case "talk":
                     talking = MiniJson.GetBool(d, "on", false);
                     Raise();
@@ -476,14 +486,53 @@ namespace DualEarbuds
             return true;
         }
 
+        // The slowest ticked output's latency (calibrated or estimated), 0 without outputs.
+        public double OutputLatencyMs
+        {
+            get
+            {
+                double m = 0;
+                foreach (var o in outputs) m = Math.Max(m, o.OutputLatencyMs + OutputTiming.CushionMs);
+                return m;
+            }
+        }
+
+        public double JitterP99 { get { return needJitter.P99; } }
+
+        // v3.2 needMs = jitter p99 (30 s) + output latency + 10; never below the buffer the smart buffer
+        // keeps (the listener never steers its queue below that), plus half the round trip (the path itself).
+        public int NeedMs
+        {
+            get
+            {
+                double net = Math.Max(needJitter.P99 + 10, Buffer.TargetMs);
+                double rtt = sync.BestRtt;
+                return (int)Math.Ceiling(net + OutputLatencyMs + (rtt > 0 ? rtt / 2 : 0));
+            }
+        }
+
+        // How far the outputs are from the deadline right now (+ = late), the worst one; NaN when not synced.
+        public double OffsetMs
+        {
+            get
+            {
+                if (!Synced) return double.NaN;
+                double worst = double.NaN;
+                foreach (var o in outputs) if (double.IsNaN(worst) || Math.Abs(o.LastErrorMs) > Math.Abs(worst)) worst = o.LastErrorMs;
+                return worst;
+            }
+        }
+
         void SendStatus()
         {
             var o = outputs;
             bool playing = hostSharing && state == ListenState.Playing && o.Length > 0;
             int bufferMs = Synced ? playoutMs : Buffer.TargetMs;
+            double off = OffsetMs;
             SendText(string.Format(CultureInfo.InvariantCulture,
-                "{{\"type\":\"status\",\"device\":\"{0}\",\"earbuds\":\"{1}\",\"battery\":{2},\"volume\":{3},\"bufferMs\":{4},\"underruns\":{5},\"playing\":{6}}}",
-                MiniJson.Escape(deviceName), MiniJson.Escape(Earbuds ?? ""), Battery, hostVolume, bufferMs, Underruns, playing ? "true" : "false"));
+                "{{\"type\":\"status\",\"device\":\"{0}\",\"earbuds\":\"{1}\",\"battery\":{2},\"volume\":{3},\"bufferMs\":{4},\"underruns\":{5},\"playing\":{6},\"needMs\":{7}{8}}}",
+                MiniJson.Escape(deviceName), MiniJson.Escape(Earbuds ?? ""), Battery, hostVolume, bufferMs, Underruns, playing ? "true" : "false",
+                NeedMs, double.IsNaN(off) ? "" : ",\"offsetMs\":" + ((int)Math.Round(off)).ToString(CultureInfo.InvariantCulture)));
         }
 
         void TickLoop()
@@ -535,9 +584,11 @@ namespace DualEarbuds
                 int o = 8 + i * 2;
                 pcm[i] = (short)(b[o] | (b[o + 1] << 8)) / 32768f;
             }
-            Buffer.OnPacket((long)NowMs);
             int missing = SeqGap.Missing(haveSeq, lastSeq, seq);
-            if (missing < 0) return;   // late or duplicate: already concealed
+            if (missing < 0) return;   // late or duplicate: already concealed (or the UDP copy came first)
+            long nowL = (long)NowMs;
+            Buffer.OnPacket(nowL);
+            needJitter.AddJitter(lateness.OnPacket(seq, nowL));
             if (missing > 0)
             {
                 Interlocked.Add(ref lost, missing);

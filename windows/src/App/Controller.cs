@@ -25,7 +25,12 @@ namespace DualEarbuds
         public DateTime LastRetry = DateTime.MinValue;
         public OutputEffects Effects = new OutputEffects();
         public double LatencyMs;          // calibrated, 0 = not calibrated
-        public int ExtraDelayMs;          // auto-sync alignment added to the manual delay
+        public double ReportedMs;         // what WASAPI reports for the open stream (0 = unknown)
+        public bool IsBluetooth;
+        public int ExtraDelayMs;          // common-deadline delay (P - latency) added to the manual delay
+        // calibrated, else estimated from WASAPI (+ a Bluetooth guess)
+        public double EffectiveLatencyMs { get { return OutputTiming.LatencyMs(LatencyMs, ReportedMs, IsBluetooth); } }
+        public bool LatencyMeasured { get { return LatencyMs > 0; } }
         public bool Calibrating;
         public bool ListenTicked;         // plays the other device's sound in listener mode
     }
@@ -244,6 +249,8 @@ namespace DualEarbuds
         public void FastTick()
         {
             if (Demo) return;
+            // P moved (a listener joined, Wi-Fi got worse, an output was ticked): re-line-up the local outputs
+            if (PlayoutMs != appliedPlayout || ++alignTicks % 20 == 0) ApplyDelays();
             float pk = Engine.TakePeak();
             Level = Math.Max(Level * 0.88f, (float)Math.Sqrt(pk));
             foreach (var o in Outputs)
@@ -255,6 +262,7 @@ namespace DualEarbuds
         }
 
         public void MarkDirty() { dirty = true; }
+        int alignTicks;
 
         // ------------------------------------------------------------------ devices
         public void RefreshDevices(bool force)
@@ -297,6 +305,7 @@ namespace DualEarbuds
                 Outputs.Add(vm);
             }
             UpdateBatteries();
+            foreach (var o in Outputs) o.IsBluetooth = OutputTiming.LooksBluetooth(o.Name, o.Battery >= 0, o.ContainerId);
             ComputeAlignment();
             fxSnapshot = Outputs.Select(o => o.Effects).ToArray();
             if (Listen != null) ReopenListenOutputs();
@@ -367,7 +376,7 @@ namespace DualEarbuds
         void AddStream(OutputVm o)
         {
             var st = Engine.AddOutput(o.Id, o.DelayMs + o.ExtraDelayMs, o.Volume / 100f);
-            if (st != null) st.Effects = o.Effects;
+            if (st != null) { st.Effects = o.Effects; if (st.ReportedLatencyMs > 0) o.ReportedMs = st.ReportedLatencyMs; }
         }
 
         public void Stop()
@@ -454,14 +463,47 @@ namespace DualEarbuds
             foreach (var lo in listenOutputs) if (lo.DeviceId == o.Id) lo.Volume = o.Volume / 100f;
         }
 
-        // ------------------------------------------------------------------ auto-sync (calibration)
-        // Calibrated laptop outputs are lined up with the slowest calibrated one; the manual Delay adds on top.
+        // ------------------------------------------------------------------ common deadline (protocol v3.2)
+        // Every ear hears the sample captured at t at t + P. P comes from the phone link (it knows the listeners'
+        // needs) or, with the link off, from the local outputs alone. Each ticked local output is delayed by
+        // P - its latency; the manual Delay adds on top.
+        int appliedPlayout = -1;
+
+        public int LocalNeedMs
+        {
+            get
+            {
+                var l = new List<double>();
+                foreach (var o in Outputs) if (o.Enabled && !o.IsSource) l.Add(o.EffectiveLatencyMs);
+                return OutputTiming.LocalNeedMs(l);
+            }
+        }
+
+        public int PlayoutMs
+        {
+            get
+            {
+                if (Demo) return DemoPlayoutMs;
+                var p = Phone;
+                return p != null ? p.PlayoutMs : PlayoutPlanner.Choose(null, LocalNeedMs);
+            }
+        }
+        public int DemoPlayoutMs = 214;
+
         void ComputeAlignment()
         {
-            double max = 0;
-            foreach (var o in Outputs) if (o.Enabled && !o.IsSource && o.LatencyMs > 0) max = Math.Max(max, o.LatencyMs);
             foreach (var o in Outputs)
-                o.ExtraDelayMs = o.Enabled && o.LatencyMs > 0 ? (int)Math.Round(max - o.LatencyMs) : 0;
+            {
+                var st = Demo ? null : Engine.Get(o.Id);
+                if (st != null && st.ReportedLatencyMs > 0) o.ReportedMs = st.ReportedLatencyMs;
+            }
+            int need = LocalNeedMs;
+            var ph = Phone;
+            if (ph != null) ph.LocalNeedMs = need;
+            int p = PlayoutMs;
+            foreach (var o in Outputs)
+                o.ExtraDelayMs = o.Enabled && !o.IsSource ? OutputTiming.AutoDelayMs(p, o.EffectiveLatencyMs) : 0;
+            appliedPlayout = p;
         }
 
         void ApplyDelays()
@@ -471,6 +513,11 @@ namespace DualEarbuds
             {
                 var s = Engine.Get(o.Id);
                 if (s != null) s.SetDelayMs(o.DelayMs + o.ExtraDelayMs);
+            }
+            foreach (var lo in listenOutputs)
+            {
+                var vm = Outputs.Find(x => x.Id == lo.DeviceId);
+                if (vm != null) lo.OutputLatencyMs = vm.EffectiveLatencyMs;
             }
         }
 
@@ -492,7 +539,6 @@ namespace DualEarbuds
                     Settings.LatencyByName[name] = o.LatencyMs;
                     dirty = true;
                     ApplyDelays();
-                    foreach (var lo in listenOutputs) if (lo.DeviceId == id) lo.OutputLatencyMs = o.LatencyMs;
                     Log.Info("Calibrated " + name + ": " + o.LatencyMs + " ms (" + r.Agreeing + "/8 clicks)");
                 }
                 else Log.Info("Calibration of " + name + ": " + r.Problem);
@@ -507,7 +553,6 @@ namespace DualEarbuds
             Settings.LatencyByName.Remove(o.Name);
             dirty = true;
             ApplyDelays();
-            foreach (var lo in listenOutputs) if (lo.DeviceId == o.Id) lo.OutputLatencyMs = 0;
             UpdateStates();
         }
 
@@ -981,7 +1026,8 @@ namespace DualEarbuds
                     st.Effects = w.Effects;
                     st.Start();
                     if (!st.Running) { Log.Warn("Listen output " + w.Name + ": " + st.Error); st.Stop(); continue; }
-                    keep.Add(new ListenerOutput(w.Id, w.Name, st) { DelayMs = w.DelayMs, Volume = w.Volume / 100f, OutputLatencyMs = w.LatencyMs });
+                    if (st.ReportedLatencyMs > 0) w.ReportedMs = st.ReportedLatencyMs;
+                    keep.Add(new ListenerOutput(w.Id, w.Name, st) { DelayMs = w.DelayMs, Volume = w.Volume / 100f, OutputLatencyMs = w.EffectiveLatencyMs });
                 }
                 if (Listen == c) { c.SetOutputs(keep); result = keep; }
                 else foreach (var k in keep) k.Stream.Stop();

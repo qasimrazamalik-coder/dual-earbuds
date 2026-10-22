@@ -69,6 +69,13 @@ static class EngineTests
         Run("Diagnostics scrubbing", TestScrub);
         Run("Join by link: parsing", TestLinkParse);
         Run("Laptop to laptop: loopback host + listener", TestLoopbackListen);
+        Run("v3.2 common deadline: choosing P", TestPlayoutChoose);
+        Run("v3.2 common deadline: ramping", TestPlayoutRamp);
+        Run("v3.2 common deadline: per-output delay", TestOutputTiming);
+        Run("v3.2 needMs: jitter window + lateness", TestNeedJitter);
+        Run("v3.2 old calibrations migrate", () => TestLatencyMigration(tmp));
+        Run("Output: small delay decreases play faster, no cut", TestSlew);
+        Run("v3.2 host announces playout from listener needs", TestPlayoutLoopback);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -1583,5 +1590,140 @@ static class EngineTests
         Check(!s.Contains("Q7RK2MXD") && !s.Contains("4711") && !s.ToUpperInvariant().Contains("ABCD2345"), "keys and PINs removed");
         Check(s.Contains("k=") && s.Contains("192.168.1.16"), "the rest stays readable");
         Check(DiagReport.Scrub("plain", null) == "plain", "nothing to scrub");
+    }
+
+    // ------------------------------------------------------------------ v3.2 common deadline
+    static void TestPlayoutChoose()
+    {
+        Check(PlayoutPlanner.Choose(new[] { 80, 150, 0 }, 60) == 150, "slowest listener wins");
+        Check(PlayoutPlanner.Choose(new[] { 80 }, 230) == 230, "slow local output wins");
+        Check(PlayoutPlanner.Choose(new int[0], 0) == 40, "never below 40 ms");
+        Check(PlayoutPlanner.Choose(null, 10) == 40, "no listeners: local need, clamped");
+        Check(PlayoutPlanner.Choose(new[] { 2000 }, 50) == 400, "a listener can't pull P above 400");
+        Check(PlayoutPlanner.Choose(new[] { -1, 0 }, 90) == 90, "unknown needs ignored");
+    }
+
+    static void TestPlayoutRamp()
+    {
+        var p = new PlayoutPlanner();
+        Check(p.Step(200, 0) == 200, "first value applies at once");
+        Check(p.Step(260, 500) == 260, "increase applies at once");
+        Check(p.Step(100, 1500) == 255, "decrease: 5 ms after 1 s");
+        Check(p.Step(100, 2500) == 250, "another 5 ms after another second");
+        int v = 0;
+        for (long t = 2600; t <= 2500 + 10000; t += 100) v = p.Step(100, t);
+        Check(v == 200, "10 s later: 50 ms lower (" + v + ")");
+        Check(p.Step(100, 100000) == 100, "never below the target");
+        Check(p.Step(300, 100001) == 300, "jumps up again at once");
+        var q = new PlayoutPlanner();
+        q.Step(120, 0);
+        int last = 120; bool smooth = true;
+        for (long t = 10; t < 30000; t += 10) { int x = q.Step(40, t); if (last - x > 1) smooth = false; last = x; }
+        Check(smooth && last == 40, "steps of at most 1 ms when called often (" + last + ")");
+    }
+
+    static void TestOutputTiming()
+    {
+        Check(OutputTiming.LatencyMs(182, 12, true) == 182, "calibrated latency wins");
+        Check(OutputTiming.LatencyMs(0, 12, false) == 22, "wired: reported + mixer");
+        Check(OutputTiming.LatencyMs(0, 12, true) == 172, "Bluetooth: + guess");
+        Check(OutputTiming.LatencyMs(0, 0, false) == 30, "nothing known: default");
+        Check(OutputTiming.NeedMs(182) == 197, "need = latency + cushion");
+        // P = 214, earbuds at 182 ms: queue 214 - 182 - 15 = 17 ms extra
+        Check(OutputTiming.AutoDelayMs(214, 182) == 17, "delay = P - latency - cushion");
+        Check(OutputTiming.AutoDelayMs(214, 199) == 0, "the slowest output gets no extra delay");
+        Check(OutputTiming.AutoDelayMs(100, 300) == 0, "never negative");
+        Check(OutputTiming.LocalNeedMs(new[] { 22.0, 182.0, 140.0 }) == 197, "local need = slowest ticked output");
+        Check(OutputTiming.LocalNeedMs(new double[0]) == 0, "no outputs: no need");
+        // heard time check: capture + cushion + delay + latency = capture + P
+        int P = 250; double lat = 172;
+        Check(Math.Abs(OutputTiming.CushionMs + OutputTiming.AutoDelayMs(P, lat) + lat - P) <= 0.5, "output heard at capture + P");
+        Check(OutputTiming.LooksBluetooth("Headphones (Evo Z-Buds)", false, Guid.NewGuid()), "A2DP name -> Bluetooth");
+        Check(!OutputTiming.LooksBluetooth("Headphones (Realtek(R) Audio)", false, Guid.NewGuid()), "Realtek -> wired");
+        Check(!OutputTiming.LooksBluetooth("Headphones (TWS)", false, OutputTiming.ComputerContainer), "built-in container -> wired");
+        Check(OutputTiming.LooksBluetooth("Speakers (whatever)", true, OutputTiming.ComputerContainer), "battery -> Bluetooth");
+        Check(!OutputTiming.LooksBluetooth("Speaker (Realtek(R) Audio)", false, Guid.NewGuid()), "speaker -> wired");
+    }
+
+    static void TestNeedJitter()
+    {
+        var w = new JitterWindow(30000, 10);
+        long t = 0;
+        var rj = new Random(3);
+        // Wi-Fi-like jitter: 2 ms floor plus an exponential tail (mean 5 ms): true p99 = 2 + 5 ln 100 = 25 ms
+        for (int i = 0; i < 2000; i++) { w.AddJitter(2 - 5 * Math.Log(1 - rj.NextDouble())); t += 10; w.OnPacket(t); }
+        Check(w.P99 >= 19 && w.P99 <= 32, "p99 of a jittery network (" + w.P99.ToString("0.0") + " ms, true 25)");
+        for (int i = 0; i < 4000; i++) { w.AddJitter(1); t += 10; w.OnPacket(t); }
+        Check(w.P99 < 5, "after 30 s of calm network it comes down (" + w.P99.ToString("0.0") + ")");
+
+        var lt = new LatenessTracker(10);
+        Check(lt.OnPacket(100, 1000) == 0, "first packet on time");
+        Check(lt.OnPacket(101, 1010) == 0, "steady");
+        Check(Math.Abs(lt.OnPacket(102, 1215) - 195) < 0.01, "200 ms gap -> 195 ms late");
+        Check(Math.Abs(lt.OnPacket(103, 1215) - 185) < 0.01, "burst: next one less late");
+        Check(lt.OnPacket(110, 1095) == 0, "earlier than ever re-anchors");
+    }
+
+    static void TestLatencyMigration(string tmp)
+    {
+        string path = Path.Combine(tmp, "old-latency.txt");
+        File.WriteAllLines(path, new[] { "latency\tHeadphones (A)\t200", "latency2\tHeadphones (B)\t150", "latency\tHeadphones (B)\t999" });
+        var s = Settings.Load(path);
+        Check(s.LatencyFor("Headphones (A)") == 200 - Settings.OldDeviceBufferMs, "pre-3.2 value loses the device buffer it counted");
+        Check(s.LatencyFor("Headphones (B)") == 150, "3.2 value kept as is (and wins)");
+        s.Save(path);
+        Check(File.ReadAllText(path).Contains("latency2\tHeadphones (A)\t165"), "saved in the new format");
+        Check(Settings.Load(path).LatencyFor("Headphones (A)") == 165, "no second migration");
+    }
+
+    static void TestSlew()
+    {
+        int rate = 1000;
+        var o = new OutputStream("slew", rate, 100, 1f);
+        o.MarkRunningForTest();
+        var dst = new float[4000];
+        var src = new float[20];
+        for (int i = 0; i < 10; i++) { src[2 * i] = 0.5f; src[2 * i + 1] = 0.5f; }
+        // steady state: 10 frames in, 10 out, queue = cushion + 100
+        for (int k = 0; k < 30; k++) { o.Push(src, 10); o.Fill(dst, 10, false); }
+        int q0 = o.QueuedFrames;
+        o.SetDelayMs(95);   // the deadline ramps down 5 ms
+        Check(o.SlewPendingFrames == 5 && o.QueuedFrames == q0, "5 ms drop is not cut out (" + o.SlewPendingFrames + ")");
+        bool full = true;
+        for (int k = 0; k < 2000 && o.SlewPendingFrames > 0; k++) { o.Push(src, 10); if (o.Fill(dst, 10, false) != 10) full = false; }
+        Check(o.SlewPendingFrames == 0 && full, "played away slowly without gaps");
+        Check(Math.Abs(o.QueuedFrames - (q0 - 5)) <= 1, "queue 5 ms shorter afterwards (" + o.QueuedFrames + " vs " + q0 + ")");
+        o.SetDelayMs(0);
+        Check(o.SlewPendingFrames == 0 && o.QueuedFrames <= q0 - 90, "a big jump is cut at once");
+    }
+
+    static void TestPlayoutLoopback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        try
+        {
+            host.SetMirroring(true, 48000);
+            host.LocalNeedMs = 197;
+            Check(host.UpdatePlayout(host.NowMs) == 197, "no listeners: P = local need");
+            var w = WsClient.Open(port, "k=ABCD2345&client=android&name=P");
+            string hello = NextOfType(w, "hello", 10);
+            Check(hello != null && hello.Contains("\"playoutMs\":197"), "hello carries the current P");
+            int got = 0;
+            host.PlayoutChanged += ms => got = ms;
+            w.SendText("{\"type\":\"sync\",\"c\":1}");
+            w.SendText("{\"type\":\"status\",\"device\":\"P\",\"needMs\":260,\"bufferMs\":0,\"underruns\":0,\"playing\":true}");
+            Check(WaitFor(() => host.Snapshot().Count == 1 && host.Snapshot()[0].NeedMs == 260 && host.Snapshot()[0].Synced, 2000), "host reads needMs");
+            Check(host.UpdatePlayout(host.NowMs) == 260 && got == 260, "slow listener raises P at once");
+            string po = NextOfType(w, "playout", 40);
+            Check(po != null && po.Contains("\"ms\":260"), "playout message sent (" + po + ")");
+            w.SendText("{\"type\":\"status\",\"device\":\"P\",\"needMs\":90,\"bufferMs\":0,\"underruns\":0,\"playing\":true}");
+            Check(WaitFor(() => host.Snapshot()[0].NeedMs == 90, 2000), "need drops");
+            int p1 = host.UpdatePlayout(host.NowMs + 1000);
+            Check(p1 >= 249 && p1 <= 256, "P comes down about 5 ms per second (" + p1 + ")");
+            w.Dispose();
+        }
+        finally { host.Stop(); }
     }
 }

@@ -178,6 +178,7 @@ namespace DualEarbuds
         public List<RecentHost> Recent = new List<RecentHost>();
         public List<string> ListenOutputs = new List<string>();
         public const int MaxRecent = 5;
+        public const double OldDeviceBufferMs = 35;   // see "latency" in Load
 
         static readonly string[] NoiseValues = { "off", "light", "strong" }, SmartEqValues = { "off", "app", "sound", "both" },
                                  DialogueValues = { "off", "light", "strong", "night" }, BufferValues = { "smart", "steady", "manual" };
@@ -263,8 +264,14 @@ namespace DualEarbuds
                                 if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out bm)) s.BufferMs = JitterBuffer.Clamp(bm);
                                 break;
                             case "latency":
+                                // before 3.2 a calibration also counted the ~35 ms the device buffer holds
                                 double lat;
-                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && lat >= 0 && lat <= 1000) s.LatencyByName[v] = lat;
+                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat) && lat >= 0 && lat <= 1000 && !s.LatencyByName.ContainsKey(v))
+                                    s.LatencyByName[v] = Math.Max(1, lat - OldDeviceBufferMs);
+                                break;
+                            case "latency2":
+                                double lat2;
+                                if (p.Length >= 3 && double.TryParse(p[2], NumberStyles.Float, CultureInfo.InvariantCulture, out lat2) && lat2 >= 0 && lat2 <= 1000) s.LatencyByName[v] = lat2;
                                 break;
                             case "profile":
                                 var hp = HearingProfile.Parse(v);
@@ -341,7 +348,7 @@ namespace DualEarbuds
                 lines.Add("buffer\t" + Buffer);
                 lines.Add("bufferms\t" + BufferMs.ToString(CultureInfo.InvariantCulture));
                 foreach (var kv in LatencyByName)
-                    lines.Add("latency\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
+                    lines.Add("latency2\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
                 foreach (var hp in Profiles) lines.Add("profile\t" + hp.Serialize());
                 foreach (var r in Recent) lines.Add("recent\t" + r.HostPort + "\t" + r.Key + "\t" + Clean(r.Name));
                 foreach (var id in ListenOutputs) lines.Add("listenout\t" + id);
