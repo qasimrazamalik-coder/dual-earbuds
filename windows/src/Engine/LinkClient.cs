@@ -7,6 +7,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -289,6 +290,7 @@ namespace DualEarbuds
                 }
                 finally
                 {
+                    StopUdp();
                     var w = ws;
                     ws = null;
                     if (w != null) { try { w.Abort(); } catch { } try { w.Dispose(); } catch { } }
@@ -408,6 +410,8 @@ namespace DualEarbuds
             switch (type)
             {
                 case "hello":
+                    // v3.2: UDP audio when the host offers it (older hosts and phones without it: WebSocket only)
+                    StartUdp(MiniJson.GetInt(d, "udp", 0), MiniJson.GetString(d, "token", null));
                     hostName = MiniJson.GetString(d, "pc", "") ?? "";
                     hostKind = MiniJson.GetString(d, "host", "windows") == "android" ? "android" : "windows";
                     int po = MiniJson.GetInt(d, "playoutMs", PhoneLink.DefaultPlayoutMs);
@@ -431,7 +435,7 @@ namespace DualEarbuds
                     if (d.TryGetValue("seq", out s) && s is double && d.TryGetValue("h", out hh) && hh is double)
                     {
                         double sv = (double)s;
-                        if (sv >= 0 && sv <= uint.MaxValue) packetClock.OnClock((uint)sv, (double)hh);
+                        if (sv >= 0 && sv <= uint.MaxValue) { packetClock.OnClock((uint)sv, (double)hh); udpHealth.OnClock((uint)sv, (long)NowMs); }
                     }
                     break;
                 case "state":
@@ -537,7 +541,7 @@ namespace DualEarbuds
 
         void TickLoop()
         {
-            long lastStatus = -StatusEveryMs, lastSync = 0;
+            long lastStatus = -StatusEveryMs, lastSync = 0, lastKeepalive = 0;
             int quickSyncs = 0;
             while (!stop)
             {
@@ -553,6 +557,12 @@ namespace DualEarbuds
                     quickSyncs++;
                     SendText("{\"type\":\"sync\",\"c\":" + Num(NowMs) + "}");
                 }
+                if (udpSock != null && now - lastKeepalive >= UdpAudio.KeepaliveEveryMs) { lastKeepalive = now; SendKeepalive(); }
+                if (udpHealth.Tick(now) == UdpAction.SendOkFalse)
+                {
+                    Log.Info("Listen: no UDP audio from " + target.HostPort + " - asking for WebSocket audio");
+                    SendText("{\"type\":\"udp\",\"ok\":false}");
+                }
                 foreach (var o in outputs)
                 {
                     int u = o.NewUnderruns();
@@ -564,13 +574,21 @@ namespace DualEarbuds
         }
 
         // ------------------------------------------------------------------ audio
+        // WebSocket binary message: [rate][seq][pcm].
         void OnAudio(byte[] b, int len)
         {
             if (len < 8 || ((len - 8) & 3) != 0) return;
             int r = b[0] | (b[1] << 8) | (b[2] << 16) | (b[3] << 24);
             uint seq = (uint)(b[4] | (b[5] << 8) | (b[6] << 16) | (b[7] << 24));
             if (r < 8000 || r > 384000) return;
-            int frames = (len - 8) / 4;
+            udpHealth.OnWsAudio((long)NowMs);
+            Interlocked.Increment(ref wsPackets);
+            lock (audioLk) OnPacket(b, 8, (len - 8) / 4, r, seq);
+        }
+
+        // Both paths (UDP and WebSocket) end here, one at a time; duplicates are dropped by sequence number.
+        void OnPacket(byte[] b, int pcmAt, int frames, int r, uint seq)
+        {
             if (r != rate || plc == null || plc.PacketFrames != PhoneLink.PacketFrames(r))
             {
                 rate = r;
@@ -579,13 +597,13 @@ namespace DualEarbuds
                 Raise();
             }
             if (frames * 2 > pcm.Length) { pcm = new float[frames * 2]; gapBuf = new float[frames * 2]; }
+            int missing = SeqGap.Missing(haveSeq, lastSeq, seq);
+            if (missing < 0) return;   // late or duplicate: already concealed (or the other copy came first)
             for (int i = 0; i < frames * 2; i++)
             {
-                int o = 8 + i * 2;
+                int o = pcmAt + i * 2;
                 pcm[i] = (short)(b[o] | (b[o + 1] << 8)) / 32768f;
             }
-            int missing = SeqGap.Missing(haveSeq, lastSeq, seq);
-            if (missing < 0) return;   // late or duplicate: already concealed (or the UDP copy came first)
             long nowL = (long)NowMs;
             Buffer.OnPacket(nowL);
             needJitter.AddJitter(lateness.OnPacket(seq, nowL));
@@ -623,6 +641,111 @@ namespace DualEarbuds
             float master = hostVolume / 100f;
             int jt = Buffer.TargetMs;
             foreach (var o in outputs) o.Push(data, frames, playAt, hostNow, jt, master);
+        }
+
+        // ------------------------------------------------------------------ UDP audio (protocol v3.2)
+        readonly object audioLk = new object();
+        readonly UdpHealth udpHealth = new UdpHealth();
+        volatile Socket udpSock;
+        volatile byte[] udpKeepalive;
+        volatile IPEndPoint udpHost;
+        long udpPackets, udpRecovered, wsPackets;
+        public bool DisableUdp;                     // tests / troubleshooting: WebSocket audio only
+
+        public string Transport { get { return udpHealth.Active((long)NowMs) ? "udp" : "ws"; } }
+        public long UdpPackets { get { return Interlocked.Read(ref udpPackets); } }
+        public long UdpRecovered { get { return Interlocked.Read(ref udpRecovered); } }   // lost datagrams filled by the next one
+        public long WsPackets { get { return Interlocked.Read(ref wsPackets); } }
+
+        void StartUdp(int port, string tokenHex)
+        {
+            StopUdp();
+            byte[] token = UdpAudio.FromHex(tokenHex);
+            if (DisableUdp || port <= 0 || port > 65535 || token == null) { udpHealth.OnHello((long)NowMs, false); return; }
+            try
+            {
+                IPAddress ip;
+                if (!IPAddress.TryParse(target.Host, out ip))
+                {
+                    var all = Dns.GetHostAddresses(target.Host);
+                    ip = null;
+                    foreach (var a in all) if (a.AddressFamily == AddressFamily.InterNetwork) { ip = a; break; }
+                    if (ip == null && all.Length > 0) ip = all[0];
+                }
+                if (ip == null) { udpHealth.OnHello((long)NowMs, false); return; }
+                if (ip.IsIPv4MappedToIPv6) ip = ip.MapToIPv4();
+                var sock = new Socket(ip.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+                sock.Bind(new IPEndPoint(ip.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0));
+                sock.ReceiveBufferSize = 256 * 1024;
+                try { sock.IOControl(-1744830452, new byte[] { 0, 0, 0, 0 }, null); } catch { }   // SIO_UDP_CONNRESET off
+                udpHost = new IPEndPoint(ip, port);
+                udpKeepalive = UdpAudio.BuildKeepalive(token);
+                udpSock = sock;
+                udpHealth.OnHello((long)NowMs, true);
+                var t = new Thread(() => UdpLoop(sock)) { IsBackground = true, Name = "LinkClientUdp" };
+                t.Start();
+                SendKeepalive();
+            }
+            catch (Exception ex)
+            {
+                Log.Info("Listen: UDP not available (" + ex.Message + ") - WebSocket audio");
+                udpHealth.OnHello((long)NowMs, false);
+                StopUdp();
+            }
+        }
+
+        void SendKeepalive()
+        {
+            var s = udpSock;
+            var k = udpKeepalive;
+            var to = udpHost;
+            if (s == null || k == null || to == null) return;
+            try { s.SendTo(k, to); } catch (Exception) { }
+        }
+
+        void StopUdp()
+        {
+            var s = udpSock;
+            udpSock = null;
+            if (s != null) { try { s.Close(); } catch { } }
+        }
+
+        void UdpLoop(Socket sock)
+        {
+            IntPtr mmcss = Realtime.Enter("Pro Audio");
+            var buf = new byte[65536];
+            try
+            {
+                while (!stop && udpSock == sock)
+                {
+                    EndPoint from = new IPEndPoint(sock.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+                    int n;
+                    try { n = sock.ReceiveFrom(buf, ref from); }
+                    catch (SocketException) { if (udpSock != sock) return; Thread.Sleep(5); continue; }
+                    catch (ObjectDisposedException) { return; }
+                    var ep = from as IPEndPoint;
+                    var host = udpHost;
+                    if (ep == null || host == null) continue;
+                    var a = ep.Address.IsIPv4MappedToIPv6 ? ep.Address.MapToIPv4() : ep.Address;
+                    if (!a.Equals(host.Address)) continue;   // only the host we joined
+                    UdpBlock cur, prev;
+                    bool hasPrev;
+                    if (!UdpAudio.TryParse(buf, n, out cur, out hasPrev, out prev)) continue;
+                    Interlocked.Increment(ref udpPackets);
+                    udpHealth.OnUdp(cur.Seq, (long)NowMs);
+                    lock (audioLk)
+                    {
+                        // the redundant copy first: if the previous datagram was lost, this fills it in for free
+                        if (hasPrev && haveSeq && unchecked((int)(prev.Seq - lastSeq)) >= 1 && unchecked((int)(prev.Seq - lastSeq)) < 1000)
+                        {
+                            Interlocked.Increment(ref udpRecovered);
+                            OnPacket(buf, prev.PcmOffset, prev.Frames, prev.Rate, prev.Seq);
+                        }
+                        OnPacket(buf, cur.PcmOffset, cur.Frames, cur.Rate, cur.Seq);
+                    }
+                }
+            }
+            finally { Realtime.Leave(mmcss); }
         }
 
         // ------------------------------------------------------------------ shutdown

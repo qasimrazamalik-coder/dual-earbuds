@@ -37,8 +37,9 @@ namespace DualEarbuds
                 "$fw = New-Object -ComObject HNetCfg.FwPolicy2; " +
                 "while (@($fw.Rules | Where-Object { $_.Name -eq " + PsScript.Quote(RuleName) + " }).Count -gt 0) { $fw.Rules.Remove(" + PsScript.Quote(RuleName) + ") }; " +
                 (add
-                    ? "$r = New-Object -ComObject HNetCfg.FWRule; $r.Name = " + PsScript.Quote(RuleName) + "; $r.ApplicationName = " + PsScript.Quote(exe) + "; " +
-                      "$r.Protocol = 6; $r.Direction = 1; $r.Action = 1; $r.Profiles = " + profiles.ToString(System.Globalization.CultureInfo.InvariantCulture) + "; $r.Enabled = $true; $fw.Rules.Add($r); "
+                    // TCP for the link page / WebSocket, UDP for v3.2 audio (listeners' keepalives come in on UDP)
+                    ? "foreach ($p in 6, 17) { $r = New-Object -ComObject HNetCfg.FWRule; $r.Name = " + PsScript.Quote(RuleName) + "; $r.ApplicationName = " + PsScript.Quote(exe) + "; " +
+                      "$r.Protocol = $p; $r.Direction = 1; $r.Action = 1; $r.Profiles = " + profiles.ToString(System.Globalization.CultureInfo.InvariantCulture) + "; $r.Enabled = $true; $fw.Rules.Add($r) }; "
                     : "") +
                 "exit 0";
         }
@@ -67,6 +68,75 @@ namespace DualEarbuds
             {
                 Log.Warn("Firewall rule: " + ex.Message);
                 return FirewallResult.Failed;
+            }
+        }
+    }
+
+    // What the firewall rule allows right now (read without admin rights), for Setup check.
+    public class FirewallStatus
+    {
+        public bool Known;           // the query worked
+        public bool Tcp, Udp;        // an enabled inbound allow rule for this app per protocol
+        public int Profiles;         // union of the profiles those rules cover
+        public bool OtherApp;        // a rule with our name points at another exe (an old install)
+        public bool Complete { get { return Tcp && Udp; } }
+    }
+
+    public static class FirewallCheck
+    {
+        public static string QueryScript
+        {
+            get
+            {
+                return "$fw = New-Object -ComObject HNetCfg.FwPolicy2; $fw.Rules | Where-Object { $_.Name -eq " + PsScript.Quote(Firewall.RuleName) + " } | " +
+                       "ForEach-Object { [string]$_.Protocol + '|' + [string]$_.Profiles + '|' + [string]$_.Enabled + '|' + [string]$_.Direction + '|' + [string]$_.Action + '|' + $_.ApplicationName }";
+            }
+        }
+
+        // Lines "protocol|profiles|enabled|direction|action|exe" -> status for exePath.
+        public static FirewallStatus Parse(string output, string exePath)
+        {
+            var st = new FirewallStatus { Known = output != null };
+            if (string.IsNullOrEmpty(output)) return st;
+            foreach (var raw in output.Split('\n'))
+            {
+                var p = raw.Trim().Split('|');
+                if (p.Length < 6) continue;
+                int proto, prof, dir, act;
+                if (!int.TryParse(p[0], out proto) || !int.TryParse(p[1], out prof) || !int.TryParse(p[3], out dir) || !int.TryParse(p[4], out act)) continue;
+                bool enabled = p[2].Trim().Equals("True", StringComparison.OrdinalIgnoreCase);
+                string app = string.Join("|", p, 5, p.Length - 5).Trim();
+                if (exePath != null && app.Length > 0 && !app.Equals(exePath, StringComparison.OrdinalIgnoreCase)) { st.OtherApp = true; continue; }
+                if (!enabled || dir != 1 || act != 1) continue;
+                if (proto == 6) st.Tcp = true;
+                else if (proto == 17) st.Udp = true;
+                else if (proto == 256) { st.Tcp = true; st.Udp = true; }
+                else continue;
+                st.Profiles |= prof;
+            }
+            return st;
+        }
+
+        // Blocks for a few seconds: background threads only.
+        public static FirewallStatus Query(string exePath)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("powershell.exe", "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + PsScript.Encode(QueryScript))
+                {
+                    UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true, WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    if (!p.WaitForExit(15000)) { try { p.Kill(); } catch { } return new FirewallStatus(); }
+                    return Parse(output ?? "", exePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Firewall check: " + ex.Message);
+                return new FirewallStatus();
             }
         }
     }

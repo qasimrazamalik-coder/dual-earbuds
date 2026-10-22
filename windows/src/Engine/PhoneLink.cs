@@ -46,7 +46,9 @@ namespace DualEarbuds
         public const int MaxClientMessage = 4096;
         public const int IdleTimeoutMs = 30000;
         public const int PacketMs = 10;          // every audio packet carries exactly 10 ms
-        public const int AudioQueueLimit = 60;   // ~600 ms of 10 ms packets
+        // Per-listener audio queue: beyond 300 ms the oldest packets are dropped (and counted), so a stalled
+        // listener never holds up capture or the others, and catches up instead of falling further behind.
+        public const int AudioQueueLimit = 30;
         public const int MaxListenerVolume = 150;
         // Kernel send buffer per listener. Kept small so a stalled phone's backlog stays in our queue
         // (where old packets are dropped) instead of piling up as extra delay inside Windows.
@@ -60,7 +62,21 @@ namespace DualEarbuds
 
         TcpListener listener;
         volatile bool stopFlag;
-        Thread acceptThread, pingThread;
+        Thread acceptThread, pingThread, udpThread;
+
+        // v3.2 UDP audio: one socket on the same port number; listeners prove their session with a token.
+        Socket udp;
+        readonly object udpSendLk = new object();
+        readonly Dictionary<string, PhoneConn> byToken = new Dictionary<string, PhoneConn>();
+        readonly Dictionary<string, RateLimiter> keepaliveLimit = new Dictionary<string, RateLimiter>();
+        public const int KeepalivesPerSecond = 5;
+        public const int UdpSendBuffer = 256 * 1024;   // shared by all listeners (~16 KB each at 16)
+        public bool UdpAvailable { get { return udp != null; } }
+        long udpDatagrams, udpDropped;
+        public long UdpDatagramsSent { get { return Interlocked.Read(ref udpDatagrams); } }
+        public long KeepalivesDropped { get { return Interlocked.Read(ref udpDropped); } }
+        public bool DisableUdpForTest;
+        public Func<bool> UdpDropForTest;   // tests: simulated Wi-Fi loss (true = this datagram is lost)
         // At most this many connections may be in the HTTP/handshake stage at once (slow-header protection).
         public const int MaxPendingHandshakes = 16;
         public const int HeaderDeadlineMs = 5000;
@@ -182,6 +198,7 @@ namespace DualEarbuds
                 Log.Warn("Phone link start: " + ex.Message);
                 return false;
             }
+            if (!DisableUdpForTest) StartUdp();
             acceptThread = new Thread(AcceptLoop) { IsBackground = true, Name = "PhoneAccept" };
             acceptThread.Start();
             pingThread = new Thread(PingLoop) { IsBackground = true, Name = "PhonePing" };
@@ -194,8 +211,103 @@ namespace DualEarbuds
         {
             stopFlag = true;
             try { listener.Stop(); } catch { }
+            var u = udp;
+            udp = null;
+            if (u != null) { try { u.Close(); } catch { } }
             DisconnectAll();
         }
+
+        void StartUdp()
+        {
+            try
+            {
+                var u = new Socket(bindAddress.AddressFamily, SocketType.Dgram, ProtocolType.Udp);
+                u.Bind(new IPEndPoint(bindAddress, Port));
+                u.SendBufferSize = UdpSendBuffer;
+                try
+                {
+                    // Windows: an ICMP "port unreachable" from a listener that went away must not break receiving
+                    const int SIO_UDP_CONNRESET = -1744830452;
+                    u.IOControl(SIO_UDP_CONNRESET, new byte[] { 0, 0, 0, 0 }, null);
+                }
+                catch { }
+                udp = u;
+                udpThread = new Thread(UdpLoop) { IsBackground = true, Name = "PhoneUdp" };
+                udpThread.Start();
+            }
+            catch (Exception ex)
+            {
+                udp = null;
+                Log.Warn("UDP audio unavailable on port " + Port + ": " + ex.Message + " (listeners use the WebSocket)");
+            }
+        }
+
+        // Keepalives from listeners: "DE3U" + 1 + token. Unknown tokens are dropped without a reply.
+        void UdpLoop()
+        {
+            var buf = new byte[512];
+            while (!stopFlag)
+            {
+                var u = udp;
+                if (u == null) return;
+                EndPoint from = new IPEndPoint(bindAddress.AddressFamily == AddressFamily.InterNetworkV6 ? IPAddress.IPv6Any : IPAddress.Any, 0);
+                int n;
+                try { n = u.ReceiveFrom(buf, ref from); }
+                catch (SocketException) { if (stopFlag) return; Thread.Sleep(5); continue; }
+                catch (ObjectDisposedException) { return; }
+                var ep = from as IPEndPoint;
+                if (ep == null) continue;
+                if (!AllowKeepalive(ep.Address.ToString())) { Interlocked.Increment(ref udpDropped); continue; }
+                string token = UdpAudio.ParseKeepalive(buf, n);
+                if (token == null) continue;
+                PhoneConn c;
+                lock (lk) { if (!byToken.TryGetValue(token, out c) || c.Closed) c = null; }
+                if (c == null) continue;
+                // the datagram must come from the same device as the WebSocket session it claims to be
+                if (!SameHost(ep.Address, c.RemoteAddress)) continue;
+                c.OnKeepalive(ep, NowMs);
+            }
+        }
+
+        static bool SameHost(IPAddress a, IPAddress b)
+        {
+            if (a == null || b == null) return false;
+            if (a.IsIPv4MappedToIPv6) a = a.MapToIPv4();
+            if (b.IsIPv4MappedToIPv6) b = b.MapToIPv4();
+            return a.Equals(b);
+        }
+
+        bool AllowKeepalive(string ip)
+        {
+            lock (keepaliveLimit)
+            {
+                RateLimiter r;
+                if (!keepaliveLimit.TryGetValue(ip, out r))
+                {
+                    if (keepaliveLimit.Count > 256) keepaliveLimit.Clear();   // bounded memory
+                    r = new RateLimiter(KeepalivesPerSecond);
+                    keepaliveLimit[ip] = r;
+                }
+                return r.Allow(NowMs);
+            }
+        }
+
+        internal void SendUdp(byte[] d, EndPoint to)
+        {
+            var u = udp;
+            if (u == null || d == null) return;
+            var drop = UdpDropForTest;
+            if (drop != null && drop()) return;
+            try
+            {
+                lock (udpSendLk) u.SendTo(d, to);
+                Interlocked.Increment(ref udpDatagrams);
+            }
+            catch (Exception) { }
+        }
+
+        internal void Register(PhoneConn c) { lock (lk) byToken[c.Token] = c; }
+        internal void Unregister(PhoneConn c) { lock (lk) { PhoneConn x; if (byToken.TryGetValue(c.Token, out x) && x == c) byToken.Remove(c.Token); } }
 
         public void DisconnectAll()
         {
@@ -311,12 +423,16 @@ namespace DualEarbuds
                 pin != null ? "true" : "false", remoteControl ? "true" : "false") + SourceFields(true) + "}";
         }
 
-        public string HelloJson()
+        public string HelloJson() { return HelloJson(null); }
+
+        // token != null: this session may use UDP audio (protocol v3.2).
+        public string HelloJson(string token)
         {
             return string.Format(CultureInfo.InvariantCulture,
                 "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7}",
                 AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, AppInfo.Host, mirroring ? rate : 0, party ? "true" : "false",
-                playoutMs, remoteControl ? "true" : "false") + SourceFields(false) + "}";
+                playoutMs, remoteControl ? "true" : "false") + SourceFields(false) +
+                (token != null && udp != null ? ",\"udp\":" + Port.ToString(CultureInfo.InvariantCulture) + ",\"token\":\"" + token + "\"" : "") + "}";
         }
 
         public static string PlayoutMessage(int ms) { return "{\"type\":\"playout\",\"ms\":" + ms.ToString(CultureInfo.InvariantCulture) + "}"; }
@@ -461,11 +577,31 @@ namespace DualEarbuds
         // The newest packet's sequence number and when it was captured (for the clock message).
         void NoteClock(uint s, long h) { clockSeq = s; Interlocked.Exchange(ref clockH, h); }
 
+        byte[] prevFrame;   // the previous packet's WebSocket frame: its body rides along in the next datagram
+
+        // Never blocks: every listener has its own queue and send thread; this only builds the bytes once.
         void Send(PhoneConn[] arr, byte[] msg)
         {
-            foreach (var c in arr) c.EnqueueAudio(msg);
+            byte[] dgram = null;
+            if (udp != null)
+            {
+                bool any = false;
+                foreach (var c in arr) if (c.WantsUdp) { any = true; break; }
+                if (any)
+                {
+                    int h = FrameHeaderLength(msg);
+                    int ph = prevFrame == null ? 0 : FrameHeaderLength(prevFrame);
+                    dgram = UdpAudio.BuildDatagram(msg, h, msg.Length - h, prevFrame, ph, prevFrame == null ? 0 : prevFrame.Length - ph);
+                }
+            }
+            prevFrame = msg;
+            var pkt = new AudioPacket { Ws = msg, Udp = dgram };
+            foreach (var c in arr) c.EnqueueAudio(pkt);
             Interlocked.Add(ref bytesSent, (long)msg.Length * arr.Length);
         }
+
+        // Length of a server (unmasked) frame header we built.
+        static int FrameHeaderLength(byte[] f) { int l = f[1] & 0x7F; return l < 126 ? 2 : l == 126 ? 4 : 10; }
 
         // WebSocket binary frame: [rate int32][seq uint32][s16le stereo].
         public static byte[] BuildAudioFrame(float[] data, int frames, int sampleRate, uint sequence)
@@ -642,7 +778,8 @@ namespace DualEarbuds
                     byte[] resp = Encoding.ASCII.GetBytes("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + AcceptKey(wsKey) + "\r\n\r\n");
                     try { ns.Write(resp, 0, resp.Length); }
                     catch { lock (lk) conns.Remove(conn); c.Close(); return; }
-                    conn.EnqueueControl(BuildTextFrame(HelloJson()));
+                    Register(conn);
+                    conn.EnqueueControl(BuildTextFrame(HelloJson(conn.Token)));
                     string eq = suggestedEq;
                     if (eq != null) conn.EnqueueControl(BuildTextFrame(EqMessage(eq)));
                     if (talking) conn.EnqueueControl(BuildTextFrame(TalkMessage(true)));
@@ -774,6 +911,11 @@ namespace DualEarbuds
                 var h = RemoteAction;
                 if (h != null) { try { h(c.Id, action); } catch (Exception ex) { Log.Warn("Remote control: " + ex.Message); } }
             }
+            else if (type == "udp")
+            {
+                // the listener tells us whether UDP audio reaches it; false = keep sending on the WebSocket
+                c.SetUdpRefused(!MiniJson.GetBool(d, "ok", false));
+            }
             else if (type == "status")
             {
                 string earb = MiniJson.GetString(d, "earbuds", null);
@@ -825,13 +967,25 @@ namespace DualEarbuds
         }
     }
 
+    // One 10 ms packet, as WebSocket frame and (when any listener uses UDP) as datagram.
+    class AudioPacket
+    {
+        public byte[] Ws;
+        public byte[] Udp;
+    }
+
     // One connected phone.
     class PhoneConn
     {
         readonly PhoneLink owner;
         readonly TcpClient tcp;
         readonly NetworkStream ns;
-        readonly LinkedList<byte[]> audio = new LinkedList<byte[]>();
+        readonly LinkedList<AudioPacket> audio = new LinkedList<AudioPacket>();
+        public readonly string Token = UdpAudio.NewToken();
+        public readonly IPAddress RemoteAddress;
+        volatile IPEndPoint udpEp;
+        long lastKeepalive = long.MinValue / 2;
+        volatile bool udpRefused;
         readonly Queue<byte[]> control = new Queue<byte[]>();
         readonly object lk = new object();
         readonly AutoResetEvent signal = new AutoResetEvent(false);
@@ -849,7 +1003,7 @@ namespace DualEarbuds
             info.Id = owner.NewId();   // stable for the life of this connection
             info.Name = name;
             info.Client = client;
-            try { info.Remote = ((IPEndPoint)t.Client.RemoteEndPoint).Address.ToString(); } catch { }
+            try { RemoteAddress = ((IPEndPoint)t.Client.RemoteEndPoint).Address; info.Remote = RemoteAddress.ToString(); } catch { }
             info.ConnectedAt = DateTime.Now;
             lastSeen = owner.NowMs;
         }
@@ -877,12 +1031,31 @@ namespace DualEarbuds
                     Battery = info.Battery, Volume = info.Volume, BufferMs = info.BufferMs, Underruns = info.Underruns, Playing = info.Playing,
                     RttMs = info.RttMs, ConnectedAt = info.ConnectedAt, PacketsSent = info.PacketsSent, PacketsDropped = info.PacketsDropped,
                     Synced = info.Synced, RemoteCount = info.RemoteCount, NeedMs = info.NeedMs, OffsetMs = info.OffsetMs,
-                    Transport = info.Transport
+                    Transport = WantsUdp ? "udp" : "ws"
                 };
             }
         }
 
         public void SetRtt(int ms) { lock (lk) info.RttMs = ms; }
+
+        // ---- UDP audio (protocol v3.2)
+        public void OnKeepalive(IPEndPoint from, long now)
+        {
+            bool first = udpEp == null;
+            udpEp = from;
+            Interlocked.Exchange(ref lastKeepalive, now);
+            if (first) Log.Info("UDP audio for " + info.Remote + " (" + info.Name + ")");
+        }
+
+        public void SetUdpRefused(bool refused)
+        {
+            if (udpRefused == refused) return;
+            udpRefused = refused;
+            Log.Info(refused ? "UDP audio doesn't reach " + info.Remote + " - using the WebSocket" : "UDP audio again for " + info.Remote);
+        }
+
+        // a keepalive arrived recently and the listener didn't say UDP fails
+        public bool WantsUdp { get { return udpEp != null && !udpRefused && owner.NowMs - Interlocked.Read(ref lastKeepalive) <= UdpAudio.HostTimeoutMs; } }
 
         public void MarkSynced() { lock (lk) info.Synced = true; }
 
@@ -918,7 +1091,7 @@ namespace DualEarbuds
             }
         }
 
-        public void EnqueueAudio(byte[] frame)
+        public void EnqueueAudio(AudioPacket frame)
         {
             if (Closed || closeAfterControl) return;
             lock (lk)
@@ -965,11 +1138,22 @@ namespace DualEarbuds
                     {
                         byte[] f = null;
                         bool last = false;
+                        byte[] udpOut = null;
+                        IPEndPoint udpTo = null;
                         lock (lk)
                         {
                             if (control.Count > 0) { f = control.Dequeue(); last = closeAfterControl && control.Count == 0; }
-                            else if (audio.Count > 0 && !closeAfterControl) { f = audio.First.Value; audio.RemoveFirst(); }
+                            else if (audio.Count > 0 && !closeAfterControl)
+                            {
+                                var pk = audio.First.Value;
+                                audio.RemoveFirst();
+                                var ep = udpEp;
+                                // while UDP works, no audio on the WebSocket
+                                if (pk.Udp != null && ep != null && WantsUdp) { udpOut = pk.Udp; udpTo = ep; }
+                                else f = pk.Ws;
+                            }
                         }
+                        if (udpOut != null) { owner.SendUdp(udpOut, udpTo); udpOut = null; udpTo = null; continue; }
                         if (f == null) break;
                         ns.Write(f, 0, f.Length);
                         if (last) { ns.Flush(); Thread.Sleep(100); Close(); return; }
@@ -1042,6 +1226,7 @@ namespace DualEarbuds
         public void Close()
         {
             if (Interlocked.Exchange(ref closed, 1) != 0) return;
+            owner.Unregister(this);
             try { tcp.Close(); } catch { }
             try { signal.Set(); } catch { }
             Log.Info("Phone disconnected: " + info.Remote);

@@ -76,6 +76,12 @@ static class EngineTests
         Run("v3.2 old calibrations migrate", () => TestLatencyMigration(tmp));
         Run("Output: small delay decreases play faster, no cut", TestSlew);
         Run("v3.2 host announces playout from listener needs", TestPlayoutLoopback);
+        Run("v3.2 UDP datagrams + keepalives", TestUdpFormat);
+        Run("v3.2 UDP health (listener fallback logic)", TestUdpHealth);
+        Run("v3.2 UDP loopback: audio over UDP, none on the WebSocket", TestUdpLoopback);
+        Run("v3.2 UDP loopback: 10 % loss, redundancy hides single losses", TestUdpLoss);
+        Run("v3.2 UDP loopback: no UDP -> falls back to the WebSocket", TestUdpFallback);
+        Run("v3.2 UDP security: unknown tokens, keepalive rate limit", TestUdpSecurity);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -906,6 +912,18 @@ static class EngineTests
         Check(Firewall.ProfilesFor(Settings.NetScopePrivate) == 2, "private scope = 2");
         Check(!Firewall.BuildScript("x", false, 6).Contains("FWRule"), "remove-only script adds nothing");
         Check(Encoding.Unicode.GetString(Convert.FromBase64String(PsScript.Encode(add))) == add, "encoded command round trip");
+        Check(add.Contains("foreach ($p in 6, 17)") && add.Contains("$r.Protocol = $p;"), "v3.2: TCP and UDP rules");
+        string exe = @"C:\Programs\Dual Earbuds\DualEarbuds.exe";
+        var fs = FirewallCheck.Parse("6|6|True|1|1|" + exe + "\r\n17|6|True|1|1|" + exe + "\r\n", exe);
+        Check(fs.Known && fs.Tcp && fs.Udp && fs.Complete && fs.Profiles == 6, "rule check: TCP + UDP on private + public");
+        var old = FirewallCheck.Parse("6|2|True|1|1|" + exe.ToUpperInvariant() + "\n", exe);
+        Check(old.Tcp && !old.Udp && !old.Complete && old.Profiles == 2, "pre-3.2 rule: TCP only -> incomplete");
+        var off = FirewallCheck.Parse("6|6|False|1|1|" + exe + "\n17|6|True|2|1|" + exe + "\n", exe);
+        Check(!off.Tcp && !off.Udp, "disabled or outbound rules don't count");
+        var other = FirewallCheck.Parse("6|6|True|1|1|D:\\old\\DualEarbuds.exe\n", exe);
+        Check(other.OtherApp && !other.Tcp, "a rule for another copy of the app is flagged");
+        Check(!FirewallCheck.Parse("", exe).Tcp && FirewallCheck.Parse(null, exe).Known == false, "no rule / unknown");
+        Check(FirewallCheck.Parse("garbage\n1|2\n", exe).Known, "garbage lines ignored");
     }
 
     // ------------------------------------------------------------------ smart features / DSP
@@ -1725,5 +1743,247 @@ static class EngineTests
             w.Dispose();
         }
         finally { host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ v3.2 UDP
+    static byte[] WsBody(int rate, uint seq, short fill)
+    {
+        int frames = PhoneLink.PacketFrames(rate);
+        var f = new float[frames * 2];
+        for (int i = 0; i < f.Length; i++) f[i] = fill / 32767f;
+        return PhoneLink.BuildAudioFrame(f, frames, rate, seq);
+    }
+
+    static void TestUdpFormat()
+    {
+        string tok = UdpAudio.NewToken();
+        Check(tok.Length == 32 && UdpAudio.FromHex(tok) != null, "token: 32 hex characters");
+        Check(UdpAudio.FromHex("zz" + tok.Substring(2)) == null && UdpAudio.FromHex("abc") == null, "bad tokens rejected");
+        var ka = UdpAudio.BuildKeepalive(UdpAudio.FromHex(tok));
+        Check(ka.Length == 21 && Encoding.ASCII.GetString(ka, 0, 4) == "DE3U" && ka[4] == 1, "keepalive layout");
+        Check(UdpAudio.ParseKeepalive(ka, ka.Length) == tok, "keepalive parses back to the token");
+        Check(UdpAudio.ParseKeepalive(ka, 20) == null, "wrong length ignored");
+
+        var a = WsBody(48000, 7, 1000);
+        var b = WsBody(48000, 8, 2000);
+        int ha = 4, hb = 4;   // 1928-byte payloads use the 4-byte header
+        var d = UdpAudio.BuildDatagram(b, hb, b.Length - hb, a, ha, a.Length - ha);
+        Check(d.Length == 4 + 2 * (8 + 480 * 4), "datagram = magic + this packet + the previous one (" + d.Length + " bytes)");
+        Check(Encoding.ASCII.GetString(d, 0, 4) == "DE3A" && BitConverter.ToUInt32(d, 4) == 8 && BitConverter.ToInt32(d, 8) == 48000, "magic, seq, rate");
+        UdpBlock cur, prev; bool hasPrev;
+        Check(UdpAudio.TryParse(d, d.Length, out cur, out hasPrev, out prev) && cur.Seq == 8 && cur.Frames == 480 && hasPrev && prev.Seq == 7, "parses both blocks");
+        Check(BitConverter.ToInt16(d, cur.PcmOffset) == 2000 && BitConverter.ToInt16(d, prev.PcmOffset) == 1000, "PCM of both");
+        var single = UdpAudio.BuildDatagram(b, hb, b.Length - hb, null, 0, 0);
+        Check(UdpAudio.TryParse(single, single.Length, out cur, out hasPrev, out prev) && !hasPrev && cur.Seq == 8, "first packet: no previous");
+        // a host that repeats the magic before the second block is understood too
+        var withMagic = new byte[d.Length + 4];
+        Buffer.BlockCopy(d, 0, withMagic, 0, 4 + 8 + 1920);
+        Buffer.BlockCopy(Encoding.ASCII.GetBytes("DE3A"), 0, withMagic, 4 + 8 + 1920, 4);
+        Buffer.BlockCopy(d, 4 + 8 + 1920, withMagic, 4 + 8 + 1920 + 4, 8 + 1920);
+        Check(UdpAudio.TryParse(withMagic, withMagic.Length, out cur, out hasPrev, out prev) && hasPrev && prev.Seq == 7, "second block with its own magic");
+        Check(!UdpAudio.TryParse(d, 100, out cur, out hasPrev, out prev), "truncated datagram rejected");
+        Check(!UdpAudio.TryParse(ka, ka.Length, out cur, out hasPrev, out prev), "keepalive is not audio");
+    }
+
+    static void TestUdpHealth()
+    {
+        var h = new UdpHealth();
+        h.OnHello(0, true);
+        Check(h.Tick(1000) == UdpAction.None && h.Tick(5000) == UdpAction.None, "host plays nothing: no verdict");
+        for (long t = 100; t < 2600; t += 10) h.OnWsAudio(t);
+        Check(h.Tick(2600) == UdpAction.SendOkFalse && h.Refused, "WebSocket audio but no UDP for 2 s -> ok:false");
+        Check(h.Tick(2700) == UdpAction.None, "said once");
+
+        var g = new UdpHealth();
+        g.OnHello(0, true);
+        g.OnClock(1000, 900);
+        g.OnClock(1100, 1900);
+        g.OnClock(1200, 2900);
+        Check(g.Tick(2950) == UdpAction.SendOkFalse, "host produces (clock seq moves) but no UDP -> ok:false");
+
+        var u = new UdpHealth();
+        u.OnHello(0, true);
+        for (uint i = 0; i < 100; i++) u.OnUdp(i, 50 + i * 10);
+        Check(u.Active(1060) && u.Tick(1100) == UdpAction.None, "UDP flowing -> active");
+        u.OnClock(130, 1300);
+        Check(u.Tick(2200) == UdpAction.None, "short gap, host not far ahead -> keep UDP");
+        u.OnClock(400, 2300);
+        Check(u.Tick(2400) == UdpAction.SendOkFalse, "host 3 s ahead of what UDP delivered -> ok:false");
+
+        var w = new UdpHealth();
+        w.OnHello(0, true);
+        for (uint i = 0; i < 100; i++) w.OnUdp(i, i * 10);
+        Check(w.Tick(4000) == UdpAction.None, "Wi-Fi blip (clock messages stale too) -> no switch");
+        var o = new UdpHealth();
+        o.OnHello(0, false);
+        for (long t = 0; t < 5000; t += 10) o.OnWsAudio(t);
+        Check(o.Tick(5000) == UdpAction.None && !o.Active(5000), "host without UDP: nothing to do");
+    }
+
+    static LinkClient JoinLoopback(int port)
+    {
+        LinkTarget t; string why;
+        LinkAddress.TryParse("127.0.0.1:" + port + "/?k=abcd2345", out t, out why);
+        return new LinkClient(t, null, "UDP listener");
+    }
+
+    // Broadcasts 10 ms packets until stopped (like the capture thread).
+    static Thread Pump(PhoneLink host, Func<bool> stop)
+    {
+        var th = new Thread(() =>
+        {
+            var buf = new float[480 * 2];
+            int v = 0;
+            var sw = Stopwatch.StartNew();
+            long n = 0;
+            while (!stop())
+            {
+                for (int i = 0; i < 480; i++) { float x = ((v++ % 960) - 480) / 960f; buf[2 * i] = x; buf[2 * i + 1] = x; }
+                host.Broadcast(buf, 480, 48000);
+                n++;
+                long wait = n * 10 - sw.ElapsedMilliseconds;
+                if (wait > 0) Thread.Sleep((int)wait);
+            }
+        }) { IsBackground = true };
+        th.Start();
+        return th;
+    }
+
+    static void TestUdpLoopback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            Check(host.UdpAvailable, "host binds UDP on the same port");
+            Check(host.HelloJson("00112233445566778899aabbccddeeff").Contains("\"udp\":" + port + ",\"token\":\"00112233445566778899aabbccddeeff\""), "hello offers udp + token");
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Check(WaitFor(() => c.State == ListenState.Playing, 5000), "joins");
+            Pump(host, () => done);
+            Check(WaitFor(() => c.Transport == "udp" && host.Snapshot().Count == 1 && host.Snapshot()[0].Transport == "udp", 4000), "audio switches to UDP on both sides");
+            long ws0 = c.WsPackets, udp0 = c.UdpPackets;
+            Thread.Sleep(1000);
+            Check(c.UdpPackets - udp0 >= 60, "UDP datagrams arrive (" + (c.UdpPackets - udp0) + " in 1 s)");
+            Check(c.WsPackets - ws0 <= 2, "no audio on the WebSocket while UDP works (" + (c.WsPackets - ws0) + ")");
+            Check(c.Lost == 0 || c.Lost < 3, "nothing lost on loopback (" + c.Lost + ")");
+            Check(host.UdpDatagramsSent > 50, "host counted its datagrams");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+
+        // an older host (or a phone without UDP): no udp field -> WebSocket audio as before
+        int p2 = FreePort();
+        var old = new PhoneLink(p2, "ABCD2345", IPAddress.Loopback) { DisableUdpForTest = true };
+        old.Start();
+        bool d2 = false;
+        LinkClient c2 = null;
+        try
+        {
+            Check(!old.HelloJson("00112233445566778899aabbccddeeff").Contains("udp"), "no udp field without UDP");
+            old.SetMirroring(true, 48000);
+            c2 = JoinLoopback(p2);
+            c2.Start();
+            Pump(old, () => d2);
+            Check(WaitFor(() => c2.WsPackets > 50, 4000) && c2.Transport == "ws" && c2.UdpPackets == 0, "plays over the WebSocket");
+        }
+        finally { d2 = true; if (c2 != null) c2.Dispose(); old.Stop(); }
+    }
+
+    static void TestUdpLoss()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Pump(host, () => done);
+            Check(WaitFor(() => c.Transport == "udp", 5000), "on UDP");
+            // from now on every datagram has a 10 % chance to be lost; note the pattern
+            var rnd = new Random(11);
+            var pattern = new List<bool>();
+            host.UdpDropForTest = () => { bool gone = rnd.NextDouble() < 0.10; lock (pattern) pattern.Add(gone); return gone; };
+            long lost0 = c.Lost, rec0 = c.UdpRecovered;
+            Thread.Sleep(4000);
+            host.UdpDropForTest = null;
+            Thread.Sleep(300);
+            int drops = 0, doubles = 0;
+            lock (pattern)
+            {
+                for (int i = 0; i < pattern.Count; i++)
+                {
+                    if (!pattern[i]) continue;
+                    drops++;
+                    if (i + 1 < pattern.Count && pattern[i + 1]) doubles++;   // this and the next one: the copy is lost too
+                }
+            }
+            long lost = c.Lost - lost0, recovered = c.UdpRecovered - rec0;
+            Check(drops > 20, "about 10 % of " + pattern.Count + " datagrams dropped (" + drops + ")");
+            Check(recovered >= drops - doubles - 2, "single losses filled from the next datagram (" + recovered + " of " + (drops - doubles) + ")");
+            Check(lost <= doubles + 1, "only back-to-back losses reach concealment (" + lost + " lost, " + doubles + " double drops)");
+            Check(c.Transport == "udp", "stays on UDP through 10 % loss");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    static void TestUdpFallback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        LinkClient c = null;
+        try
+        {
+            host.UdpDropForTest = () => true;   // UDP never reaches the listener (a firewall, a strict hotspot)
+            host.SetMirroring(true, 48000);
+            c = JoinLoopback(port);
+            c.Start();
+            Pump(host, () => done);
+            var sw = Stopwatch.StartNew();
+            Check(WaitFor(() => c.State == ListenState.Playing, 4000), "joins");
+            Check(WaitFor(() => host.Snapshot().Count == 1 && host.Snapshot()[0].Transport == "ws" && c.WsPackets > 0 && sw.ElapsedMilliseconds > 2500, 8000), "host back on the WebSocket after ok:false");
+            long ws0 = c.WsPackets;
+            Thread.Sleep(1000);
+            Check(c.WsPackets - ws0 >= 60, "audio flows on the WebSocket (" + (c.WsPackets - ws0) + " in 1 s)");
+            Check(c.Transport == "ws", "listener reports WebSocket transport");
+        }
+        finally { done = true; if (c != null) c.Dispose(); host.Stop(); }
+    }
+
+    static void TestUdpSecurity()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        bool done = false;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            var w = WsClient.Open(port, "k=ABCD2345&client=android&name=X");
+            Pump(host, () => done);
+            using (var raw = new UdpClient(new IPEndPoint(IPAddress.Loopback, 0)))
+            {
+                raw.Client.ReceiveTimeout = 600;
+                var fake = UdpAudio.BuildKeepalive(UdpAudio.FromHex(UdpAudio.NewToken()));
+                raw.Send(fake, fake.Length, new IPEndPoint(IPAddress.Loopback, port));
+                bool got = false;
+                try { IPEndPoint any = null; raw.Receive(ref any); got = true; } catch (SocketException) { }
+                Check(!got, "keepalive with an unknown token: nothing is sent back");
+                for (int i = 0; i < 40; i++) raw.Send(fake, fake.Length, new IPEndPoint(IPAddress.Loopback, port));
+                Check(WaitFor(() => host.KeepalivesDropped >= 30, 2000), "keepalive flood rate-limited per IP (" + host.KeepalivesDropped + " dropped)");
+            }
+            Check(host.Snapshot()[0].Transport == "ws", "a session that never sent its token stays on the WebSocket");
+            w.Dispose();
+        }
+        finally { done = true; host.Stop(); }
     }
 }
