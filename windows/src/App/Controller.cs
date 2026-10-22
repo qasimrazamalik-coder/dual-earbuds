@@ -228,6 +228,11 @@ namespace DualEarbuds
         public void SlowTick()
         {
             if (Demo) return;
+            // while sound plays (sharing or listening) the laptop must not go to sleep
+            Power.KeepAwake(Running || Listening);
+            PowerNow = Power.Read();
+            WifiReader.Refresh();
+            if ((DateTime.Now - firewallCheckedAt).TotalMinutes >= 5) RefreshFirewallStatus();
             RefreshDevices(false);
             HealthCheck();
             UpdateBatteries();
@@ -1079,6 +1084,66 @@ namespace DualEarbuds
             if (c != null && !c.Remote(action)) { ListenProblem = "The other device doesn't allow its listeners to control playback."; Raise(ListenChanged); }
         }
 
+        // ------------------------------------------------------------------ setup check
+        public PowerState PowerNow;
+        public FirewallStatus FirewallNow;
+        public WifiInfo DemoWifi;
+        DateTime firewallCheckedAt = DateTime.MinValue;
+        bool firewallBusy;
+        public event Action ChecksChanged;
+
+        public void RefreshFirewallStatus()
+        {
+            firewallCheckedAt = DateTime.Now;
+            if (Demo || firewallBusy) return;
+            firewallBusy = true;
+            string exe = System.Reflection.Assembly.GetEntryAssembly().Location;
+            RunAsync(() => FirewallCheck.Query(exe), st => { firewallBusy = false; FirewallNow = st; Raise(ChecksChanged); });
+        }
+
+        public WifiInfo Wifi { get { return Demo ? DemoWifi : WifiReader.Last; } }
+
+        public CheckInput CheckSnapshot()
+        {
+            var x = new CheckInput
+            {
+                HostMode = !Listening,
+                NetworkCategory = NetworkCategory,
+                NetworkScope = Settings.NetworkScope,
+                Firewall = FirewallNow,
+                Power = PowerNow,
+                Wifi = Wifi,
+                PlayoutMs = PlayoutMs,
+            };
+            foreach (var o in Outputs)
+            {
+                if (o.IsSource) continue;
+                bool ticked = Listening ? o.ListenTicked : o.Enabled;
+                x.Outputs.Add(new CheckOutput { Id = o.Id, Name = o.Name, Bluetooth = o.IsBluetooth, Enabled = ticked, Calibrated = o.LatencyMeasured, LatencyMs = o.EffectiveLatencyMs });
+            }
+            foreach (var p in Phones) x.Listeners.Add(new CheckListener { Name = p.Name, Client = p.Client, NeedMs = p.NeedMs, Synced = p.Synced, Transport = p.Transport });
+            return x;
+        }
+
+        public List<CheckItem> Checks() { return SetupCheck.Build(CheckSnapshot()); }
+
+        // The fix buttons of Setup check that open Windows settings pages (the firewall one runs ApplyNetworkScope).
+        public static void OpenSettingsPage(string actionId)
+        {
+            string uri = null;
+            switch (actionId)
+            {
+                case "network": uri = "ms-settings:network-status"; break;
+                case "wifi": uri = "ms-settings:network-wifi"; break;
+                case "bluetooth": uri = "ms-settings:bluetooth"; break;
+                case "battery": uri = "ms-settings:batterysaver"; break;
+                case "power": uri = "ms-settings:powersleep"; break;
+            }
+            if (uri == null) return;
+            try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(uri) { UseShellExecute = true }); }
+            catch (Exception ex) { Log.Warn("Open " + uri + ": " + ex.Message); }
+        }
+
         // ------------------------------------------------------------------ diagnostics
         public string DiagnosticsText()
         {
@@ -1219,6 +1284,7 @@ namespace DualEarbuds
             int profiles = Firewall.ProfilesFor(scope);
             RunAsync(() => Firewall.Apply(exe, true, profiles), r =>
             {
+                RefreshFirewallStatus();
                 if (r == FirewallResult.Ok)
                 {
                     Settings.NetworkScope = scope;
@@ -1481,6 +1547,11 @@ namespace DualEarbuds
             c.Outputs[0].ListenTicked = true;
             c.WantRunning = running;
             c.Level = running ? 0.66f : 0f;
+            foreach (var o in c.Outputs) o.IsBluetooth = o.Id != "spk";
+            c.PowerNow = new PowerState { OnBattery = true, BatterySaver = false, BatteryPercent = 64, Mode = PowerMode.BetterPerformance };
+            c.FirewallNow = new FirewallStatus { Known = true, Tcp = true, Udp = true, Profiles = 6 };
+            c.DemoWifi = new WifiInfo { Connected = true, Ssid = "HomeNet", RadioType = "802.11ax", Channel = 44, Band = "5 GHz", SignalPercent = 84 };
+            c.Phones[0].NeedMs = 168; c.Phones[0].Synced = true; c.Phones[0].Transport = "udp"; c.Phones[0].OffsetMs = 2;
             c.UpdateStates();
             return c;
         }

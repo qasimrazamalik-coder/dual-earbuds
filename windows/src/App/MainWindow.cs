@@ -322,7 +322,8 @@ namespace DualEarbuds
             ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Open Settings > Updates to install it.");
 
             fast = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
-            fast.Tick += (s, e) => { ctl.FastTick(); View.Animate(); };
+            // the sound keeps running minimized or in the tray; only the meters stop drawing
+            fast.Tick += (s, e) => { ctl.FastTick(); if (IsVisible && WindowState != WindowState.Minimized) View.Animate(); };
             slow = new DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
             slow.Tick += (s, e) => SlowTick();
             fast.Start();

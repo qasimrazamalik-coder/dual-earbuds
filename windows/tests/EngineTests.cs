@@ -83,6 +83,9 @@ static class EngineTests
         Run("v3.2 UDP loopback: no UDP -> falls back to the WebSocket", TestUdpFallback);
         Run("v3.2 UDP security: unknown tokens, keepalive rate limit", TestUdpSecurity);
         Run("Host send path: a stalled listener never blocks capture", TestStalledListener);
+        Run("Wi-Fi band from netsh", TestWifiParse);
+        Run("Setup check rows", TestSetupCheck);
+        Run("Power mode names", TestPowerModes);
         Run("Bursty Wi-Fi: 200 ms gaps then bursts, buffer mode", () => TestBursty(false));
         Run("Bursty Wi-Fi: 200 ms gaps then bursts, synced to the deadline", () => TestBursty(true));
 
@@ -2086,5 +2089,109 @@ static class EngineTests
             stalled.Dispose();
         }
         finally { host.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ setup check
+    const string NetshEn = @"
+There is 1 interface on the system:
+
+    Name                   : Wi-Fi
+    Description            : Intel(R) Wi-Fi 6 AX201 160MHz
+    GUID                   : 5f0e3a2c-1111-2222-3333-444455556666
+    Physical address       : a4:6b:b6:01:02:03
+    Interface type         : Primary
+    State                  : connected
+    SSID                   : HomeNet-5G
+    AP BSSID               : 00:11:22:33:44:55
+    Band                   : 5 GHz
+    Channel                : 44
+    Network type           : Infrastructure
+    Radio type             : 802.11ax
+    Authentication         : WPA2-Personal
+    Cipher                 : CCMP
+    Connection mode        : Auto Connect
+    Receive rate (Mbps)    : 1201
+    Transmit rate (Mbps)   : 1201
+    Signal                 : 88%
+    Profile                : HomeNet-5G
+    QoS MSCS Configured         : 0
+
+    Hosted network status  : Not available
+";
+
+    static void TestWifiParse()
+    {
+        var w = WifiInfo.Parse(NetshEn);
+        Check(w.Connected && w.Ssid == "HomeNet-5G" && w.Channel == 44 && w.RadioType == "802.11ax", "English output (" + w.Ssid + ", ch " + w.Channel + ", " + w.RadioType + ")");
+        Check(w.Band == "5 GHz" && w.IsFast && w.SignalPercent == 88, "5 GHz, 88 %");
+        // Windows 10: no Band line; 2.4 GHz from the channel
+        var w10 = WifiInfo.Parse(NetshEn.Replace("    Band                   : 5 GHz\r\n", "").Replace("    Band                   : 5 GHz\n", "").Replace(": 44", ": 6").Replace("802.11ax", "802.11n"));
+        Check(w10.Band == "2.4 GHz" && w10.Is24 && w10.Channel == 6, "no Band line: channel 6 -> 2.4 GHz (" + w10.Band + ")");
+        // German labels: values recognised by their shape
+        string de = "    Name                   : WLAN\n    Zustand                : Verbunden\n    SSID                   : Zuhause\n    Funktyp                : 802.11ac\n    Kanal                  : 36\n    Signal                 : 71%\n";
+        var wd = WifiInfo.Parse(de);
+        Check(wd.Connected && wd.RadioType == "802.11ac" && wd.Channel == 36 && wd.Band == "5 GHz" && wd.SignalPercent == 71, "German output (" + wd.Band + ")");
+        var off = WifiInfo.Parse("    Name                   : Wi-Fi\n    State                  : disconnected\n    Radio status           : Hardware On\n");
+        Check(!off.Connected && off.Band == null, "disconnected");
+        Check(!WifiInfo.Parse("").Connected && !WifiInfo.Parse(null).Connected && !WifiInfo.Parse("The Wireless AutoConfig Service (wlansvc) is not running.").Connected, "no Wi-Fi service / garbage");
+        string two = "    Name : Wi-Fi 2\n    State : disconnected\n\n    Name : Wi-Fi\n    State : connected\n    SSID : B\n    Channel : 149\n";
+        var w2 = WifiInfo.Parse(two);
+        Check(w2.Connected && w2.Ssid == "B" && w2.Band == "5 GHz", "two adapters: the connected one");
+        Check(WifiInfo.BandFrom("6 GHz", 5, "802.11ax") == "6 GHz" && WifiInfo.BandFrom(null, 0, "802.11g") == "2.4 GHz" && WifiInfo.BandFrom("2,4 GHz", 0, null) == "2.4 GHz", "band names");
+    }
+
+    static void TestSetupCheck()
+    {
+        var x = new CheckInput
+        {
+            NetworkCategory = "Public",
+            Firewall = FirewallCheck.Parse("6|2|True|1|1|a.exe\n", "a.exe"),
+            Power = new PowerState { BatterySaver = true, OnBattery = true, Mode = PowerMode.BestEfficiency },
+            Wifi = WifiInfo.Parse(NetshEn.Replace("5 GHz", "2.4 GHz").Replace(": 44", ": 6")),
+            PlayoutMs = 240,
+        };
+        x.Outputs.Add(new CheckOutput { Id = "a", Name = "Headphones (Evo)", Bluetooth = true, Enabled = true, Calibrated = false, LatencyMs = 172 });
+        x.Outputs.Add(new CheckOutput { Id = "b", Name = "Headphones (TWS)", Bluetooth = true, Enabled = true, Calibrated = true, LatencyMs = 182 });
+        x.Outputs.Add(new CheckOutput { Id = "c", Name = "Speaker", Bluetooth = false, Enabled = false });
+        x.Listeners.Add(new CheckListener { Name = "Redmi", NeedMs = 230 });
+        x.Listeners.Add(new CheckListener { Name = "Pixel", NeedMs = 90 });
+        var rows = SetupCheck.Build(x);
+        Func<string, CheckItem> row = id => rows.Find(r => r.Id == id);
+        Check(row("network").Status == CheckStatus.Warn && row("network").ActionId == "network", "public network: warn + settings");
+        Check(row("firewall").Status == CheckStatus.Warn && row("firewall").Value == "TCP only" && row("firewall").ActionId == "firewall", "old TCP-only rule: update via the elevated flow");
+        Check(row("wifi").Status == CheckStatus.Warn && row("wifi").Value.StartsWith("2.4 GHz · ch 6"), "2.4 GHz flagged (" + row("wifi").Value + ")");
+        Check(row("bluetooth").Status == CheckStatus.Good && row("bluetooth").Value == "2 connected", "two Bluetooth pairs");
+        Check(row("cal:a").Status == CheckStatus.Warn && row("cal:a").ActionId == "calibrate:a" && row("cal:b").Status == CheckStatus.Good, "uncalibrated Bluetooth pair -> calibrate");
+        Check(row("cal:c") == null, "unticked outputs not listed");
+        Check(row("battery").Status == CheckStatus.Warn && row("power").Status == CheckStatus.Warn, "battery saver and efficiency mode flagged");
+        Check(row("listeners").Status == CheckStatus.Warn && row("listeners").Detail.StartsWith("Redmi 230 ms"), "slow listener named");
+        Check(SetupCheck.Attention(rows) == 7, "rows needing attention counted (" + SetupCheck.Attention(rows) + ")");
+
+        var ok = new CheckInput
+        {
+            NetworkCategory = "Private",
+            Firewall = FirewallCheck.Parse("6|6|True|1|1|a.exe\n17|6|True|1|1|a.exe\n", "a.exe"),
+            Power = new PowerState { Mode = PowerMode.BetterPerformance },
+            Wifi = WifiInfo.Parse(NetshEn),
+        };
+        ok.Outputs.Add(new CheckOutput { Id = "b", Name = "TWS", Bluetooth = true, Enabled = true, Calibrated = true, LatencyMs = 182 });
+        var good = SetupCheck.Build(ok);
+        Check(SetupCheck.Attention(good) == 0, "a good setup has nothing to fix");
+        Check(good.Find(r => r.Id == "firewall").Value == "TCP + UDP · private + public", "rule summary");
+        var unknown = SetupCheck.Build(new CheckInput());
+        Check(unknown.Find(r => r.Id == "firewall").Status == CheckStatus.Unknown && unknown.Find(r => r.Id == "wifi").Status == CheckStatus.Unknown, "nothing known yet: unknown, not alarming");
+        Check(SetupCheck.BestSoundGuide.Length == 5 && SetupCheck.BestSoundGuide[4].Contains("LDAC"), "best-sound guide");
+    }
+
+    static void TestPowerModes()
+    {
+        Check(Power.ModeFor(Power.OverlayBestEfficiency) == PowerMode.BestEfficiency, "best efficiency overlay");
+        Check(Power.ModeFor(Guid.Empty) == PowerMode.BetterPerformance, "empty overlay = Windows' default (balanced)");
+        Check(Power.ModeFor(Power.OverlayBestPerformance) == PowerMode.BestPerformance, "best performance overlay");
+        Check(Power.ModeFor(Guid.NewGuid()) == PowerMode.Unknown, "unknown overlay");
+        var st = Power.Read();
+        Check(st != null && !Power.Awake, "reading power state never throws (no Windows here)");
+        Power.KeepAwake(true);
+        Check(Realtime.Enter("Pro Audio") == IntPtr.Zero, "MMCSS is a no-op where it doesn't exist");
     }
 }
