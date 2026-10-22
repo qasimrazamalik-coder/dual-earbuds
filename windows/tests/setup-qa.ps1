@@ -18,6 +18,15 @@ if (Test-Path $sb) { Remove-Item $sb -Recurse -Force }
 Remove-Item 'HKCU:\Software\DualEarbudsSetupTest' -Recurse -Force -ErrorAction SilentlyContinue
 
 $fail = 0
+# Snapshot the REAL keys first: the sandboxed runs must leave them exactly as they were (a real install may exist).
+function RealState {
+    $run = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name DualEarbuds -ErrorAction SilentlyContinue
+    $un  = Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DualEarbudsPro' -ErrorAction SilentlyContinue
+    $r = ''; if ($run -ne $null) { $r = $run.DualEarbuds }
+    $u = ''; if ($un -ne $null) { $u = [string]$un.DisplayVersion + '|' + [string]$un.InstallLocation + '|' + [string]$un.UninstallString }
+    return $r + '#' + $u
+}
+$realBefore = RealState
 function Check($name, $cond) { if ($cond) { "PASS  $name" } else { "FAIL  $name"; $script:fail++ } }
 function Run($a) { (Start-Process $setup -ArgumentList $a -Wait -PassThru -WindowStyle Hidden).ExitCode }
 
@@ -42,8 +51,7 @@ Check 'modify path' ($u.ModifyPath -like '*--maintain*')
 Check 'quiet uninstall string' ($u.QuietUninstallString -like '*--silent*')
 Check 'estimated size' ($u.EstimatedSize -gt 0)
 Check 'run at startup' ((Get-ItemProperty $rk -ErrorAction SilentlyContinue).DualEarbuds -like '*--tray*')
-Check 'real Run key untouched' ((Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name DualEarbuds -ErrorAction SilentlyContinue) -eq $null)
-Check 'real Uninstall key untouched' (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DualEarbudsPro'))
+Check 'real Run and Uninstall keys untouched' ((RealState) -eq $realBefore)
 
 '--- repair after damage'
 Remove-Item $exe -Force

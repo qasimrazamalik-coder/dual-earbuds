@@ -11,7 +11,7 @@ namespace DualEarbuds
     public static class AppInfo
     {
         public const string Name = "Dual Earbuds";
-        public const string Version = "3.0.0";
+        public const string Version = "3.2.0";
         public const int Protocol = 3;
         public const string Host = "windows";
 
