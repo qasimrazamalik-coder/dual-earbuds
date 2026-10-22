@@ -41,6 +41,8 @@ internal interface SessionOwner {
     fun nowMs(): Long
     fun onText(session: ListenerSession, text: String)
     fun onClosed(session: ListenerSession)
+    /** Raises the calling (writer) thread to audio priority where the platform allows it. */
+    fun audioThreadSetup() {}
 }
 
 /**
@@ -132,6 +134,10 @@ internal class ListenerSession(
     }
 
     private fun writerLoop() {
+        try {
+            owner.audioThreadSetup()
+        } catch (_: Throwable) {
+        }
         try {
             while (!closed.get()) {
                 val item = outbox.take(1000) ?: continue

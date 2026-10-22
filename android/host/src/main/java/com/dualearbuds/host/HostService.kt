@@ -188,6 +188,13 @@ class HostService : Service() {
         remote = rem
         srv.onRemote = { action -> rem.perform(action) }
         srv.onChange = { onServerChanged(srv) }
+        // WebSocket writers and the UDP sender run at audio priority, like the capture thread.
+        srv.audioThreadSetup = {
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Throwable) {
+            }
+        }
         applyToServer(srv, prefs)
         val port = try {
             srv.start(prefs.port)

@@ -19,7 +19,10 @@ data class HostLimits(
     val maxHeaderBytes: Int = 8 * 1024,
     val maxMessageBytes: Int = 4 * 1024,
     val idleTimeoutMs: Int = 30_000,
-    val queueMs: Int = 600,
+    /** Per-listener WebSocket audio queue; beyond it the oldest packet is dropped (and counted). */
+    val queueMs: Int = 300,
+    /** TCP send buffer per listener: small, so a slow listener can't build seconds of backlog. */
+    val sendBufferBytes: Int = 64 * 1024,
     val pingIntervalMs: Long = 2_000,
     val clockIntervalMs: Long = 1_000,
     val writeStallMs: Long = 1_200,
@@ -153,7 +156,7 @@ class HostServer(
     private var clients: Array<ListenerSession> = emptyArray()
 
     // Audio frame pool: frames are shared by all listeners and reused round-robin. The pool covers
-    // well over queue (600 ms) + write-stall limit, so a frame is never rewritten while queued or sending.
+    // well over queue (300 ms) + write-stall limit, so a frame is never rewritten while queued or sending.
     private var pool: Array<ByteArray> = emptyArray()
     private var poolIndex = 0
     private var poolFrameLen = 0
@@ -172,6 +175,7 @@ class HostServer(
         override fun nowMs(): Long = clock()
         override fun onText(session: ListenerSession, text: String) = handleText(session, text)
         override fun onClosed(session: ListenerSession) = removeClient(session)
+        override fun audioThreadSetup() = this@HostServer.audioThreadSetup()
     }
 
     /** Host time used on the wire (`ping.t`, `sync.h`, `clock.h`): ms since this server was made. */
@@ -618,6 +622,10 @@ class HostServer(
             clients = clients + session
         }
         socket.soTimeout = limits.idleTimeoutMs
+        try {
+            socket.sendBufferSize = limits.sendBufferBytes
+        } catch (_: IOException) {
+        }
         session.lastHeard = clock()
         session.startWriter()
         onChange?.invoke()
@@ -719,7 +727,7 @@ class HostServer(
     }
 
     companion object {
-        /** 256 × 10 ms = 2.56 s of frames, > 600 ms queue + 1.2 s write stall + housekeeping tick. */
+        /** 256 × 10 ms = 2.56 s of frames, > 300 ms queue + 1.2 s write stall + housekeeping tick. */
         private const val POOL_SIZE = 256
         private const val HOUSEKEEPING_TICK_MS = 100L
         private const val STOP_DRAIN_MS = 300L
