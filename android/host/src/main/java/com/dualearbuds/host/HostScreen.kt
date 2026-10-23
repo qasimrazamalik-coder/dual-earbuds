@@ -466,7 +466,7 @@ private fun PipelineSection(state: HostUiState) {
         val db = st.peakDb
         val level = when {
             st.stalled || db == null -> "no data from capture"
-            db <= SILENCE_DB -> "silence"
+            db != null && db <= SILENCE_DB -> "silence"
             else -> "peak $db dB"
         }
         PanelRow(
