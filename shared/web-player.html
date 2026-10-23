@@ -105,9 +105,9 @@ function plcCrossfade(L,R,frames,rate){
 // Clock sync (protocol v3.1): offset = h - (c + now)/2 from the lowest-RTT of the last 8 sync replies;
 // packet seq is due at host time h(seq) + playoutMs. Small errors trim playbackRate by at most 0.5 %,
 // beyond 40 ms the playhead jumps. Without sync (old host) the Buffer slider rules as before.
-const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN};
+const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN,priority:'together'};
 // Protocol v3.2 needMs: how late packets arrive versus a steady 10 ms schedule (p99 over 30 s) + output
-// latency + 10. The host sets the common deadline (playout) from every listener's need and announces it.
+// latency + 10 (v3.3 lip-sync: p95 over 10 s + 5). The host sets the common deadline (playout) from every listener's need and announces it.
 const LATE={base:null,seq0:0,vals:[],max:3000};
 function noteLate(seq,now){
   if(LATE.base===null){LATE.base=now;LATE.seq0=seq;return;}
@@ -117,8 +117,11 @@ function noteLate(seq,now){
   if(late<0){LATE.base+=late;late=0;}
   LATE.vals.push(late);if(LATE.vals.length>LATE.max)LATE.vals.shift();
 }
-function lateP99(){if(!LATE.vals.length)return 0;const a=LATE.vals.slice().sort((x,y)=>x-y);return a[Math.min(a.length-1,Math.floor(a.length*0.99))];}
-function needMs(){const out=ctx?(ctx.outputLatency||ctx.baseLatency||0)*1000:0;return Math.ceil(Math.max(lateP99()+10,30)+out+15);}
+function lateQ(q,n){const v=n<LATE.vals.length?LATE.vals.slice(LATE.vals.length-n):LATE.vals.slice();if(!v.length)return 0;v.sort((x,y)=>x-y);return v[Math.min(v.length-1,Math.floor(v.length*q))];}
+function lateP99(){return lateQ(0.99,LATE.max);}
+// v3.3: a lip-sync host asks for less: p95 over the last 10 s + 5, floor 20 ms. Hosts that don't say: v3.2.
+function setPriority(p){SYNC.priority=p==='lipsync'?'lipsync':'together';}
+function needMs(){const out=ctx?(ctx.outputLatency||ctx.baseLatency||0)*1000:0;const net=SYNC.priority==='lipsync'?Math.max(lateQ(0.95,1000)+5,20):Math.max(lateP99()+10,30);return Math.ceil(net+out+15);}
 function syncSend(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'sync',c:performance.now()}));}
 function syncTick(){syncSend();SYNC.quick++;clearTimeout(SYNC.timer);if(running)SYNC.timer=setTimeout(syncTick,SYNC.quick<5?200:2000);}
 function onSync(m){
@@ -211,8 +214,8 @@ function onAudio(buf){
 }
 function onText(t){
   let m;try{m=JSON.parse(t);}catch(e){return;}
-  if(m.type==='hello'){pcName=m.pc||'';if(typeof m.playoutMs==='number')SYNC.playout=Math.max(30,Math.min(1000,m.playoutMs));$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
-  else if(m.type==='playout'&&typeof m.ms==='number'){SYNC.playout=Math.max(30,Math.min(1000,m.ms));}
+  if(m.type==='hello'){pcName=m.pc||'';setPriority(m.priority);if(typeof m.playoutMs==='number')SYNC.playout=Math.max(30,Math.min(1000,m.playoutMs));$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
+  else if(m.type==='playout'&&typeof m.ms==='number'){if(typeof m.priority==='string')setPriority(m.priority);SYNC.playout=Math.max(30,Math.min(1000,m.ms));}
   else if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',t:m.t}));}
   else if(m.type==='sync'&&typeof m.c==='number'&&typeof m.h==='number'){onSync(m);}
   else if(m.type==='clock'&&typeof m.seq==='number'&&typeof m.h==='number'){SYNC.seq0=m.seq>>>0;SYNC.h0=m.h;}
@@ -276,7 +279,7 @@ async function start(){
     statusTimer=setInterval(sendStatus,3000);
     uiTimer=setInterval(()=>{
       $('pk').textContent=packets+' packets';$('lost').textContent=lost+' lost';
-      if(ctx)$('lat').textContent=(SYNC.ok&&SYNC.seq0>=0?'P '+SYNC.playout+' ms · ':'')+'buffer '+Math.max(0,Math.round((playhead-ctx.currentTime)*1000))+' ms';
+      if(ctx)$('lat').textContent=(SYNC.ok&&SYNC.seq0>=0?(SYNC.priority==='lipsync'?'lip-sync · ':'')+'P '+SYNC.playout+' ms · ':'')+'buffer '+Math.max(0,Math.round((playhead-ctx.currentTime)*1000))+' ms';
       if(ws&&ws.readyState===1&&packets>0)$('st').textContent=(SYNC.ok&&SYNC.seq0>=0?'Playing in step with the host.':'Playing.')+' You can lock the phone now.';
     },1000);
   }catch(e){$('st').textContent='Could not start audio: '+e.message;}
