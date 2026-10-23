@@ -209,6 +209,28 @@ Browsers keep WebSocket audio.
 - Windows: `SetThreadExecutionState(ES_SYSTEM_REQUIRED | ES_CONTINUOUS)` while sharing/listening; opt the process out of
   power throttling (EcoQoS) so battery saver doesn't stretch timers.
 
+## v3.3 additions — lip-sync priority
+
+Hosts offer two sync priorities (host setting **Sync priority**, default **Lip-sync**):
+
+- **Lip-sync** — the picture on the host's screen wins. The host's *capture source* output (the device Windows/Android
+  plays through, whose latency the video player already compensates) is the reference ear. Its latency `L0` is the
+  calibrated value, else the platform-reported value, else 180 ms (Bluetooth) / 20 ms (wired/speaker).
+  - Windows: every other ticked local output is delayed by `max(0, L0 − its latency)` (+ manual Delay) so it lines up with
+    the source output; `P = clamp(max(L0, listeners' needMs), 30, 400)`.
+  - Android host: unchanged (its own ear is already the reference).
+  - Listeners use a tighter need: `needMs = jitterP95 (last 10 s) + outputLatency + 5`; adaptive-buffer floor 20 ms.
+    Rare concealment is accepted in exchange for less delay.
+- **Everyone together** — v3.2 behaviour: one deadline for every ear, `needMs` with p99 over 30 s.
+
+`hello` and `playout` messages carry `"priority":"lipsync"|"together"`; listeners that don't know it use v3.2 rules.
+
+### Low-latency earbuds hint
+
+When an output's calibrated latency is above 150 ms, apps show: "These earbuds add N ms. If they have a game or
+low-latency mode (often in the earbuds' own app or a triple tap), turn it on and calibrate again." On Android also:
+"Prefer AAC or SBC over LDAC (Developer options → Bluetooth audio codec)".
+
 ## Limits
 
 - Max 8 listeners (16 in Party mode); the next one gets HTTP 503.
