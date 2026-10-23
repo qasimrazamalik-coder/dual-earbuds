@@ -89,6 +89,11 @@ class HostService : Service() {
     @Volatile private var noiseCancel = NoiseCancel.DEFAULT
     @Volatile private var resetDenoiser = false
     @Volatile private var capturing = false
+    @Volatile private var testTone = false
+    private val capturedPackets = java.util.concurrent.atomic.AtomicInteger()
+    private val capturedPeak = java.util.concurrent.atomic.AtomicInteger(-1)
+    private var toneThread: Thread? = null
+    private var statsTicker: Runnable? = null
     @Volatile private var lastNotifKey = -1
     private var outputCallback: AudioDeviceCallback? = null
     private val outputPoll = object : Runnable {
@@ -208,6 +213,7 @@ class HostService : Service() {
         noiseCancel = prefs.noiseCancel
 
         startCapture(proj, prefs.app)?.let { return it }
+        startStatsTicker(srv)
 
         locks.acquire()
         watchLocalOutput()
@@ -289,6 +295,10 @@ class HostService : Service() {
         var silentShown = false
         val packetizer = Packetizer(PlaybackCapture.SAMPLE_RATE) { pkt, capturedAt ->
             val frames = pkt.size / 4
+            capturedPackets.incrementAndGet()
+            val pk = peakOf(pkt)
+            capturedPeak.accumulateAndGet(pk) { a, b -> maxOf(a, b) }
+            if (testTone) return@Packetizer // the tone thread feeds listeners instead
             val talk = talking
             if (talk || mixer.active) {
                 if (talk) {
@@ -334,6 +344,107 @@ class HostService : Service() {
         } catch (_: Throwable) {
             if (capturing) main.post { stopEverything("Sound capture stopped unexpectedly.") }
         }
+    }
+
+    /**
+     * Test tone: sends a 1 kHz tone every 10 ms on its own thread, so it reaches listeners even when
+     * capture delivers nothing (that is exactly what it is for: telling capture problems from network ones).
+     */
+    private fun startToneThread() {
+        if (toneThread?.isAlive == true) return
+        toneThread = Thread({
+            try {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+            } catch (_: Throwable) {
+            }
+            val pkt = ByteArray(PlaybackCapture.PACKET_BYTES)
+            val frames = pkt.size / 4
+            var phase = 0.0
+            var next = SystemClock.elapsedRealtime()
+            while (testTone && capturing) {
+                val srv = server ?: break
+                phase = writeTone(pkt, frames, phase)
+                srv.sendAudio(pkt, 0, pkt.size, srv.hostMs())
+                next += 10
+                val wait = next - SystemClock.elapsedRealtime()
+                if (wait > 0) SystemClock.sleep(wait) else if (wait < -200) next = SystemClock.elapsedRealtime()
+            }
+        }, "host-test-tone").apply {
+            isDaemon = true
+            start()
+        }
+    }
+
+    /** Reports pipeline counters once a second on the main thread while sharing. */
+    private fun startStatsTicker(srv: HostServer) {
+        stopStatsTicker()
+        var lastWs = srv.wsPacketsOut.get()
+        var lastUdp = srv.udpPacketsOut.get()
+        var lastNoRate = srv.packetsWithoutRate.get()
+        capturedPackets.set(0)
+        capturedPeak.set(-1)
+        val tick = object : Runnable {
+            override fun run() {
+                if (server !== srv) return
+                val ws = srv.wsPacketsOut.get()
+                val udpOut = srv.udpPacketsOut.get()
+                val noRate = srv.packetsWithoutRate.get()
+                val peak = capturedPeak.getAndSet(-1)
+                HostController.reportStats(
+                    PipeStats(
+                        capturedPerSec = capturedPackets.getAndSet(0),
+                        peakDb = if (peak < 0) null else dbfs(peak),
+                        sentPerSec = ((ws - lastWs) + (udpOut - lastUdp)).toInt(),
+                        wsPerSec = (ws - lastWs).toInt(),
+                        udpPerSec = (udpOut - lastUdp).toInt(),
+                        notSharingPerSec = (noRate - lastNoRate).toInt()
+                    )
+                )
+                lastWs = ws
+                lastUdp = udpOut
+                lastNoRate = noRate
+                main.postDelayed(this, 1_000)
+            }
+        }
+        statsTicker = tick
+        main.postDelayed(tick, 1_000)
+    }
+
+    private fun stopStatsTicker() {
+        statsTicker?.let { main.removeCallbacks(it) }
+        statsTicker = null
+    }
+
+    /** Largest |sample| in a s16le buffer (0..32768). */
+    private fun peakOf(buf: ByteArray): Int {
+        var m = 0
+        var i = 0
+        while (i + 1 < buf.size) {
+            val v = ((buf[i].toInt() and 0xFF) or (buf[i + 1].toInt() shl 8)).toShort().toInt()
+            val a = if (v < 0) -v else v
+            if (a > m) m = a
+            i += 2
+        }
+        return m
+    }
+
+    private fun dbfs(peak: Int): Int =
+        if (peak <= 0) -96 else maxOf(-96, (20.0 * kotlin.math.log10(peak / 32768.0)).toInt())
+
+    /** Overwrites [buf] (s16le stereo) with a 1 kHz tone at about -12 dBFS; returns the next phase. */
+    private fun writeTone(buf: ByteArray, frames: Int, phase: Double): Double {
+        val step = 2.0 * Math.PI * 1000.0 / PlaybackCapture.SAMPLE_RATE
+        var p = phase
+        for (f in 0 until frames) {
+            val v = (kotlin.math.sin(p) * 8192.0).toInt()
+            val lo = (v and 0xFF).toByte()
+            val hi = ((v shr 8) and 0xFF).toByte()
+            val o = f * 4
+            buf[o] = lo; buf[o + 1] = hi; buf[o + 2] = lo; buf[o + 3] = hi
+            p += step
+            if (p > 2.0 * Math.PI) p -= 2.0 * Math.PI
+        }
+        return p
     }
 
     private fun isSilent(buf: ByteArray): Boolean {
@@ -470,6 +581,11 @@ class HostService : Service() {
         override fun kick(id: Int) {
             server?.kick(id)
         }
+
+        override fun applyTestTone(on: Boolean) {
+            testTone = on
+            if (on) startToneThread() // it ends by itself when the tone is switched off or sharing stops
+        }
     }
 
     // ---------------------------------------------------------------- stop
@@ -493,6 +609,8 @@ class HostService : Service() {
         if (HostController.engine === engine) HostController.engine = null
         unwatchLocalOutput()
         talking = false
+        testTone = false
+        stopStatsTicker()
         mic.stop()
         stopCapture()
         nsd?.update(null)

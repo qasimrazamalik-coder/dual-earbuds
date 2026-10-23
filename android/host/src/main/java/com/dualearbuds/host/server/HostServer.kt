@@ -355,10 +355,20 @@ class HostServer(
      * [capturedAtHostMs] is when the packet was captured on the [hostMs] clock (for `clock`).
      * No allocation once the frame pool exists.
      */
+    /** Packets handed to UDP / to WebSocket queues since start (counted once per packet, not per listener). */
+    val udpPacketsOut = java.util.concurrent.atomic.AtomicLong()
+    val wsPacketsOut = java.util.concurrent.atomic.AtomicLong()
+
+    /** Packets [sendAudio] skipped because sharing wasn't on (rate 0) — should stay 0 while sharing. */
+    val packetsWithoutRate = java.util.concurrent.atomic.AtomicLong()
+
     fun sendAudio(pcm: ByteArray, off: Int, len: Int, capturedAtHostMs: Long = hostMs()) {
         val r = rate
         val s = seq.getAndIncrement()
-        if (r <= 0) return
+        if (r <= 0) {
+            packetsWithoutRate.incrementAndGet()
+            return
+        }
         clockTrack.record(s, capturedAtHostMs)
         val targets = clients
         if (targets.isEmpty()) return
@@ -366,8 +376,12 @@ class HostServer(
         val now = clock()
         var viaUdp = 0
         for (c in targets) if (c.usesUdp(now)) viaUdp++
-        if (viaUdp > 0) udp.offer(s, r, pcm, off, len)
+        if (viaUdp > 0) {
+            udp.offer(s, r, pcm, off, len)
+            udpPacketsOut.incrementAndGet()
+        }
         if (viaUdp == targets.size) return
+        wsPacketsOut.incrementAndGet()
         val payloadLen = AudioPacket.HEADER_SIZE + len
         val frameLen = WsCodec.headerSize(payloadLen) + payloadLen
         if (frameLen != poolFrameLen || pool.isEmpty()) {

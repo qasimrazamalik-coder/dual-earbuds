@@ -37,7 +37,11 @@ data class HostUiState(
     /** Common deadline P in ms (v3.2) while sharing, else 0. */
     val playoutMs: Int = 0,
     /** This phone's own output (its earbuds, wired or speaker) while sharing. */
-    val localOutput: LocalOutput? = null
+    val localOutput: LocalOutput? = null,
+    /** Live pipeline counters while sharing (updated once a second). */
+    val stats: PipeStats = PipeStats(),
+    /** A 1 kHz test tone replaces the captured sound (checks the network path without capture). */
+    val testTone: Boolean = false
 ) {
     val address: HostAddress? get() = addresses.firstOrNull { it.address == chosenAddress } ?: addresses.firstOrNull()
     val netKind: NetKind get() = address?.kind ?: NetKind.NONE
@@ -48,6 +52,20 @@ data class HostUiState(
     val link: String? get() = if (status == HostStatus.SHARING) LinkBuilder.link(address?.address, port, prefs.key) else null
 }
 
+/**
+ * Once-a-second counters for the sharing pipeline: what capture delivered and what left for listeners.
+ * [peakDb] is the loudest captured sample in dBFS (null = nothing captured yet; -96 = digital silence).
+ */
+data class PipeStats(
+    val capturedPerSec: Int = 0,
+    val peakDb: Int? = null,
+    val sentPerSec: Int = 0,
+    val wsPerSec: Int = 0,
+    val udpPerSec: Int = 0,
+    /** Packets dropped because the server wasn't in sharing state — must be 0 while sharing. */
+    val notSharingPerSec: Int = 0
+)
+
 /** What the running [HostService] applies live. */
 internal interface HostEngine {
     fun applyPrefs(prefs: HostPrefs, sourceChanged: Boolean)
@@ -56,6 +74,7 @@ internal interface HostEngine {
     fun newKey(key: String)
     fun setVolume(id: Int, volume: Int)
     fun kick(id: Int)
+    fun applyTestTone(on: Boolean)
 }
 
 /** Shared state between [HostService] and [HostScreen]; every setting change goes through here. */
@@ -206,6 +225,7 @@ object HostController {
         _state.update {
             it.copy(
                 status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, talking = false,
+                stats = PipeStats(), testTone = false,
                 showChoice = null, error = error ?: it.error, playoutMs = 0, localOutput = null
             )
         }
@@ -225,6 +245,15 @@ object HostController {
 
     internal fun reportLocalOutput(out: LocalOutput) {
         _state.update { if (it.localOutput == out) it else it.copy(localOutput = out) }
+    }
+
+    internal fun reportStats(stats: PipeStats) {
+        _state.update { if (it.stats == stats) it else it.copy(stats = stats) }
+    }
+
+    fun setTestTone(on: Boolean) {
+        _state.update { it.copy(testTone = on) }
+        engine?.applyTestTone(on)
     }
 
     internal fun reportSilent(silent: Boolean) {

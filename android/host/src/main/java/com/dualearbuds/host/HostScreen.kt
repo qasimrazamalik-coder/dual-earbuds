@@ -65,6 +65,11 @@ import com.dualearbuds.host.ui.ListenersSection
 import com.dualearbuds.host.ui.Mono
 import com.dualearbuds.host.ui.NetworkSection
 import com.dualearbuds.host.ui.Notice
+import com.dualearbuds.host.ui.Panel
+import com.dualearbuds.host.ui.PanelDivider
+import com.dualearbuds.host.ui.PanelRow
+import com.dualearbuds.host.ui.SectionLabel
+import com.dualearbuds.host.ui.ToggleRow
 import com.dualearbuds.host.ui.PartySection
 import com.dualearbuds.host.ui.PermissionAsk
 import com.dualearbuds.host.ui.PermissionReasonDialog
@@ -327,6 +332,7 @@ fun HostScreen(
                 if (sharing) {
                     LinkSection(state)
                     ListenersSection(state)
+                    PipelineSection(state)
                 }
                 SetupSection(checks, onFix = { fix(it) })
                 if (sharing) TalkSection(state, onTalk = { toggleTalk(it) })
@@ -432,4 +438,46 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
     is Activity -> this
     is ContextWrapper -> baseContext.findActivity()
     else -> null
+}
+
+
+/**
+ * Live pipeline counters + test tone. Tells at a glance where sound stops: nothing captured,
+ * captured but silent, or captured but not sent. The test tone skips capture entirely.
+ */
+@Composable
+private fun PipelineSection(state: HostUiState) {
+    val st = state.stats
+    Spacer(Modifier.height(24.dp))
+    SectionLabel("Signal path")
+    Spacer(Modifier.height(8.dp))
+    Panel {
+        val level = when (val db = st.peakDb) {
+            null -> "no audio from capture"
+            -96 -> "silence"
+            else -> "peak $db dB"
+        }
+        PanelRow(
+            title = "Captured",
+            hint = if (state.testTone) "Ignored while the test tone plays" else null,
+            trailing = { Mono("${st.capturedPerSec}/s · $level") }
+        )
+        PanelDivider()
+        PanelRow(
+            title = "Sent to listeners",
+            hint = when {
+                state.listeners.isEmpty() -> "Nobody is listening yet"
+                st.notSharingPerSec > 0 -> "Packets are being dropped: sharing is not active on the link"
+                else -> null
+            },
+            trailing = { Mono("${st.sentPerSec}/s · UDP ${st.udpPerSec} · WS ${st.wsPerSec}") }
+        )
+        PanelDivider()
+        ToggleRow(
+            title = "Send a test tone",
+            hint = "A steady beep instead of this phone's sound. If listeners hear it, the network is fine and the problem is capture.",
+            checked = state.testTone,
+            onChange = { HostController.setTestTone(it) }
+        )
+    }
 }
