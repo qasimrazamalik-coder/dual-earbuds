@@ -322,7 +322,13 @@ fun HostScreen(
                         }
                     )
                 }
-                if (sharing && state.silent) {
+                if (sharing && state.stalled) {
+                    Spacer(Modifier.height(8.dp))
+                    Notice(
+                        "Android isn't passing the playing sound to Dual Earbuds yet. Pause the music and play it again " +
+                            "(or start it after tapping Start)."
+                    )
+                } else if (sharing && state.silent) {
                     Spacer(Modifier.height(8.dp))
                     Notice(
                         "No sound for 5 s. If something is playing, that app blocks sharing (Netflix and other protected apps). " +
@@ -347,6 +353,9 @@ fun HostScreen(
 }
 
 private const val SAMPLE_RATE = 48_000
+
+/** Peaks at or below this count as silence (|sample| ≤ 4, as the service's 5 s silence check). */
+private const val SILENCE_DB = -78
 
 /** 48 dp bar: page name left, live mono readout right, hairline under it. No subtitle. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -452,14 +461,20 @@ private fun PipelineSection(state: HostUiState) {
     SectionLabel("Signal path")
     Spacer(Modifier.height(8.dp))
     Panel {
-        val level = when (val db = st.peakDb) {
-            null -> "no audio from capture"
-            -96 -> "silence"
+        val db = st.peakDb
+        val level = when {
+            st.stalled || db == null -> "no data from capture"
+            db <= SILENCE_DB -> "silence"
             else -> "peak $db dB"
         }
         PanelRow(
             title = "Captured",
-            hint = if (state.testTone) "Ignored while the test tone plays" else null,
+            hint = when {
+                state.testTone -> "Ignored while the test tone plays"
+                st.stalled -> "Capture is stalled: listeners get silence so they stay connected"
+                st.filledPerSec > 0 -> "${st.filledPerSec}/s silent packets filled in for missing capture"
+                else -> null
+            },
             trailing = { Mono("${st.capturedPerSec}/s · $level") }
         )
         PanelDivider()

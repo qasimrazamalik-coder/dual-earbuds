@@ -28,6 +28,7 @@ import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import com.dualearbuds.host.audio.CapturePacer
 import com.dualearbuds.host.audio.MicRing
 import com.dualearbuds.host.audio.NoiseCancel
 import com.dualearbuds.host.audio.Packetizer
@@ -64,6 +65,7 @@ class HostService : Service() {
         private const val SILENCE_HINT_MS = 5_000L
         private const val SILENCE_LEVEL = 4 // |sample| at or below this counts as silence (about -78 dBFS)
         private const val OUTPUT_POLL_MS = 4_000L // calibration can change while sharing
+        private const val CAPTURE_POLL_MS = 4L // non-blocking capture reads: wait between empty reads
     }
 
     private val main = Handler(Looper.getMainLooper())
@@ -90,7 +92,10 @@ class HostService : Service() {
     @Volatile private var resetDenoiser = false
     @Volatile private var capturing = false
     @Volatile private var testTone = false
+    @Volatile private var captureStalled = false
+    @Volatile private var recoveryTried = false // one automatic capture restart per sharing session
     private val capturedPackets = java.util.concurrent.atomic.AtomicInteger()
+    private val filledPackets = java.util.concurrent.atomic.AtomicInteger()
     private val capturedPeak = java.util.concurrent.atomic.AtomicInteger(-1)
     private var toneThread: Thread? = null
     private var statsTicker: Runnable? = null
@@ -211,6 +216,8 @@ class HostService : Service() {
         }
         server = srv
         noiseCancel = prefs.noiseCancel
+        captureStalled = false
+        recoveryTried = false
 
         startCapture(proj, prefs.app)?.let { return it }
         startStatsTicker(srv)
@@ -293,12 +300,10 @@ class HostService : Service() {
         val micBuf = FloatArray(SpectralDenoiser.HOP)
         var lastSound = SystemClock.elapsedRealtime()
         var silentShown = false
-        val packetizer = Packetizer(PlaybackCapture.SAMPLE_RATE) { pkt, capturedAt ->
+        // Real captured packets and filler silence (see CapturePacer) take the same path to listeners.
+        fun deliver(pkt: ByteArray, capturedAt: Long) {
+            if (testTone) return // the tone thread feeds listeners instead
             val frames = pkt.size / 4
-            capturedPackets.incrementAndGet()
-            val pk = peakOf(pkt)
-            capturedPeak.accumulateAndGet(pk) { a, b -> maxOf(a, b) }
-            if (testTone) return@Packetizer // the tone thread feeds listeners instead
             val talk = talking
             if (talk || mixer.active) {
                 if (talk) {
@@ -329,21 +334,67 @@ class HostService : Service() {
                 }
             }
         }
+        val packetizer = Packetizer(PlaybackCapture.SAMPLE_RATE) { pkt, capturedAt ->
+            capturedPackets.incrementAndGet()
+            capturedPeak.accumulateAndGet(peakOf(pkt)) { a, b -> maxOf(a, b) }
+            deliver(pkt, capturedAt)
+        }
         val buf = ByteArray(packetizer.packetBytes)
+        val silence = ByteArray(packetizer.packetBytes)
+        val pacer = CapturePacer(SystemClock.elapsedRealtime())
         try {
             while (capturing) {
-                val r = rec.read(buf, 0, buf.size, AudioRecord.READ_BLOCKING)
+                // Never block: some phones' playback capture delivers nothing at all (see CapturePacer).
+                val r = rec.read(buf, 0, buf.size, AudioRecord.READ_NON_BLOCKING)
                 if (r < 0) throw IllegalStateException("AudioRecord.read error $r")
-                if (r == 0) {
-                    SystemClock.sleep(2)
-                    continue
-                }
                 if (!capturing) break
-                packetizer.write(buf, 0, r, srv.hostMs())
+                val now = SystemClock.elapsedRealtime()
+                if (r > 0) {
+                    pacer.onReal(now)
+                    if (captureStalled) onCaptureFlowing()
+                    packetizer.write(buf, 0, r, srv.hostMs())
+                    if (r == buf.size) continue // more may be waiting
+                } else {
+                    val due = pacer.silenceDue(now)
+                    if (due > 0) {
+                        packetizer.reset() // a stale part-packet would only click
+                        repeat(due) {
+                            silence.fill(0) // the mixer works in place
+                            filledPackets.incrementAndGet()
+                            deliver(silence, srv.hostMs())
+                        }
+                    }
+                    if (!captureStalled && pacer.stalled(now)) onCaptureStalled()
+                }
+                SystemClock.sleep(CAPTURE_POLL_MS)
             }
         } catch (_: Throwable) {
             if (capturing) main.post { stopEverything("Sound capture stopped unexpectedly.") }
         }
+    }
+
+    /**
+     * Capture has delivered nothing for 2 s: tell the user, and once per sharing session recreate the
+     * AudioRecord from the same MediaProjection (allowed while it is alive), which re-routes playing tracks
+     * on most phones. The notice stays until real data arrives.
+     */
+    private fun onCaptureStalled() {
+        captureStalled = true
+        HostController.reportStalled(true)
+        if (recoveryTried) return
+        recoveryTried = true
+        main.post {
+            val proj = projection
+            if (proj != null && server != null && captureStalled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                stopCapture()
+                startCapture(proj, HostController.prefs(this).app)?.let { stopEverything(it) }
+            }
+        }
+    }
+
+    private fun onCaptureFlowing() {
+        captureStalled = false
+        HostController.reportStalled(false)
     }
 
     /**
@@ -361,8 +412,9 @@ class HostService : Service() {
             val frames = pkt.size / 4
             var phase = 0.0
             var next = SystemClock.elapsedRealtime()
-            while (testTone && capturing) {
-                val srv = server ?: break
+            val srv = server
+            // Tied to the server, not to capture: a capture restart (source change, stall recovery) must not end it.
+            while (testTone && srv != null && server === srv) {
                 phase = writeTone(pkt, frames, phase)
                 srv.sendAudio(pkt, 0, pkt.size, srv.hostMs())
                 next += 10
@@ -382,6 +434,7 @@ class HostService : Service() {
         var lastUdp = srv.udpPacketsOut.get()
         var lastNoRate = srv.packetsWithoutRate.get()
         capturedPackets.set(0)
+        filledPackets.set(0)
         capturedPeak.set(-1)
         val tick = object : Runnable {
             override fun run() {
@@ -394,6 +447,8 @@ class HostService : Service() {
                     PipeStats(
                         capturedPerSec = capturedPackets.getAndSet(0),
                         peakDb = if (peak < 0) null else dbfs(peak),
+                        filledPerSec = filledPackets.getAndSet(0),
+                        stalled = captureStalled,
                         sentPerSec = ((ws - lastWs) + (udpOut - lastUdp)).toInt(),
                         wsPerSec = (ws - lastWs).toInt(),
                         udpPerSec = (udpOut - lastUdp).toInt(),

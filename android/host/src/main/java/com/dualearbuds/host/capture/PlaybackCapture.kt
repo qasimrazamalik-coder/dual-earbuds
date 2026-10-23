@@ -17,13 +17,13 @@ import androidx.annotation.RequiresApi
 internal object PlaybackCapture {
     const val SAMPLE_RATE = 48_000
 
-    /** One 10 ms packet: what the capture thread reads per call. */
+    /** One 10 ms packet: the most the capture thread reads per call. */
     const val PACKET_BYTES = SAMPLE_RATE / 100 * 4
 
     /**
      * AudioRecord's own buffer: at least 2× the minimum and 100 ms, so a late wake-up of the capture
      * thread (screen off, battery saver) is absorbed instead of losing sound. It adds no delay: the
-     * thread reads 10 ms at a time as soon as each is there.
+     * thread polls without blocking every few ms and takes whatever is there (see CapturePacer).
      */
     fun bufferBytes(): Int {
         val minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_STEREO, AudioFormat.ENCODING_PCM_16BIT)
