@@ -70,17 +70,19 @@ pairing() {
   PORT=$((PORT + 1))
   local ep="$OUT/$name.epoch" hl="$OUT/$name.host.log" ll="$OUT/$name.listener.log" pl="$OUT/$name.web.log"
   local hostargs=(--port "$PORT" --seconds 11 --epoch-file "$ep" ${PIN:+--pin "$PIN"} ${FALLBACK:+--expect-fallback} ${SEQ:+--seq-start "$SEQ"})
-  echo "== $name: $host host -> $( [ "$host" = kotlin ] && echo C# || echo Android ) listener $*"
+  local lis=${LISTENER:-$( [ "$host" = kotlin ] && echo csharp || echo kotlin )}
+  echo "== $name: $host host -> $( [ "$lis" = csharp ] && echo C# || echo Android ) listener $*"
   rm -f "$ep"
   if [ "$host" = kotlin ]; then kotlin_host "${hostargs[@]}" > "$hl" 2>&1 & else csharp --mode host "${hostargs[@]}" > "$hl" 2>&1 & fi
   local hp=$!
   for _ in $(seq 1 100); do [ -s "$ep" ] && break; sleep 0.1; done
   local pp=""
   if [ -n "${PROBE:-}" ]; then (sleep 1; web_probe --port "$PORT" ${PIN:+--pin "$PIN"} --seconds 4 > "$pl" 2>&1) & pp=$!; fi
-  if [ "$host" = kotlin ]; then
-    csharp --mode listen --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host android "$@" > "$ll" 2>&1
+  local eh=$( [ "$host" = kotlin ] && echo android || echo windows )
+  if [ "$lis" = csharp ]; then
+    csharp --mode listen --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host "$eh" "$@" > "$ll" 2>&1
   else
-    kotlin_listener --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host windows "$@" > "$ll" 2>&1
+    kotlin_listener --port "$PORT" --epoch-file "$ep" ${PIN:+--pin "$PIN"} --expect-host "$eh" "$@" > "$ll" 2>&1
   fi
   local lr=$?
   local pr=0
@@ -107,6 +109,10 @@ sel B1 && PIN=2468 SEQ=4294966896 pairing B1 csharp --seconds 6 --expect-wrap
 sel B2 && FALLBACK=1 pairing B2 csharp --seconds 8 --block-at-ms 2500
 sel C1 && PROBE=1 pairing C1 kotlin --seconds 6 --loss 0.1
 sel C2 && PROBE=1 pairing C2 csharp --seconds 6 --loss 0.1
+# D: phone to phone - Android host -> Android listener
+sel D1 && LISTENER=kotlin PIN=2468 pairing D1 kotlin --seconds 6
+sel D2 && LISTENER=kotlin FALLBACK=1 pairing D2 kotlin --seconds 8 --block-at-ms 2500
+sel D3 && LISTENER=kotlin PROBE=1 pairing D3 kotlin --seconds 6 --loss 0.1
 
 if [ $FAIL -eq 0 ]; then echo "== interop: all pairings passed"; else echo "== interop: FAILED"; fi
 exit $FAIL
