@@ -21,6 +21,7 @@ import com.dualearbuds.companion.audio.sync.LatencySmoother
 import com.dualearbuds.companion.audio.sync.RateTrimmer
 import com.dualearbuds.companion.audio.sync.SyncAction
 import com.dualearbuds.companion.audio.sync.SyncPlanner
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import com.dualearbuds.companion.net.HostKind
 import com.dualearbuds.companion.net.InfoClient
 import com.dualearbuds.companion.net.InfoResult
@@ -84,6 +85,8 @@ class SimEngine {
     fun onSyncReply(c: Double, h: Double) = lock.withLock { clock.onSyncReply(c, h, nowMs()) }
     fun onClock(seq: Long, h: Double) = lock.withLock { clock.onClock(seq, h, nowMs()) }
     fun setPlayoutMs(ms: Double) = lock.withLock { clock.playoutMs = ms }
+    fun setPriority(p: SyncPriority) = lock.withLock { jitter.priority = p }
+    val priority: SyncPriority get() = lock.withLock { jitter.priority }
     fun resetClock() = lock.withLock { clock.reset() }
     /** Harness only: the host time this listener believes it is now (local + offset), or null. */
     fun hostNowEstimate(): Double? = lock.withLock { clock.offsetMs?.let { nowMs() + it } }
@@ -129,9 +132,8 @@ class SimEngine {
     fun stats(): Stats = lock.withLock {
         val hasTrack = trackRate > 0
         val out = DeadlineNeed.outputLatency(calibratedLatencyMs, if (hasTrack) tsLatencyMs.takeIf { !it.isNaN() } else null, false)
-        val j30 = jitter.jitterP99Over30sMs
-        Stats(jitter.targetMs(), jitter.underruns, !jitter.buffering && run.get(), syncedNow, syncErrorMs,
-            if (j30.isNaN()) null else DeadlineNeed.needMs(j30, out.ms))
+        val need = DeadlineNeed.needMs(jitter.priority, jitter.jitterP99Over30sMs, jitter.jitterP95Over10sMs, out.ms)
+        Stats(jitter.targetMs(), jitter.underruns, !jitter.buffering && run.get(), syncedNow, syncErrorMs, need)
     }
 
     /** A simulated AudioTrack: 20 ms hardware latency after the written frames; plays in real time. */
@@ -301,6 +303,7 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
         override fun onControlVolume(volume: Int) = sendStatus()
         override fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) { engine.setPlayoutMs(playoutMs.toDouble()); hostPlayout = playoutMs }
         override fun onPlayout(ms: Int) { engine.setPlayoutMs(ms.toDouble()); hostPlayout = ms }
+        override fun onPriority(priority: SyncPriority) = engine.setPriority(priority)
         override fun onSyncReply(c: Double, h: Double) = engine.onSyncReply(c, h)
         override fun onClock(seq: Long, h: Double) = engine.onClock(seq, h)
         override fun onKick(reason: String) { kickReason = reason; connection?.close() }
@@ -468,7 +471,7 @@ object AndroidListener {
                 r.check(res2 == "pinNeeded", "missing PIN is detected from /info", res2)
             }
             val sim = ListenerSim(LinkTarget(host, port, key, pin), r, loss, blockAt)
-            sim.engine.calibratedLatencyMs = 150.0 // "calibrated earbuds": needMs ≈ jitter + 150 + track + 10
+            sim.engine.calibratedLatencyMs = 150.0 // "calibrated earbuds": needMs ≈ jitter + 150 + track + 10 (+ 5 with lip-sync)
             sim.engine.configure(BufferMode.SMART, 180, 0)
             sim.engine.start()
             sim.startObservers()
@@ -543,6 +546,9 @@ object AndroidListener {
                 "median ${"%.1f".format(median)} ms, max ${"%.1f".format(maxErr)} ms over $syncErrSamples samples")
             if (epoch != null) r.check(!clockErr.isNaN() && abs(clockErr) < 3.0, "host clock estimate matches the host", "off by ${"%.2f".format(clockErr)} ms")
             r.check(st.needMs != null && sim.lastStatus.contains("\"needMs\"") && sim.lastStatus.contains("\"syncErrMs\""), "status carries needMs + syncErrMs", sim.lastStatus)
+            // v3.3: the Android host announces Lip-sync by default, and needMs then follows p95 (10 s) + 5.
+            if (sim.helloHost == HostKind.PHONE) r.check(sim.engine.priority == SyncPriority.LIPSYNC, "Android host announces lip-sync priority", "${sim.engine.priority}")
+            else r.info("priority ${sim.engine.priority}")
             val need = st.needMs ?: 0
             r.check(sim.hostPlayout >= minOf(400, need) - 15 && sim.hostPlayout > 120, "host P follows our needMs", "P=${sim.hostPlayout} need=$need")
             if (blockAt >= 0) {

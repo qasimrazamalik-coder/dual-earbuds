@@ -2,6 +2,7 @@ package com.dualearbuds.companion.audio.sync
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -11,6 +12,26 @@ class DeadlineNeedTest {
     fun needIsJitterPlusLatencyPlusTen() {
         assertEquals(232, DeadlineNeed.needMs(41.2, 180.0))
         assertEquals(30, DeadlineNeed.needMs(Double.NaN, 20.0))
+    }
+
+    @Test
+    fun lipSyncUsesP95Over10sPlusFive() {
+        // v3.3: lip-sync = p95 (10 s) + latency + 5; together = p99 (30 s) + latency + 10 (v3.2).
+        assertEquals(206, DeadlineNeed.needMs(SyncPriority.LIPSYNC, 40.0, 21.0, 180.0))
+        assertEquals(230, DeadlineNeed.needMs(SyncPriority.TOGETHER, 40.0, 21.0, 180.0))
+        assertNull(DeadlineNeed.needMs(SyncPriority.LIPSYNC, 40.0, Double.NaN, 180.0))
+        assertNull(DeadlineNeed.needMs(SyncPriority.TOGETHER, Double.NaN, 21.0, 180.0))
+    }
+
+    @Test
+    fun priorityParsing() {
+        assertEquals(SyncPriority.LIPSYNC, SyncPriority.fromWire("lipsync"))
+        assertEquals(SyncPriority.TOGETHER, SyncPriority.fromWire(" Together "))
+        assertNull(SyncPriority.fromWire(""))
+        assertNull(SyncPriority.fromWire(null))
+        assertNull(SyncPriority.fromWire("fastest"))
+        assertEquals(20, SyncPriority.LIPSYNC.bufferFloorMs)
+        assertEquals(30, SyncPriority.TOGETHER.bufferFloorMs)
     }
 
     @Test

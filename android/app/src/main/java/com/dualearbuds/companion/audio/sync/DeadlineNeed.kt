@@ -17,10 +17,25 @@ enum class LatencySource(val label: String) {
 data class OutputLatency(val ms: Double, val source: LatencySource)
 
 /**
+ * v3.3 sync priority, `"priority"` in `hello` and `playout`. A host that doesn't send it follows v3.2 rules
+ * ([TOGETHER]). [bufferFloorMs] is the adaptive buffer's lowest value.
+ */
+enum class SyncPriority(val wire: String, val bufferFloorMs: Int) {
+    LIPSYNC("lipsync", 20),
+    TOGETHER("together", 30);
+
+    companion object {
+        /** The wire value, or null when absent or unknown (keep what is in force). */
+        fun fromWire(value: String?): SyncPriority? = entries.firstOrNull { it.wire == value?.trim()?.lowercase() }
+    }
+}
+
+/**
  * Listener side of the v3.2 common deadline (docs/protocol.md "Common deadline"): what this listener needs the
  * host's playout P to be at least, reported as `"needMs"` in `status`.
  *
- *   needMs = jitterP99 (last 30 s) + outputLatency + 10
+ *   Everyone together (v3.2): needMs = jitterP99 (last 30 s) + outputLatency + 10
+ *   Lip-sync (v3.3):          needMs = jitterP95 (last 10 s) + outputLatency + 5
  *
  * outputLatency, in order of preference:
  * 1. the calibrated value for the current Bluetooth device. Calibration measures the delay the output timestamps
@@ -30,6 +45,7 @@ data class OutputLatency(val ms: Double, val source: LatencySource)
  */
 object DeadlineNeed {
     const val MARGIN_MS = 10.0
+    const val LIPSYNC_MARGIN_MS = 5.0
     const val DEFAULT_BLUETOOTH_MS = 180.0
     const val DEFAULT_WIRED_MS = 20.0
     const val MIN_NEED_MS = 10
@@ -47,11 +63,23 @@ object DeadlineNeed {
     }
 
     /** needMs, rounded up to whole ms. A jitter of NaN (no data yet) counts as 0. */
-    fun needMs(jitterP99Ms: Double, outputLatencyMs: Double): Int {
-        val j = if (jitterP99Ms.isNaN()) 0.0 else max(0.0, jitterP99Ms)
+    fun needMs(jitterMs: Double, outputLatencyMs: Double, marginMs: Double = MARGIN_MS): Int {
+        val j = if (jitterMs.isNaN()) 0.0 else max(0.0, jitterMs)
         val out = if (outputLatencyMs.isNaN()) 0.0 else max(0.0, outputLatencyMs)
-        return ceil(j + out + MARGIN_MS).toInt().coerceIn(MIN_NEED_MS, MAX_NEED_MS)
+        return ceil(j + out + marginMs).toInt().coerceIn(MIN_NEED_MS, MAX_NEED_MS)
     }
+
+    /**
+     * needMs for [priority] from the two jitter estimates (p99 over 30 s, p95 over 10 s), or null while the one it
+     * uses has no data yet.
+     */
+    fun needMs(priority: SyncPriority, jitterP99Over30sMs: Double, jitterP95Over10sMs: Double, outputLatencyMs: Double): Int? =
+        when (priority) {
+            SyncPriority.TOGETHER ->
+                if (jitterP99Over30sMs.isNaN()) null else needMs(jitterP99Over30sMs, outputLatencyMs, MARGIN_MS)
+            SyncPriority.LIPSYNC ->
+                if (jitterP95Over10sMs.isNaN()) null else needMs(jitterP95Over10sMs, outputLatencyMs, LIPSYNC_MARGIN_MS)
+        }
 
     /**
      * True when [newMs] differs enough from what the host last heard ([sentMs]) to send a status now: any rise of

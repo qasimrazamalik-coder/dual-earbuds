@@ -13,6 +13,7 @@ import com.dualearbuds.host.server.LinkKey
 import com.dualearbuds.host.server.ListenerInfo
 import com.dualearbuds.host.server.LocalOutput
 import com.dualearbuds.host.server.RoomPin
+import com.dualearbuds.host.server.SyncPriority
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -33,6 +34,8 @@ data class HostUiState(
     val talking: Boolean = false,
     val listeners: List<ListenerInfo> = emptyList(),
     val silent: Boolean = false,
+    /** Capture has delivered no data for 2 s or more (Android isn't passing the playing sound yet). */
+    val stalled: Boolean = false,
     val error: String? = null,
     /** Common deadline P in ms (v3.2) while sharing, else 0. */
     val playoutMs: Int = 0,
@@ -54,7 +57,7 @@ data class HostUiState(
 
 /**
  * Once-a-second counters for the sharing pipeline: what capture delivered and what left for listeners.
- * [peakDb] is the loudest captured sample in dBFS (null = nothing captured yet; -96 = digital silence).
+ * [peakDb] is the loudest captured sample in dBFS (null = nothing captured in that second; -96 = digital silence).
  */
 data class PipeStats(
     val capturedPerSec: Int = 0,
@@ -62,6 +65,10 @@ data class PipeStats(
     val sentPerSec: Int = 0,
     val wsPerSec: Int = 0,
     val udpPerSec: Int = 0,
+    /** Silent packets sent in place of capture data that did not come (keeps listeners on the 10 ms clock). */
+    val filledPerSec: Int = 0,
+    /** No data from capture for 2 s or more. */
+    val stalled: Boolean = false,
     /** Packets dropped because the server wasn't in sharing state — must be 0 while sharing. */
     val notSharingPerSec: Int = 0
 )
@@ -136,6 +143,8 @@ object HostController {
 
     fun setNoiseCancel(context: Context, level: NoiseCancel) = changePrefs(context) { it.copy(noiseCancel = level) }
 
+    fun setSyncPriority(context: Context, priority: SyncPriority) = changePrefs(context) { it.copy(syncPriority = priority) }
+
     /** null = all apps. */
     fun setSource(context: Context, app: AppChoice?) = changePrefs(context, sourceChanged = true) { it.copy(app = app) }
 
@@ -187,7 +196,7 @@ object HostController {
     /** Starts [HostService] with the MediaProjection consent result. */
     fun startSharing(context: Context, resultCode: Int, data: Intent) {
         init(context)
-        _state.update { it.copy(status = HostStatus.STARTING, error = null, silent = false) }
+        _state.update { it.copy(status = HostStatus.STARTING, error = null, silent = false, stalled = false) }
         val intent = Intent(context, HostService::class.java)
             .setAction(HostService.ACTION_START)
             .putExtra(HostService.EXTRA_RESULT_CODE, resultCode)
@@ -217,14 +226,14 @@ object HostController {
     }
 
     internal fun reportSharing(port: Int) {
-        _state.update { it.copy(status = HostStatus.SHARING, port = port, error = null, silent = false) }
+        _state.update { it.copy(status = HostStatus.SHARING, port = port, error = null, silent = false, stalled = false) }
     }
 
     internal fun reportStopped(error: String?) {
         engine = null
         _state.update {
             it.copy(
-                status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, talking = false,
+                status = HostStatus.IDLE, port = 0, listeners = emptyList(), silent = false, stalled = false, talking = false,
                 stats = PipeStats(), testTone = false,
                 showChoice = null, error = error ?: it.error, playoutMs = 0, localOutput = null
             )
@@ -254,6 +263,10 @@ object HostController {
     fun setTestTone(on: Boolean) {
         _state.update { it.copy(testTone = on) }
         engine?.applyTestTone(on)
+    }
+
+    internal fun reportStalled(stalled: Boolean) {
+        _state.update { if (it.stalled == stalled) it else it.copy(stalled = stalled) }
     }
 
     internal fun reportSilent(silent: Boolean) {

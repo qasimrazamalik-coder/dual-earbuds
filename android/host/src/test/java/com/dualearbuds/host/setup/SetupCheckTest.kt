@@ -100,4 +100,17 @@ class SetupCheckTest {
         assertEquals(CheckLevel.INFO, n.level)
         assertEquals(Fix.NOTIFICATIONS, n.fix)
     }
+
+    @Test
+    fun slowEarbudsGetTheLowLatencyHint() {
+        val slow = SetupCheck.evaluate(good.copy(localOutput = LocalOutput(LocalOutputKind.BLUETOOTH, "Buds", 230.0), canCalibrate = true))
+            .first { it.id == "earbuds" }
+        assertTrue(slow.detail, slow.detail.startsWith("These earbuds add 230 ms."))
+        assertTrue(slow.detail.contains("AAC or SBC over LDAC"))
+        assertEquals(Fix.CALIBRATE, slow.fix)
+        val fine = SetupCheck.evaluate(good.copy(localOutput = LocalOutput(LocalOutputKind.BLUETOOTH, "Buds", 120.0), canCalibrate = true))
+            .first { it.id == "earbuds" }
+        assertEquals("Calibrated: 120 ms. Listeners line up with what you hear.", fine.detail)
+        assertNull(fine.fix)
+    }
 }

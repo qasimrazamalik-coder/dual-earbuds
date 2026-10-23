@@ -3,23 +3,25 @@ package com.dualearbuds.companion.audio
 import kotlin.math.max
 
 /**
- * Packet arrival jitter over roughly the last [windowMs] (protocol v3.2 `needMs`). Pure Kotlin, not thread-safe.
+ * Packet arrival jitter over roughly the last [windowMs] (protocol v3.2 / v3.3 `needMs`): its [quantile]
+ * (p99 over 30 s by default; lip-sync uses p95 over 10 s). Pure Kotlin, not thread-safe.
  *
  * Every arrival gives a delay sample d = arrival − seq × [packetMs] (the constant one-way delay and the clock
- * offset cancel out). Jitter = d − min(d) inside the window; its 99th percentile comes from a [P2Quantile].
+ * offset cancel out). Jitter = d − min(d) inside the window; the percentile comes from a [P2Quantile].
  * This is "how late can a packet be compared with the earliest one", which is exactly what a playout deadline must
  * absorb (inter-arrival gaps of a burst after a Wi-Fi power-save pause show up here as ~the pause length).
  *
- * "Last 30 s": two estimators run staggered by half a window; the older one (15–30 s of data) is reported and is
+ * "Last 30 s": two estimators run staggered by half a window; the older one (half to a whole window) is reported and is
  * replaced every half window. Before the older one has [minSamples] the younger one is used.
  */
 class ArrivalJitter(
     private val windowMs: Long = 30_000,
     private val packetMs: Double = 10.0,
-    private val minSamples: Int = 50
+    private val minSamples: Int = 50,
+    private val quantile: Double = 0.99
 ) {
-    private class Window(val startedAt: Long) {
-        val p99 = P2Quantile(0.99)
+    private inner class Window(val startedAt: Long) {
+        val p99 = P2Quantile(quantile)
         var minD = Double.POSITIVE_INFINITY
 
         fun add(d: Double) {
@@ -68,8 +70,12 @@ class ArrivalJitter(
         count++
     }
 
-    /** p99 jitter in ms, NaN before [minSamples] arrivals. */
+    /** p99 jitter in ms with the default [quantile] (the one this class was made with), NaN before [minSamples] arrivals. */
     val p99Ms: Double
+        get() = valueMs
+
+    /** Jitter at [quantile] in ms, NaN before [minSamples] arrivals. */
+    val valueMs: Double
         get() {
             if (count < minSamples) return Double.NaN
             val w = if (old.p99.count >= minSamples) old else young

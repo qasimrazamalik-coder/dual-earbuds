@@ -8,6 +8,7 @@ import android.os.Process
 import android.os.SystemClock
 import com.dualearbuds.companion.audio.sync.ClockSync
 import com.dualearbuds.companion.audio.sync.DeadlineNeed
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import com.dualearbuds.companion.audio.sync.LatencySmoother
 import com.dualearbuds.companion.audio.sync.OutputLatency
 import com.dualearbuds.companion.audio.sync.RateTrimmer
@@ -168,6 +169,9 @@ class AudioEngine {
 
     fun setPlayoutMs(ms: Double) = lock.withLock { clock.playoutMs = ms }
 
+    /** v3.3 host sync priority: picks the needMs formula and the adaptive buffer's floor. */
+    fun setPriority(priority: SyncPriority) = lock.withLock { jitter.priority = priority }
+
     /** New connection: forget the old host clock (offset and reference). */
     fun resetClock() = lock.withLock { clock.reset() }
 
@@ -257,6 +261,7 @@ class AudioEngine {
             routedBluetooth ?: assumeBluetooth
         )
         val j30 = jitter.jitterP99Over30sMs
+        val need = DeadlineNeed.needMs(jitter.priority, j30, jitter.jitterP95Over10sMs, out.ms)
         EngineStats(
             queuedMs = max(0, jitter.queuedMs.roundToInt()),
             targetMs = jitter.targetMs(),
@@ -274,7 +279,7 @@ class AudioEngine {
             soundClass = chain.soundClass,
             jitter30sMs = j30,
             outputLatency = out,
-            needMs = if (j30.isNaN()) null else DeadlineNeed.needMs(j30, out.ms),
+            needMs = need,
             playoutMs = clock.playoutMs
         )
     }

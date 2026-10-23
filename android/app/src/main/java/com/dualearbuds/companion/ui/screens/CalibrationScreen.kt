@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.calib.CalibrationResult
+import com.dualearbuds.companion.calib.LowLatencyHint
 import com.dualearbuds.companion.calib.CalibrationRunner
 import com.dualearbuds.companion.data.SoundSettings
 import com.dualearbuds.companion.service.PlaybackController
@@ -93,16 +94,19 @@ fun CalibrationScreen(onBack: () -> Unit) {
                 color = if (saved != null) AppTheme.colors.text else AppTheme.colors.textDim
             )
             when (val s = state) {
-                CalState.Ready -> Unit
+                CalState.Ready -> LowLatencyHint.text(saved)?.let { Banner(text = it, color = AppTheme.colors.warning) }
                 CalState.Running -> {
                     Text("Listening for the clicks…", style = MaterialTheme.typography.bodyMedium)
                     LinearProgressIndicator(Modifier.fillMaxWidth(), color = AppTheme.colors.accent, trackColor = AppTheme.colors.line)
                 }
                 is CalState.Done -> when (val r = s.result) {
-                    is CalibrationResult.Ok -> Banner(
-                        text = String.format(Locale.US, "%.0f ms, heard %d of %d clicks, spread %.0f ms. Saved for %s.", r.latencyMs, r.found, r.total, r.spreadMs, device),
-                        color = AppTheme.colors.good
-                    )
+                    is CalibrationResult.Ok -> {
+                        Banner(
+                            text = String.format(Locale.US, "%.0f ms, heard %d of %d clicks, spread %.0f ms. Saved for %s.", r.latencyMs, r.found, r.total, r.spreadMs, device),
+                            color = AppTheme.colors.good
+                        )
+                        LowLatencyHint.text(r.latencyMs)?.let { Banner(text = it, color = AppTheme.colors.warning) }
+                    }
                     is CalibrationResult.Failed -> Banner(text = r.reason, color = AppTheme.colors.warning)
                 }
             }
