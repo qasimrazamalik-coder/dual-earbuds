@@ -468,11 +468,60 @@ namespace DualEarbuds
             foreach (var lo in listenOutputs) if (lo.DeviceId == o.Id) lo.Volume = o.Volume / 100f;
         }
 
-        // ------------------------------------------------------------------ common deadline (protocol v3.2)
-        // Every ear hears the sample captured at t at t + P. P comes from the phone link (it knows the listeners'
-        // needs) or, with the link off, from the local outputs alone. Each ticked local output is delayed by
-        // P - its latency; the manual Delay adds on top.
+        // ------------------------------------------------------------------ common deadline (protocol v3.2 + v3.3)
+        // Every remote ear hears the sample captured at t at t + P. P comes from the phone link (it knows the
+        // listeners' needs) or, with the link off, from the local outputs alone.
+        // Lip-sync (v3.3, default): the capture source output is the reference ear (latency L0); every other ticked
+        // output is delayed by L0 - its latency, and P = max(L0, listener needs).
+        // Everyone together (v3.2): each ticked local output is delayed by P - its latency.
+        // The manual Delay adds on top either way.
         int appliedPlayout = -1;
+
+        public string Priority { get { return SyncPriority.Normalize(Settings.Priority); } }
+        public bool LipSync { get { return SyncPriority.IsLipSync(Priority); } }
+
+        public void SetPriority(string priority)
+        {
+            string p = SyncPriority.Normalize(priority);
+            if (p == Settings.Priority) return;
+            Settings.Priority = p;
+            dirty = true;
+            var ph = Phone;
+            if (ph != null) ph.Priority = p;
+            Log.Info("Sync priority: " + p);
+            ApplyDelays();
+            UpdateStates();
+        }
+
+        // The reference ear: the output the sound source plays through. One-app sharing plays through the
+        // Windows default output.
+        public OutputVm ReferenceOutput
+        {
+            get
+            {
+                string src = SourceId;
+                var o = src == null ? null : Outputs.Find(x => x.Id == src);
+                if (o == null && DefaultId != null) o = Outputs.Find(x => x.Id == DefaultId);
+                return o;
+            }
+        }
+
+        // L0: calibrated, else Windows-reported + mixer, else 180 ms Bluetooth / 20 ms wired.
+        public double SourceLatencyMs
+        {
+            get
+            {
+                var o = ReferenceOutput;
+                if (o == null) return SyncPriority.SourceWiredGuessMs;
+                return SyncPriority.SourceLatencyMs(o.LatencyMs, o.ReportedMs, o.IsBluetooth);
+            }
+        }
+
+        public bool IsReference(OutputVm o)
+        {
+            var r = ReferenceOutput;
+            return r != null && r.Id == o.Id;
+        }
 
         public int LocalNeedMs
         {
@@ -480,7 +529,7 @@ namespace DualEarbuds
             {
                 var l = new List<double>();
                 foreach (var o in Outputs) if (o.Enabled && !o.IsSource) l.Add(o.EffectiveLatencyMs);
-                return OutputTiming.LocalNeedMs(l);
+                return SyncPriority.LocalNeedMs(Priority, SourceLatencyMs, l);
             }
         }
 
@@ -488,12 +537,20 @@ namespace DualEarbuds
         {
             get
             {
-                if (Demo) return DemoPlayoutMs;
+                if (Demo)
+                {
+                    // screenshots: the real rule over the demo listeners, so the readout matches the rows
+                    var needs = new List<int>();
+                    foreach (var ph in Phones) if (ph.Synced && ph.NeedMs > 0) needs.Add(ph.NeedMs);
+                    return PlayoutPlanner.Choose(needs, LocalNeedMs, SyncPriority.FloorMs(Priority));
+                }
                 var p = Phone;
-                return p != null ? p.PlayoutMs : PlayoutPlanner.Choose(null, LocalNeedMs);
+                return p != null ? p.PlayoutMs : PlayoutPlanner.Choose(null, LocalNeedMs, SyncPriority.FloorMs(Priority));
             }
         }
-        public int DemoPlayoutMs = 236;
+
+        // When the laptop's own outputs are heard, in ms after capture: L0 in lip-sync, P otherwise.
+        public double LocalReferenceMs { get { return SyncPriority.ReferenceMs(Priority, PlayoutMs, SourceLatencyMs); } }
 
         void ComputeAlignment()
         {
@@ -504,10 +561,12 @@ namespace DualEarbuds
             }
             int need = LocalNeedMs;
             var ph = Phone;
-            if (ph != null) ph.LocalNeedMs = need;
+            if (ph != null) { ph.Priority = Priority; ph.LocalNeedMs = need; }
             int p = PlayoutMs;
+            string pr = Priority;
+            double l0 = SourceLatencyMs;
             foreach (var o in Outputs)
-                o.ExtraDelayMs = o.Enabled && !o.IsSource ? OutputTiming.AutoDelayMs(p, o.EffectiveLatencyMs) : 0;
+                o.ExtraDelayMs = o.Enabled && !o.IsSource ? SyncPriority.LocalDelayMs(pr, p, l0, o.EffectiveLatencyMs) : 0;
             appliedPlayout = p;
         }
 
@@ -751,6 +810,7 @@ namespace DualEarbuds
             p.Pin = Settings.Party && Settings.PinOn ? Settings.Pin : null;
             p.RemoteControl = Settings.RemoteControl;
             p.SuggestedEq = Settings.SuggestEq == "" ? null : Settings.SuggestEq;
+            p.Priority = Settings.Priority;
             bool oneApp = Engine.Running && Engine.SourceKind == CaptureKind.App;
             p.SetSource(oneApp ? "app" : "all", oneApp ? AppAudio.Pretty(Settings.SourceApp) : null);
         }
@@ -1091,7 +1151,7 @@ namespace DualEarbuds
         {
             if (!o.LatencyMeasured || !o.Enabled || o.IsSource) return double.NaN;
             double heard = OutputTiming.CushionMs + o.ExtraDelayMs + o.EffectiveLatencyMs;
-            return heard - PlayoutMs;
+            return heard - LocalReferenceMs;
         }
 
         // A listen output's offset from the host's deadline (clock sync), NaN while not synced.
@@ -1116,7 +1176,7 @@ namespace DualEarbuds
             }
         }
 
-        // "LIVE  48 kHz · P 92 ms · 4 ears · sync ±3 ms"
+        // "LIVE  48 kHz · LIP-SYNC · P 92 ms · 4 ears · sync ±3 ms"
         public string Readout(out bool live)
         {
             var inv = System.Globalization.CultureInfo.InvariantCulture;
@@ -1129,7 +1189,7 @@ namespace DualEarbuds
                 live = true;
                 if (c == null) return "LISTENING  48 kHz  ·  P 120 ms  ·  UDP  ·  sync +2 ms";
                 double off = c.OffsetMs;
-                return "LISTENING  " + (c.Rate / 1000.0).ToString("0.#", inv) + " kHz  ·  P " + c.PlayoutMs.ToString(inv) + " ms  ·  " + c.Transport.ToUpperInvariant() +
+                return "LISTENING  " + (c.Rate / 1000.0).ToString("0.#", inv) + " kHz  ·  " + (SyncPriority.IsLipSync(c.Priority) ? "LIP-SYNC  ·  " : "") + "P " + c.PlayoutMs.ToString(inv) + " ms  ·  " + c.Transport.ToUpperInvariant() +
                        (double.IsNaN(off) ? "" : "  ·  sync " + Kit.Signed(off));
             }
             if (!Running) return WantRunning ? "WAITING FOR SOUND" : "STOPPED";
@@ -1139,9 +1199,12 @@ namespace DualEarbuds
             foreach (var p in Phones) { double v = PhoneOffsetMs(p); if (!double.IsNaN(v) && (double.IsNaN(worst) || Math.Abs(v) > worst)) worst = Math.Abs(v); }
             foreach (var o in Outputs) { double v = LocalOffsetMs(o); if (!double.IsNaN(v) && (double.IsNaN(worst) || Math.Abs(v) > worst)) worst = Math.Abs(v); }
             int ears = EarCount;
-            return "LIVE  " + (rate / 1000.0).ToString("0.#", inv) + " kHz  ·  P " + PlayoutMs.ToString(inv) + " ms  ·  " + ears.ToString(inv) + (ears == 1 ? " ear" : " ears") +
+            return "LIVE  " + (rate / 1000.0).ToString("0.#", inv) + " kHz  ·  " + PriorityLabel + "  ·  P " + PlayoutMs.ToString(inv) + " ms  ·  " + ears.ToString(inv) + (ears == 1 ? " ear" : " ears") +
                    (double.IsNaN(worst) ? "" : "  ·  sync ±" + Math.Round(worst).ToString(inv) + " ms");
         }
+
+        // Header readout word for the sync priority.
+        public string PriorityLabel { get { return LipSync ? "LIP-SYNC" : "TOGETHER"; } }
 
         // ------------------------------------------------------------------ setup check
         public PowerState PowerNow;
@@ -1174,8 +1237,15 @@ namespace DualEarbuds
                 Wifi = Wifi,
                 PlayoutMs = PlayoutMs,
             };
+            x.LipSync = LipSync;
             foreach (var o in Outputs)
             {
+                if (!Listening && LipSync && IsReference(o))
+                {
+                    // lip-sync: the source output is the reference ear, so its calibration matters most
+                    x.Outputs.Add(new CheckOutput { Id = o.Id, Name = o.Name, Bluetooth = o.IsBluetooth, Enabled = true, Source = true, Calibrated = o.LatencyMeasured, LatencyMs = SourceLatencyMs });
+                    continue;
+                }
                 if (o.IsSource) continue;
                 bool ticked = Listening ? o.ListenTicked : o.Enabled;
                 x.Outputs.Add(new CheckOutput { Id = o.Id, Name = o.Name, Bluetooth = o.IsBluetooth, Enabled = ticked, Calibrated = o.LatencyMeasured, LatencyMs = o.EffectiveLatencyMs });
@@ -1600,8 +1670,10 @@ namespace DualEarbuds
             s.Recent.Add(new RecentHost { HostPort = "192.168.1.31:8790", Key = "M4TQ7ZPA", Name = "Sara's laptop" });
             s.Recent.Add(new RecentHost { HostPort = "192.168.1.50:8790", Key = "K2LPQ6RT", Name = "Office PC" });
             s.Profiles.Add(new HearingProfile { Name = "Ammi", LeftDb = new double[] { 0, 0, 0, 2, 5, 7.5, 9 }, RightDb = new double[] { 0, 0, 0, 1.5, 4, 6, 8 } });
+            // the source pair (182 ms, shows the low-latency hint) is the lip-sync reference; the second pair
+            // is faster and waits 27 ms for it
             c.Outputs[0].LatencyMs = 182;
-            c.Outputs[1].LatencyMs = 214;
+            c.Outputs[1].LatencyMs = 140;
             c.Outputs[1].ListenTicked = true;
             c.Outputs[0].ListenTicked = true;
             c.WantRunning = running;

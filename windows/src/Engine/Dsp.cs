@@ -526,11 +526,21 @@ namespace DualEarbuds
 
         public BufferMode Mode = BufferMode.Smart;
         public int ManualMs = 80;
+        int floorMs = MinMs;
         int targetMs = StartMs;
+
+        // The lowest target: 30 ms (protocol), 20 ms while the host asks for lip-sync (v3.3).
+        public int FloorMs
+        {
+            get { return floorMs; }
+            set { floorMs = Math.Max(10, Math.Min(MinMs, value)); if (targetMs < floorMs) targetMs = floorMs; }
+        }
+
+        int ClampT(int ms) { return Math.Max(floorMs, Math.Min(MaxMs, ms)); }
         long lastUnderrun = long.MinValue / 2, lastShrink, lastArrival = long.MinValue, windowStart;
         P2Quantile cur = new P2Quantile(0.99), prev = new P2Quantile(0.99);
 
-        public int TargetMs { get { return Mode == BufferMode.Manual ? Clamp(ManualMs) : targetMs; } }
+        public int TargetMs { get { return Mode == BufferMode.Manual ? ClampT(ManualMs) : targetMs; } }
 
         public static int Clamp(int ms) { return Math.Max(MinMs, Math.Min(MaxMs, ms)); }
 
@@ -568,7 +578,7 @@ namespace DualEarbuds
 
         public void OnUnderrun(long now)
         {
-            targetMs = Clamp(targetMs + UnderrunStepMs);
+            targetMs = ClampT(targetMs + UnderrunStepMs);
             lastUnderrun = now;
             lastShrink = now;
         }
@@ -579,7 +589,7 @@ namespace DualEarbuds
             if (Mode == BufferMode.Manual) return;
             if (Mode == BufferMode.Smart)
             {
-                int want = Clamp((int)Math.Ceiling(JitterP99) + 10);
+                int want = ClampT((int)Math.Ceiling(JitterP99) + 10);
                 if (want > targetMs && now - lastUnderrun > 0) { targetMs = want; lastShrink = now; return; }
                 if (targetMs > want && now - lastUnderrun >= HoldMs && now - lastShrink >= ShrinkEveryMs)
                 {
@@ -589,9 +599,9 @@ namespace DualEarbuds
                 return;
             }
             // Steady: after 20 s with no underruns, -5 ms per 5 s down to the minimum
-            if (now - lastUnderrun >= CalmMs && now - lastShrink >= ShrinkEveryMs && targetMs > MinMs)
+            if (now - lastUnderrun >= CalmMs && now - lastShrink >= ShrinkEveryMs && targetMs > floorMs)
             {
-                targetMs = Math.Max(MinMs, targetMs - ShrinkStepMs);
+                targetMs = Math.Max(floorMs, targetMs - ShrinkStepMs);
                 lastShrink = now;
             }
         }

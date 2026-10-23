@@ -83,7 +83,7 @@ namespace DualEarbuds
             return 0;
         }
 
-        static readonly string[] Extras = { "phones-pin", "listen-to-device", "settings-appearance", "settings-smart" };
+        static readonly string[] Extras = { "phones-pin", "listen-to-device", "settings-appearance", "settings-smart", "home-outputs", "home-together" };
 
         // The newer screens with the demo data they need.
         static MainView BuildExtra(string shot, string theme)
@@ -112,6 +112,16 @@ namespace DualEarbuds
                     v.Navigate("settings");
                     Layout(v);
                     v.ScrollTo("anchor_appearance");
+                    break;
+                case "home-outputs":
+                    // Home grew a Sync priority row: this one shows the outputs (with the low-latency hint) and listeners
+                    v.Navigate("home");
+                    Layout(v);
+                    v.ScrollTo("anchor_outputs");
+                    break;
+                case "home-together":
+                    c.SetPriority(SyncPriority.Together);
+                    v.Navigate("home");
                     break;
                 case "settings-smart":
                     c.Settings.SmartEq = "both";

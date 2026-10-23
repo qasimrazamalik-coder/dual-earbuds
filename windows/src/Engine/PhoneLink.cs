@@ -146,12 +146,27 @@ namespace DualEarbuds
         volatile string suggestedEq;         // null = no suggestion
         volatile bool talking;
         // v3.2 common deadline: P follows the listeners' needs and the host's own outputs.
-        readonly PlayoutPlanner planner = new PlayoutPlanner();
+        readonly PlayoutPlanner planner = new PlayoutPlanner { FloorMs = SyncPriority.LipSyncFloorMs };
         volatile int playoutMs = DefaultPlayoutMs;
         volatile int localNeedMs;
         public int PlayoutMs { get { return playoutMs; } }
         // The slowest ticked local output's need (set by the app); 0 = no local output.
         public int LocalNeedMs { get { return localNeedMs; } set { localNeedMs = Math.Max(0, value); } }
+        // v3.3 sync priority (host setting, default lip-sync): announced in hello and playout; sets P's floor.
+        volatile string priority = SyncPriority.LipSync;
+        volatile bool priorityChanged;
+        public string Priority
+        {
+            get { return priority; }
+            set
+            {
+                string p = SyncPriority.Normalize(value);
+                if (p == priority) return;
+                priority = p;
+                planner.FloorMs = SyncPriority.FloorMs(p);
+                priorityChanged = true;
+            }
+        }
         public event Action<int> PlayoutChanged;   // raised on the housekeeping thread
         // (listener id, action) for an allowed remote command; runs on that listener's read thread
         public Action<string, string> RemoteAction;
@@ -429,13 +444,19 @@ namespace DualEarbuds
         public string HelloJson(string token)
         {
             return string.Format(CultureInfo.InvariantCulture,
-                "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7}",
+                "{{\"type\":\"hello\",\"protocol\":{0},\"pc\":\"{1}\",\"version\":\"{2}\",\"host\":\"{3}\",\"rate\":{4},\"party\":{5},\"playoutMs\":{6},\"remote\":{7},\"priority\":\"{8}\"",
                 AppInfo.Protocol, MiniJson.Escape(PcName), AppInfo.Version, AppInfo.Host, mirroring ? rate : 0, party ? "true" : "false",
-                playoutMs, remoteControl ? "true" : "false") + SourceFields(false) +
+                playoutMs, remoteControl ? "true" : "false", priority) + SourceFields(false) +
                 (token != null && udp != null ? ",\"udp\":" + Port.ToString(CultureInfo.InvariantCulture) + ",\"token\":\"" + token + "\"" : "") + "}";
         }
 
         public static string PlayoutMessage(int ms) { return "{\"type\":\"playout\",\"ms\":" + ms.ToString(CultureInfo.InvariantCulture) + "}"; }
+
+        // v3.3: playout carries the sync priority too, so listeners switch their need rule with it.
+        public static string PlayoutMessage(int ms, string priority)
+        {
+            return "{\"type\":\"playout\",\"ms\":" + ms.ToString(CultureInfo.InvariantCulture) + ",\"priority\":\"" + SyncPriority.Normalize(priority) + "\"}";
+        }
 
         // Recomputes P (call about once a second); announces it when it changed.
         public int UpdatePlayout(long now)
@@ -444,13 +465,16 @@ namespace DualEarbuds
             lock (lk)
                 foreach (var c in conns)
                     if (!c.Closed) { var n = c.SyncedNeed; if (n > 0) needs.Add(n); }
-            int target = PlayoutPlanner.Choose(needs, localNeedMs);
+            string pr = priority;
+            int target = PlayoutPlanner.Choose(needs, localNeedMs, SyncPriority.FloorMs(pr));
             int was = playoutMs;
             int p = planner.Step(target, now);
-            if (p != was)
+            bool prChanged = priorityChanged;
+            priorityChanged = false;
+            if (p != was || prChanged)
             {
                 playoutMs = p;
-                SendTextAll(PlayoutMessage(p));
+                SendTextAll(PlayoutMessage(p, pr));
                 var h = PlayoutChanged;
                 if (h != null) { try { h(p); } catch (Exception ex) { Log.Warn("Playout: " + ex.Message); } }
             }

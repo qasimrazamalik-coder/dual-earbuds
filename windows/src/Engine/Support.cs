@@ -172,6 +172,7 @@ namespace DualEarbuds
         public string Dialogue = "off";       // off | light | strong | night
         public string Buffer = "smart";       // smart | steady | manual (listener mode)
         public int BufferMs = 80;
+        public string Priority = SyncPriority.LipSync;   // lipsync | together (protocol v3.3 "Sync priority", host)
         public Dictionary<string, double> LatencyByName = new Dictionary<string, double>();   // calibrated output latency
         public List<HearingProfile> Profiles = new List<HearingProfile>();
 
@@ -262,6 +263,7 @@ namespace DualEarbuds
                             case "smarteq": if (OneOf(v, SmartEqValues)) s.SmartEq = v; break;
                             case "dialogue": if (OneOf(v, DialogueValues)) s.Dialogue = v; break;
                             case "buffer": if (OneOf(v, BufferValues)) s.Buffer = v; break;
+                            case "priority": s.Priority = SyncPriority.Normalize(v); break;
                             case "bufferms":
                                 int bm;
                                 if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out bm)) s.BufferMs = JitterBuffer.Clamp(bm);
@@ -338,6 +340,7 @@ namespace DualEarbuds
                 lines.Add("updatechecked\t" + LastUpdateCheckUtc.Ticks.ToString(CultureInfo.InvariantCulture));
                 lines.Add("netscope\t" + NetworkScope);
                 lines.Add("remote\t" + B(RemoteControl));
+                lines.Add("priority\t" + Priority);
                 lines.Add("shownet\t" + B(ShowOnNetwork));
                 lines.Add("pinon\t" + B(PinOn));
                 lines.Add("pin\t" + Pin);

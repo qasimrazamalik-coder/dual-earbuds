@@ -140,7 +140,8 @@ namespace DualEarbuds
         public string ActionId;   // what the button does: "firewall", "network", "bluetooth", "calibrate:<id>", "power", "battery", "wifi"
     }
 
-    public class CheckOutput { public string Id, Name; public bool Bluetooth, Enabled, Calibrated; public double LatencyMs; }
+    // Source: the capture source output, the reference ear in lip-sync (protocol v3.3); not counted as earbuds.
+    public class CheckOutput { public string Id, Name; public bool Bluetooth, Enabled, Calibrated, Source; public double LatencyMs; }
     public class CheckListener { public string Name, Client; public int NeedMs; public bool Synced; public string Transport; }
 
     public class CheckInput
@@ -155,11 +156,22 @@ namespace DualEarbuds
         public bool Wired;                    // on Ethernet (no Wi-Fi row needed)
         public List<CheckListener> Listeners = new List<CheckListener>();
         public int PlayoutMs;
+        public bool LipSync;                  // protocol v3.3 sync priority of this host
     }
 
     public static class SetupCheck
     {
         public const int PoorNeedMs = 180;    // a listener needing more than this has poor Wi-Fi
+        public const int SlowEarbudsMs = 150; // protocol v3.3 low-latency earbuds hint above this
+
+        // Protocol v3.3 "Low-latency earbuds hint" (Windows: no codec line, that is an Android setting).
+        // null when the output isn't calibrated or is fast enough.
+        public static string LowLatencyHint(double calibratedMs)
+        {
+            if (!(calibratedMs > SlowEarbudsMs)) return null;
+            return "These earbuds add " + Math.Round(calibratedMs).ToString(CultureInfo.InvariantCulture) +
+                   " ms. If they have a game or low-latency mode (often in the earbuds' own app or a triple tap), turn it on and calibrate again.";
+        }
 
         public static List<CheckItem> Build(CheckInput x)
         {
@@ -232,7 +244,7 @@ namespace DualEarbuds
 
             // Bluetooth earbuds
             int bt = 0;
-            foreach (var o in x.Outputs) if (o.Bluetooth) bt++;
+            foreach (var o in x.Outputs) if (o.Bluetooth && !o.Source) bt++;
             var bte = new CheckItem { Id = "bluetooth", Title = "Bluetooth earbuds" };
             bte.Value = bt.ToString(CultureInfo.InvariantCulture) + " connected";
             if (bt >= 1) { bte.Status = CheckStatus.Good; bte.Detail = bt == 1 ? "One pair on this laptop. A second pair can listen through a phone or another laptop." : "Each pair plays on its own output."; }
@@ -243,13 +255,21 @@ namespace DualEarbuds
             foreach (var o in x.Outputs)
             {
                 if (!o.Enabled) continue;
-                var c = new CheckItem { Id = "cal:" + o.Id, Title = "Calibrated: " + o.Name };
-                if (o.Calibrated) { c.Status = CheckStatus.Good; c.Value = Math.Round(o.LatencyMs).ToString(CultureInfo.InvariantCulture) + " ms"; c.Detail = "Measured with the microphone: this pair plays on the shared deadline."; c.Action = "Measure again"; c.ActionId = "calibrate:" + o.Id; }
+                var c = new CheckItem { Id = "cal:" + o.Id, Title = (o.Source ? "Calibrated (source): " : "Calibrated: ") + o.Name };
+                if (o.Calibrated)
+                {
+                    c.Status = CheckStatus.Good; c.Value = Math.Round(o.LatencyMs).ToString(CultureInfo.InvariantCulture) + " ms";
+                    c.Detail = o.Source ? "Measured with the microphone: the other ears line up with this pair." : "Measured with the microphone: this pair plays on the shared deadline.";
+                    string slow = LowLatencyHint(o.LatencyMs);
+                    if (slow != null) c.Detail = slow;   // still calibrated (good); the hint says how to get less delay
+                    c.Action = "Measure again"; c.ActionId = "calibrate:" + o.Id;
+                }
                 else
                 {
                     c.Status = o.Bluetooth ? CheckStatus.Warn : CheckStatus.Info;
                     c.Value = "~" + Math.Round(o.LatencyMs).ToString(CultureInfo.InvariantCulture) + " ms";
-                    c.Detail = o.Bluetooth ? "Estimated. Bluetooth delay differs per model by up to 100 ms: calibrate so this pair lines up with the others."
+                    c.Detail = o.Source ? "Estimated. The video on this laptop plays with this output; calibrate it so the other ears line up with the picture."
+                             : o.Bluetooth ? "Estimated. Bluetooth delay differs per model by up to 100 ms: calibrate so this pair lines up with the others."
                                            : "Estimated from Windows. Wired outputs are usually close; calibrate for exact sync.";
                     c.Action = "Calibrate"; c.ActionId = "calibrate:" + o.Id;
                 }
@@ -284,7 +304,8 @@ namespace DualEarbuds
                 else
                 {
                     li.Status = CheckStatus.Warn; li.Value = poor.Count.ToString(CultureInfo.InvariantCulture) + " slow";
-                    li.Detail = string.Join(", ", poor.ToArray()) + ": everyone waits for the slowest device. Bring it closer to the router, or use a 5 GHz hotspot.";
+                    li.Detail = string.Join(", ", poor.ToArray()) + (x.LipSync ? ": these play later than this laptop." : ": everyone waits for the slowest device.") +
+                                " Bring it closer to the router, or use a 5 GHz hotspot.";
                 }
                 list.Add(li);
             }

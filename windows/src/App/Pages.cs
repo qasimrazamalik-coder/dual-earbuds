@@ -100,7 +100,7 @@ namespace DualEarbuds
         readonly EarRow ear;
         readonly CheckBox sw;
         readonly StackPanel battery;
-        readonly TextBlock batteryText, error, note, delayVal, volVal;
+        readonly TextBlock batteryText, error, note, slowHint, delayVal, volVal;
         readonly Path batteryIcon;
         readonly Slider delay, volume;
         readonly Button test, calibrate;
@@ -179,6 +179,12 @@ namespace DualEarbuds
             note.Margin = new Thickness(62, 0, 16, 12);
             note.Visibility = Visibility.Collapsed;
             Root.Children.Add(note);
+            // protocol v3.3 low-latency earbuds hint, next to the calibration result
+            slowHint = Ui.Text("", 12, FontWeights.Normal, "Muted");
+            slowHint.TextWrapping = TextWrapping.Wrap;
+            slowHint.Margin = new Thickness(62, 0, 16, 12);
+            slowHint.Visibility = Visibility.Collapsed;
+            Root.Children.Add(slowHint);
             error = Ui.Text("", 12, FontWeights.Normal, "Bad");
             error.Margin = new Thickness(62, 0, 16, 12);
             error.Visibility = Visibility.Collapsed;
@@ -229,24 +235,30 @@ namespace DualEarbuds
             sw.IsChecked = vm.Enabled;
             sw.IsEnabled = !vm.IsSource;
             sw.ToolTip = vm.IsSource ? "The sound comes from here" : null;
-            calibrate.IsEnabled = !vm.IsSource && !vm.Calibrating;
+            // lip-sync: the source is the reference ear, so measuring it lines every other ear up with the picture
+            calibrate.IsEnabled = (!vm.IsSource || ctl.LipSync) && !vm.Calibrating;
             calibrate.Content = vm.Calibrating ? "Listening" : vm.LatencyMeasured ? "Recalibrate" : "Calibrate";
             test.IsEnabled = !vm.IsSource;
             Ui.SetBattery(battery, batteryText, batteryIcon, vm.Battery);
             adjust.Visibility = active ? Visibility.Visible : Visibility.Collapsed;
             meter.Visibility = vm.Kind == StateKind.Playing || vm.IsSource ? Visibility.Visible : Visibility.Hidden;
             string sub;
-            if (vm.IsSource) sub = "source · plays without delay";
-            else if (vm.Calibrating) sub = "listening for the clicks";
+            if (vm.Calibrating) sub = "listening for the clicks";
+            else if (vm.IsSource)
+                sub = ctl.LipSync ? "source · reference ear · " + (vm.LatencyMeasured ? Kit.Ms(vm.LatencyMs) + " measured" : "~" + Kit.Ms(ctl.SourceLatencyMs) + " estimated")
+                                  : "source · plays without delay";
             else
             {
                 string lat = vm.LatencyMeasured ? Kit.Ms(vm.LatencyMs) + " measured" : "~" + Kit.Ms(vm.EffectiveLatencyMs) + " estimated";
                 string state = vm.Kind == StateKind.Playing ? "playing" : vm.State.ToLowerInvariant();
-                sub = state + " · " + lat + (active ? " · +" + vm.ExtraDelayMs + " ms to P" : "") + (vm.DelayMs > 0 ? " · delay " + vm.DelayMs + " ms" : "") +
+                sub = state + " · " + lat + (active ? " · +" + vm.ExtraDelayMs + (ctl.LipSync ? " ms to the source" : " ms to P") : "") + (vm.DelayMs > 0 ? " · delay " + vm.DelayMs + " ms" : "") +
                       (os.EqAuto && ctl.SmartEqOn && active ? " · EQ " + vm.Effects.EffectivePreset : "");
             }
             ear.Update(vm.Name, sub, ctl.LocalOffsetMs(vm));
             ear.Dim(!vm.Enabled && !vm.IsSource);
+            string slow = vm.LatencyMeasured && !vm.Calibrating ? SetupCheck.LowLatencyHint(vm.LatencyMs) : null;
+            slowHint.Text = slow ?? "";
+            slowHint.Visibility = slow != null ? Visibility.Visible : Visibility.Collapsed;
             if (vm.Error != null) { error.Text = vm.Error; error.Visibility = Visibility.Visible; }
             else error.Visibility = Visibility.Collapsed;
             updating = false;
@@ -350,7 +362,8 @@ namespace DualEarbuds
         readonly ComboBox source, apps;
         readonly Grid appRow, sourceRow;
         readonly TextBlock appNote;
-        readonly RadioButton[] modeButtons;
+        readonly RadioButton[] modeButtons, prioButtons;
+        readonly TextBlock prioHint;
         readonly RowPanel outputs = new RowPanel(), listeners = new RowPanel();
         readonly List<OutputRow> outRows = new List<OutputRow>();
         readonly Dictionary<string, ListenerRow> lisRows = new Dictionary<string, ListenerRow>();
@@ -413,10 +426,22 @@ namespace DualEarbuds
             appCtl.Children.Add(refreshApps);
             appRow = Kit.Row("App", "", appCtl, out appNote);
             src.Add(appRow);
+            // protocol v3.3 sync priority
+            var prioSeg = Kit.Segmented("priority", new[] { "Lip-sync", "Everyone together" }, ctl.LipSync ? 0 : 1, i =>
+            {
+                if (suppress) return;
+                ctl.SetPriority(i == 0 ? SyncPriority.LipSync : SyncPriority.Together);
+                Refresh();
+            }, out prioButtons);
+            prioButtons[0].ToolTip = "The laptop's own sound stays on time with the picture. Other ears line up with it; phones on slow Wi-Fi may play a little later.";
+            prioButtons[1].ToolTip = "One deadline for every ear: the laptop's sound waits for the slowest phone.";
+            src.Add(Kit.Row("Sync priority", PriorityHint(ctl.LipSync), prioSeg, out prioHint));
             root.Children.Add(src.Root);
 
             // outputs
-            root.Children.Add(Kit.Section("Outputs", out outCount, null));
+            var outSec = Kit.Section("Outputs", out outCount, null);
+            outSec.Name = "anchor_outputs";
+            root.Children.Add(outSec);
             root.Children.Add(outputs.Root);
 
             // listeners
@@ -516,6 +541,10 @@ namespace DualEarbuds
                 : "Only " + ctl.SourceDescription + " is shared, with its child windows. Calls and notifications stay here.";
             appNote.Text = note;
             appNote.Visibility = Visibility.Visible;
+            suppress = true;
+            prioButtons[ctl.LipSync ? 0 : 1].IsChecked = true;
+            suppress = false;
+            prioHint.Text = PriorityHint(ctl.LipSync);
 
             int onCount = 0, total = 0;
             foreach (var o in ctl.Outputs) { if (o.IsSource) continue; total++; if (o.Enabled) onCount++; }
@@ -528,6 +557,13 @@ namespace DualEarbuds
             if (!same) RebuildListeners();
             else foreach (var p in ctl.Phones) lisRows[p.Id ?? ""].Update(p, ctl.Party);
             lisCount.Text = ctl.Phones.Count + (ctl.Phones.Count > 0 ? " · P " + ctl.PlayoutMs + " ms" : "");
+        }
+
+        // One plain line on what the chosen priority does.
+        public static string PriorityHint(bool lipSync)
+        {
+            return lipSync ? "Laptop sound matches the picture. Phones may play a little later than the laptop."
+                           : "Every ear plays at the same moment. Laptop sound waits for the slowest phone.";
         }
 
         public void Animate()
