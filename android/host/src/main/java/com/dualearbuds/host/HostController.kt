@@ -13,6 +13,7 @@ import com.dualearbuds.host.server.LinkKey
 import com.dualearbuds.host.server.ListenerInfo
 import com.dualearbuds.host.server.LocalOutput
 import com.dualearbuds.host.server.RoomPin
+import com.dualearbuds.host.server.SyncPriority
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -141,6 +142,8 @@ object HostController {
     fun setRemote(context: Context, on: Boolean) = changePrefs(context) { it.copy(remote = on) }
 
     fun setNoiseCancel(context: Context, level: NoiseCancel) = changePrefs(context) { it.copy(noiseCancel = level) }
+
+    fun setSyncPriority(context: Context, priority: SyncPriority) = changePrefs(context) { it.copy(syncPriority = priority) }
 
     /** null = all apps. */
     fun setSource(context: Context, app: AppChoice?) = changePrefs(context, sourceChanged = true) { it.copy(app = app) }

@@ -100,4 +100,17 @@ class JitterBufferTest {
         assertEquals(0, jb.underruns)
         assertEquals(80, jb.targetMs())
     }
+
+    @Test
+    fun lipSyncLowersTheAdaptiveFloorTo20() {
+        val jb = JitterBuffer()
+        jb.mode = BufferMode.STEADY
+        jb.reset(0)
+        jb.priority = com.dualearbuds.companion.audio.sync.SyncPriority.LIPSYNC
+        jb.poll(200_000)
+        assertEquals(20, jb.adaptiveMs)
+        jb.priority = com.dualearbuds.companion.audio.sync.SyncPriority.TOGETHER
+        jb.poll(200_001)
+        assertEquals(30, jb.adaptiveMs)
+    }
 }

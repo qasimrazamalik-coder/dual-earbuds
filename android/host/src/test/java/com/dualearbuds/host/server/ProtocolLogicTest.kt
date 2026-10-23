@@ -80,4 +80,19 @@ class ProtocolLogicTest {
         assertEquals(true, st.synced)
         assertNull(st.device)
     }
+
+    @Test
+    fun priorityInHelloAndPlayout() {
+        val f = HostFacts(HostIdentity(pcName = "Phone", version = "3.3.0", host = "android"), 48_000, false, 8, false, false, "all", null, 150)
+        val hello = MiniJson.parseObject(HostMessages.hello(f))!!
+        assertEquals("lipsync", hello["priority"]) // default
+        val together = MiniJson.parseObject(HostMessages.hello(f.copy(priority = SyncPriority.TOGETHER)))!!
+        assertEquals("together", together["priority"])
+        val po = MiniJson.parseObject(HostMessages.playout(140, SyncPriority.TOGETHER))!!
+        assertEquals(140.0, po["ms"])
+        assertEquals("together", po["priority"])
+        assertEquals(SyncPriority.TOGETHER, SyncPriority.parse("together"))
+        assertEquals(SyncPriority.LIPSYNC, SyncPriority.parse(null))
+        assertEquals(SyncPriority.LIPSYNC, SyncPriority.parse("junk"))
+    }
 }

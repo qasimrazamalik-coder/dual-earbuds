@@ -28,7 +28,8 @@ interface BufferController {
  */
 class SmartBufferController(
     val startMs: Int = 60,
-    val minMs: Int = 30,
+    /** Lowest value; v3.3 lip-sync sets 20 ms. */
+    var minMs: Int = 30,
     val maxMs: Int = 300,
     val marginMs: Int = 10,
     val underrunStepMs: Int = 20,

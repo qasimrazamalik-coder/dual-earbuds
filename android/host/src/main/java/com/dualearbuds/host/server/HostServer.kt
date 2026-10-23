@@ -99,6 +99,11 @@ class HostServer(
     @Volatile
     private var sourceApp: String? = null
 
+    /** v3.3 sync priority, announced in `hello` and `playout`. P is worked out the same way for both on Android. */
+    @Volatile
+    var priority: SyncPriority = SyncPriority.DEFAULT
+        private set
+
     /** The common deadline P (v3.2) now in force, announced with `playout`. */
     @Volatile
     var playoutMs: Int = HostMessages.DEFAULT_PLAYOUT_MS
@@ -285,6 +290,13 @@ class HostServer(
         localNeedMs = ms.coerceIn(0, Playout.MAX_MS)
     }
 
+    /** Sets the sync priority; listeners hear it at once in a `playout` message. */
+    fun setPriority(p: SyncPriority) {
+        if (priority == p) return
+        priority = p
+        broadcastText(HostMessages.playout(playoutMs, p))
+    }
+
     fun setRemoteAllowed(on: Boolean) {
         remoteAllowed = on
     }
@@ -345,7 +357,8 @@ class HostServer(
         remote = remoteAllowed,
         source = source,
         app = sourceApp,
-        playoutMs = playoutMs
+        playoutMs = playoutMs,
+        priority = priority
     )
 
     fun infoJson(): String = HostMessages.info(facts())
@@ -703,7 +716,7 @@ class HostServer(
         val target = Playout.target(needs.asIterable().take(n), localNeedMs)
         if (playout.step(target, now, anyoneSynced)) {
             playoutMs = playout.currentMs
-            broadcastText(HostMessages.playout(playoutMs))
+            broadcastText(HostMessages.playout(playoutMs, priority))
             onChange?.invoke()
         }
     }

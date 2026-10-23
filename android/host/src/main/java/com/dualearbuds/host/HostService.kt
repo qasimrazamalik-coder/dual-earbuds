@@ -237,6 +237,7 @@ class HostService : Service() {
         srv.setParty(prefs.party)
         srv.setPin(prefs.activePin)
         srv.setRemoteAllowed(prefs.remote)
+        srv.setPriority(prefs.syncPriority)
     }
 
     /** Creates the AudioRecord for [app] (null = all apps) and starts the capture thread. */

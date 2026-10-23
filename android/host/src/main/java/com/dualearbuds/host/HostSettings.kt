@@ -6,6 +6,7 @@ import com.dualearbuds.host.audio.NoiseCancel
 import com.dualearbuds.host.net.LinkBuilder
 import com.dualearbuds.host.server.LinkKey
 import com.dualearbuds.host.server.RoomPin
+import com.dualearbuds.host.server.SyncPriority
 
 /** The one app whose sound is shared ("One app only"). */
 data class AppChoice(val packageName: String, val label: String)
@@ -19,7 +20,9 @@ data class HostPrefs(
     val pin: String = "",
     val remote: Boolean = false,
     val app: AppChoice? = null,
-    val noiseCancel: NoiseCancel = NoiseCancel.DEFAULT
+    val noiseCancel: NoiseCancel = NoiseCancel.DEFAULT,
+    /** v3.3 "Sync priority": Lip-sync (default) or Everyone together. */
+    val syncPriority: SyncPriority = SyncPriority.DEFAULT
 ) {
     /** The PIN in force: only in Party mode, only when switched on and valid. */
     val activePin: String? get() = if (party && pinOn && RoomPin.isValid(pin)) pin else null
@@ -40,7 +43,8 @@ internal class HostSettings(context: Context) {
             pin = p.getString(K_PIN, "").orEmpty(),
             remote = p.getBoolean(K_REMOTE, false),
             app = pkg?.let { AppChoice(it, p.getString(K_APP_LABEL, null) ?: it) },
-            noiseCancel = NoiseCancel.parse(p.getString(K_NC, null))
+            noiseCancel = NoiseCancel.parse(p.getString(K_NC, null)),
+            syncPriority = SyncPriority.parse(p.getString(K_SYNC, null))
         )
     }
 
@@ -55,6 +59,7 @@ internal class HostSettings(context: Context) {
             .putString(K_APP_PKG, s.app?.packageName)
             .putString(K_APP_LABEL, s.app?.label)
             .putString(K_NC, s.noiseCancel.name)
+            .putString(K_SYNC, s.syncPriority.wire)
             .apply()
     }
 
@@ -74,5 +79,6 @@ internal class HostSettings(context: Context) {
         const val K_APP_PKG = "source_app_pkg"
         const val K_APP_LABEL = "source_app_label"
         const val K_NC = "noise_cancel"
+        const val K_SYNC = "sync_priority"
     }
 }

@@ -1,6 +1,7 @@
 package com.dualearbuds.companion.net
 
 import android.os.SystemClock
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -46,6 +47,12 @@ class StreamConnection(
 
         /** v3.1 `hello` extras: target delay, remote control allowed, sound source ("all"/"app") and app name. */
         fun onHelloExtras(playoutMs: Int, remote: Boolean, source: String, app: String) = Unit
+
+        /**
+         * v3.3 sync priority. Sent with every `hello` (TOGETHER when the host doesn't say: v3.2 rules) and when a
+         * `playout` message carries one.
+         */
+        fun onPriority(priority: SyncPriority) = Unit
 
         /** v3.1 `sync` reply: our [c] echoed with host time [h]. */
         fun onSyncReply(c: Double, h: Double) = Unit
@@ -218,6 +225,7 @@ class StreamConnection(
                     o.optString("source", "all").ifBlank { "all" },
                     o.optString("sourceApp", "").ifBlank { o.optString("app", "") }
                 )
+                callbacks.onPriority(SyncPriority.fromWire(o.optString("priority", "")) ?: SyncPriority.TOGETHER)
                 val udpPort = o.optInt("udp", 0)
                 val token = o.optString("token", "")
                 if (udpPort in 1..65535 && token.isNotBlank()) callbacks.onUdpOffer(udpPort, token)
@@ -240,6 +248,7 @@ class StreamConnection(
             }
             "playout" -> {
                 val ms = o.optDouble("ms", Double.NaN)
+                SyncPriority.fromWire(o.optString("priority", ""))?.let { callbacks.onPriority(it) }
                 if (!ms.isNaN()) callbacks.onPlayout(ms.toInt().coerceIn(20, 2_000))
             }
             "talk" -> callbacks.onTalk(o.optBoolean("on", false))

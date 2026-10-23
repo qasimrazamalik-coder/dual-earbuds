@@ -1,5 +1,21 @@
 package com.dualearbuds.host.server
 
+/**
+ * v3.3 sync priority, `"priority"` in `hello` and `playout`. Lip-sync (default): this phone's own ear is the
+ * reference and listeners use the tighter need (p95 over 10 s + 5); Everyone together: v3.2 rules. On an
+ * Android host P is worked out the same way for both.
+ */
+enum class SyncPriority(val wire: String) {
+    LIPSYNC("lipsync"),
+    TOGETHER("together");
+
+    companion object {
+        val DEFAULT = LIPSYNC
+
+        fun parse(value: String?): SyncPriority = entries.firstOrNull { it.wire == value || it.name == value } ?: DEFAULT
+    }
+}
+
 /** What `/info` and `hello` report about this host at one moment. */
 data class HostFacts(
     val identity: HostIdentity,
@@ -12,7 +28,8 @@ data class HostFacts(
     val source: String,
     /** App name when [source] is "app". */
     val app: String?,
-    val playoutMs: Int
+    val playoutMs: Int,
+    val priority: SyncPriority = SyncPriority.DEFAULT
 )
 
 /** A listener → host `remote` action (v3.1). */
@@ -40,7 +57,7 @@ data class ListenerStatus(
     val syncErrMs: Int? = null
 )
 
-/** JSON messages of protocol v3 + v3.1 + v3.2, host side. */
+/** JSON messages of protocol v3 + v3.1 + v3.2 + v3.3, host side. */
 object HostMessages {
     const val PROTOCOL = 3
     const val DEFAULT_PLAYOUT_MS = 120
@@ -82,7 +99,8 @@ object HostMessages {
             "party" to f.party,
             "playoutMs" to f.playoutMs,
             "remote" to f.remote,
-            "source" to f.source
+            "source" to f.source,
+            "priority" to f.priority.wire
         )
         if (f.source == "app" && !f.app.isNullOrBlank()) pairs += "app" to f.app
         if (udpPort > 0 && token != null) {
@@ -100,7 +118,8 @@ object HostMessages {
     fun talk(on: Boolean) = MiniJson.obj("type" to "talk", "on" to on)
     fun clock(seq: Long, hostMs: Long) = MiniJson.obj("type" to "clock", "seq" to seq, "h" to hostMs)
     fun syncReply(c: Double, hostMs: Long) = MiniJson.obj("type" to "sync", "c" to c, "h" to hostMs)
-    fun playout(ms: Int) = MiniJson.obj("type" to "playout", "ms" to ms)
+    fun playout(ms: Int, priority: SyncPriority = SyncPriority.DEFAULT) =
+        MiniJson.obj("type" to "playout", "ms" to ms, "priority" to priority.wire)
 
     /** Reads a `status` message, clamping every number to its protocol range. */
     fun parseStatus(m: Map<String, Any?>): ListenerStatus = ListenerStatus(

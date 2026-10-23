@@ -77,6 +77,7 @@ import com.dualearbuds.host.ui.PrimaryButton
 import com.dualearbuds.host.ui.QuietButton
 import com.dualearbuds.host.ui.SetupSection
 import com.dualearbuds.host.ui.SourceSection
+import com.dualearbuds.host.ui.SyncSection
 import com.dualearbuds.host.ui.TalkSection
 import com.dualearbuds.host.ui.Type
 import com.dualearbuds.host.ui.tokens
@@ -344,6 +345,7 @@ fun HostScreen(
                 if (sharing) TalkSection(state, onTalk = { toggleTalk(it) })
                 PartySection(state)
                 SourceSection(state)
+                SyncSection(state)
                 NetworkSection(state)
                 GuideSection()
                 Spacer(Modifier.height(32.dp))

@@ -1,5 +1,6 @@
 package com.dualearbuds.companion.audio
 
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import kotlin.math.max
 
 /**
@@ -49,6 +50,17 @@ class JitterBuffer(
     /** Arrival jitter over the last 30 s, for v3.2 `needMs` (independent of the buffer mode). */
     private val arrivals = ArrivalJitter()
 
+    /** p95 arrival jitter over the last 10 s, for the v3.3 lip-sync `needMs`. */
+    private val arrivals10s = ArrivalJitter(windowMs = 10_000, quantile = 0.95)
+
+    /** v3.3: the host's sync priority; lip-sync lowers the adaptive buffer's floor to 20 ms. */
+    var priority: SyncPriority = SyncPriority.TOGETHER
+        set(value) {
+            field = value
+            steady.minMs = value.bufferFloorMs
+            smart.minMs = value.bufferFloorMs
+        }
+
     /** Milliseconds of sound waiting in the queue. */
     var queuedMs: Double = 0.0
         private set
@@ -86,6 +98,10 @@ class JitterBuffer(
     val jitterP99Over30sMs: Double
         get() = arrivals.p99Ms
 
+    /** p95 arrival jitter over the last 10 s (NaN until ~0.5 s of packets), for the v3.3 lip-sync need. */
+    val jitterP95Over10sMs: Double
+        get() = arrivals10s.valueMs
+
     /** The buffer we fill to: smart/steady/manual, plus the manual delay. */
     fun targetMs(): Int = adaptiveMs + max(0, delayMs)
 
@@ -95,6 +111,7 @@ class JitterBuffer(
         steady.reset(now)
         smart.reset(now)
         arrivals.reset(now)
+        arrivals10s.reset(now)
         resetCounters()
     }
 
@@ -117,6 +134,7 @@ class JitterBuffer(
         if (packet.seq >= 0 && !packet.concealed) {
             smart.onArrival(packet.seq, now)
             arrivals.onArrival(packet.seq, now)
+            arrivals10s.onArrival(packet.seq, now)
         }
         queue.addLast(packet)
         queuedMs += packet.durationMs

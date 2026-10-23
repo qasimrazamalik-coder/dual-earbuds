@@ -19,7 +19,8 @@ import kotlin.math.min
  */
 class AdaptiveBufferController(
     val startMs: Int = 60,
-    val minMs: Int = 30,
+    /** Lowest value; v3.3 lip-sync sets 20 ms. */
+    var minMs: Int = 30,
     val maxMs: Int = 300,
     val underrunStepMs: Int = 20,
     val holdMs: Long = 10_000,
@@ -67,6 +68,7 @@ class AdaptiveBufferController(
             currentMs = max(minMs, currentMs - decayStepMs)
             nextDecayAt += decayEveryMs
         }
+        if (currentMs < minMs) currentMs = minMs // the floor was raised
         return currentMs
     }
 }

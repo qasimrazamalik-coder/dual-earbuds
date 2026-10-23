@@ -32,6 +32,7 @@ import com.dualearbuds.companion.MainActivity
 import com.dualearbuds.companion.R
 import com.dualearbuds.companion.audio.AudioEngine
 import com.dualearbuds.companion.audio.sync.DeadlineNeed
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import com.dualearbuds.companion.bt.EarbudsMonitor
 import com.dualearbuds.companion.bt.EarbudsState
 import com.dualearbuds.companion.data.AppSettings
@@ -545,6 +546,8 @@ class PlaybackService : Service() {
             engine.setPlayoutMs(ms.toDouble())
             PlaybackController.update { it.copy(playoutMs = ms) }
         }
+
+        override fun onPriority(priority: SyncPriority) = engine.setPriority(priority)
 
         override fun onSource(source: String, app: String) {
             sourceApp = if (source == "app") app else ""
