@@ -1,5 +1,6 @@
 package com.dualearbuds.companion.setup
 
+import com.dualearbuds.companion.calib.LowLatencyHint
 import com.dualearbuds.companion.power.Brand
 import java.util.Locale
 
@@ -192,7 +193,7 @@ object SetupChecks {
             f.calibratedMs != null -> CheckItem(
                 CheckId.CALIBRATION, CheckGroup.EARBUDS, title, CheckStatus.OK,
                 String.format(Locale.US, "%.0f ms", f.calibratedMs),
-                "Measured for $name. Recalibrate after a firmware update.",
+                LowLatencyHint.text(f.calibratedMs) ?: "Measured for $name. Recalibrate after a firmware update.",
                 FixAction.CALIBRATE, "Again"
             )
             else -> CheckItem(

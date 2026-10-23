@@ -135,10 +135,13 @@ object SetupCheck {
 
         // ---- this phone's own ear
         val o = f.localOutput
+        val slow = if (o != null && o.isCalibrated) LowLatencyHint.text(o.calibratedMs) else null
         when {
             o != null && o.kind == LocalOutputKind.BLUETOOTH && o.isCalibrated -> out += CheckItem(
                 "earbuds", CheckLevel.OK, o.name.ifBlank { "Bluetooth earbuds" },
-                "Calibrated: ${o.needMs} ms. Listeners line up with what you hear."
+                slow ?: "Calibrated: ${o.needMs} ms. Listeners line up with what you hear.",
+                if (slow != null && f.canCalibrate) Fix.CALIBRATE else null,
+                if (slow != null && f.canCalibrate) "Calibrate again" else null
             )
             o != null && o.kind == LocalOutputKind.BLUETOOTH -> out += CheckItem(
                 "earbuds", CheckLevel.INFO, "${o.name.ifBlank { "Bluetooth earbuds" }} · not calibrated",
