@@ -54,8 +54,9 @@ namespace DualEarbuds
             TitleBar = new Grid();
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(208) });
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            // the readout takes what is left and trims at the narrowest window instead of running under the caption buttons
+            TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(0) });
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             TitleBar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             var brand = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(16, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
             brand.Children.Add(Ui.Logo(18));
@@ -76,12 +77,15 @@ namespace DualEarbuds
             Grid.SetColumn(pageName, 1);
             TitleBar.Children.Add(pageName);
 
-            var live = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0) };
+            var live = new DockPanel { HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 16, 0), LastChildFill = true };
             liveDot = new Ellipse { Width = 6, Height = 6, Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
             liveDot.SetResourceReference(Shape.FillProperty, "Accent");
+            DockPanel.SetDock(liveDot, Dock.Left);
             live.Children.Add(liveDot);
             readout = Ui.Mono("", 12, "Muted");
             readout.VerticalAlignment = VerticalAlignment.Center;
+            readout.TextWrapping = TextWrapping.NoWrap;
+            readout.TextTrimming = TextTrimming.CharacterEllipsis;
             live.Children.Add(readout);
             Grid.SetColumn(live, 3);
             TitleBar.Children.Add(live);

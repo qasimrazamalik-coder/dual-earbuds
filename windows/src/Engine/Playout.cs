@@ -11,6 +11,9 @@ namespace DualEarbuds
     {
         public const int MinMs = 40, MaxMs = 400, DecreasePerSecond = 5;
 
+        // The lowest P this planner moves to: 40 ms (v3.2 "Everyone together"), 30 ms in lip-sync (v3.3).
+        public int FloorMs = MinMs;
+
         int current = -1;
         long lastMs;
         double credit;   // ms the value may still come down (accumulated from elapsed time)
@@ -21,18 +24,25 @@ namespace DualEarbuds
         // P = clamp(max(listener needs, local need), 40, 400). Needs <= 0 are unknown and ignored.
         public static int Choose(IEnumerable<int> listenerNeeds, int localNeedMs)
         {
+            return Choose(listenerNeeds, localNeedMs, MinMs);
+        }
+
+        // Same with another floor (lip-sync: P = clamp(max(L0, listener needs), 30, 400)).
+        public static int Choose(IEnumerable<int> listenerNeeds, int localNeedMs, int floorMs)
+        {
             int m = Math.Max(0, localNeedMs);
             if (listenerNeeds != null)
                 foreach (int n in listenerNeeds) if (n > 0) m = Math.Max(m, Math.Min(MaxMs, n));
-            return Clamp(m);
+            return Clamp(m, floorMs);
         }
 
-        public static int Clamp(int ms) { return Math.Max(MinMs, Math.Min(MaxMs, ms)); }
+        public static int Clamp(int ms) { return Clamp(ms, MinMs); }
+        public static int Clamp(int ms, int floorMs) { return Math.Max(floorMs, Math.Min(MaxMs, ms)); }
 
         // Moves toward target; returns the value now in effect. Call about once a second (any rate works).
         public int Step(int target, long nowMs)
         {
-            target = Clamp(target);
+            target = Clamp(target, FloorMs);
             if (current < 0) { current = target; lastMs = nowMs; credit = 0; return current; }
             long dt = Math.Max(0, nowMs - lastMs);
             lastMs = nowMs;
@@ -44,6 +54,60 @@ namespace DualEarbuds
         }
 
         public void Reset() { current = -1; credit = 0; }
+    }
+
+    // Protocol v3.3 sync priority. Lip-sync: the capture source output (the ear the video player already
+    // compensates) is the reference; the laptop's other outputs line up with it, listeners play at P.
+    // Everyone together: v3.2, every ear (the laptop's own included) waits for the slowest one.
+    public static class SyncPriority
+    {
+        public const string LipSync = "lipsync", Together = "together";
+        public const int LipSyncFloorMs = 30;
+        public const int SourceBluetoothGuessMs = 180, SourceWiredGuessMs = 20;
+
+        // A host setting: anything but "together" is lip-sync (the default).
+        public static string Normalize(string p) { return p == Together ? Together : LipSync; }
+
+        // From the wire: a host that doesn't say (v3.2) means v3.2 rules.
+        public static string FromWire(string p) { return p == LipSync ? LipSync : Together; }
+
+        public static bool IsLipSync(string p) { return p == LipSync; }
+
+        public static int FloorMs(string p) { return IsLipSync(p) ? LipSyncFloorMs : PlayoutPlanner.MinMs; }
+
+        // L0, the reference ear's latency: calibrated, else what Windows reports (+ mixer, + the Bluetooth
+        // guess, the same estimate every other output gets), else 180 ms Bluetooth / 20 ms wired.
+        public static double SourceLatencyMs(double calibratedMs, double reportedMs, bool bluetooth)
+        {
+            if (calibratedMs > 0 || reportedMs > 0) return OutputTiming.LatencyMs(calibratedMs, reportedMs, bluetooth);
+            return bluetooth ? SourceBluetoothGuessMs : SourceWiredGuessMs;
+        }
+
+        // What the host puts in for P besides the listeners: L0 in lip-sync, the slowest ticked output otherwise.
+        public static int LocalNeedMs(string priority, double sourceLatencyMs, IEnumerable<double> tickedLatencies)
+        {
+            if (IsLipSync(priority)) return (int)Math.Ceiling(Math.Max(0, sourceLatencyMs));
+            return OutputTiming.LocalNeedMs(tickedLatencies ?? new double[0]);
+        }
+
+        // Lip-sync: P = clamp(max(L0, needs), 30, 400). Together: P = clamp(max(slowest output, needs), 40, 400).
+        public static int PlayoutTarget(string priority, IEnumerable<int> listenerNeeds, double sourceLatencyMs, IEnumerable<double> tickedLatencies)
+        {
+            return PlayoutPlanner.Choose(listenerNeeds, LocalNeedMs(priority, sourceLatencyMs, tickedLatencies), FloorMs(priority));
+        }
+
+        // When a ticked local output should be heard, in ms after capture: at L0 (lip-sync) or at P (together).
+        public static double ReferenceMs(string priority, int playoutMs, double sourceLatencyMs)
+        {
+            return IsLipSync(priority) ? Math.Max(0, sourceLatencyMs) : playoutMs;
+        }
+
+        // Extra delay for a ticked local output (the manual Delay adds on top):
+        // lip-sync max(0, L0 - latency), together max(0, P - latency); our own cushion counts as latency.
+        public static int LocalDelayMs(string priority, int playoutMs, double sourceLatencyMs, double latencyMs)
+        {
+            return OutputTiming.AutoDelayMs(ReferenceMs(priority, playoutMs, sourceLatencyMs), latencyMs);
+        }
     }
 
     // How one local output lines up with P. outputLatency = time from a frame entering the device's buffer
@@ -67,9 +131,11 @@ namespace DualEarbuds
         public static int NeedMs(double latencyMs) { return (int)Math.Ceiling(Math.Max(0, latencyMs) + CushionMs); }
 
         // Extra delay to queue so the output is heard at capture + P; the manual Delay always adds on top.
-        public static int AutoDelayMs(int playoutMs, double latencyMs)
+        public static int AutoDelayMs(int playoutMs, double latencyMs) { return AutoDelayMs((double)playoutMs, latencyMs); }
+
+        public static int AutoDelayMs(double referenceMs, double latencyMs)
         {
-            return Math.Max(0, (int)Math.Round(playoutMs - latencyMs - CushionMs));
+            return Math.Max(0, (int)Math.Round(referenceMs - latencyMs - CushionMs));
         }
 
         // The host's local need: the slowest ticked output.
@@ -102,11 +168,20 @@ namespace DualEarbuds
     {
         readonly long halfMs;
         readonly int packetMs;
-        P2Quantile cur = new P2Quantile(0.99), prev = new P2Quantile(0.99);
+        P2Quantile cur, prev;
         long windowStart = long.MinValue, lastArrival = long.MinValue;
         double maxCur, maxPrev;   // the estimator is weak with few samples: never report below what was seen recently
 
-        public JitterWindow(int windowMs, int packetMs) { halfMs = Math.Max(1000, windowMs / 2); this.packetMs = packetMs; }
+        public JitterWindow(int windowMs, int packetMs) : this(windowMs, packetMs, 0.99) { }
+
+        // quantile 0.95 over 10 s is the v3.3 lip-sync need; 0.99 over 30 s the v3.2 one.
+        public JitterWindow(int windowMs, int packetMs, double quantile)
+        {
+            halfMs = Math.Max(1000, windowMs / 2);
+            this.packetMs = packetMs;
+            cur = new P2Quantile(quantile);
+            prev = new P2Quantile(quantile);
+        }
 
         public void Reset() { cur.Reset(); prev.Reset(); windowStart = long.MinValue; lastArrival = long.MinValue; maxCur = maxPrev = 0; }
 
@@ -136,7 +211,23 @@ namespace DualEarbuds
             if (ms > maxCur) maxCur = ms;
         }
 
+        // Lateness with its arrival time (local ms): also moves the window, so old samples age out.
+        public void AddJitter(double ms, long now)
+        {
+            if (windowStart == long.MinValue) windowStart = now;
+            if (now - windowStart >= halfMs)
+            {
+                var t = prev; prev = cur; cur = t; cur.Reset();
+                maxPrev = maxCur; maxCur = 0;
+                windowStart = now;
+            }
+            AddJitter(ms);
+        }
+
         public int Samples { get { return cur.Count + prev.Count; } }
+
+        // The window's quantile (named for the v3.2 default; a 0.95 window returns its p95).
+        public double Value { get { return P99; } }
 
         public double P99
         {

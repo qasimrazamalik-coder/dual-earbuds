@@ -76,6 +76,9 @@ static class EngineTests
         Run("v3.2 old calibrations migrate", () => TestLatencyMigration(tmp));
         Run("Output: small delay decreases play faster, no cut", TestSlew);
         Run("v3.2 host announces playout from listener needs", TestPlayoutLoopback);
+        Run("v3.3 sync priority: P and per-output delay", TestSyncPriority);
+        Run("v3.3 sync priority: listener need + buffer floor", TestListenerPriorityNeed);
+        Run("v3.3 sync priority on the wire (host -> listener)", TestPriorityLoopback);
         Run("v3.2 UDP datagrams + keepalives", TestUdpFormat);
         Run("v3.2 UDP health (listener fallback logic)", TestUdpHealth);
         Run("v3.2 UDP loopback: audio over UDP, none on the WebSocket", TestUdpLoopback);
@@ -1753,6 +1756,111 @@ static class EngineTests
         finally { host.Stop(); }
     }
 
+    // ------------------------------------------------------------------ v3.3 lip-sync priority
+    static void TestSyncPriority()
+    {
+        const string L = SyncPriority.LipSync, T = SyncPriority.Together;
+        Check(SyncPriority.Normalize(null) == L && SyncPriority.Normalize("x") == L && SyncPriority.Normalize(T) == T, "host setting defaults to lip-sync");
+        Check(SyncPriority.FromWire(null) == T && SyncPriority.FromWire("lipsync") == L, "a host that doesn't say: v3.2 rules");
+        // L0: calibrated, else reported + mixer (+ Bluetooth guess), else 180 BT / 20 wired
+        Check(SyncPriority.SourceLatencyMs(205, 12, true) == 205, "L0: calibration wins");
+        Check(SyncPriority.SourceLatencyMs(0, 12, false) == 22, "L0: Windows-reported + mixer");
+        Check(SyncPriority.SourceLatencyMs(0, 0, true) == 180, "L0: Bluetooth guess 180 ms");
+        Check(SyncPriority.SourceLatencyMs(0, 0, false) == 20, "L0: wired guess 20 ms");
+
+        // Netflix case: source earbuds 180 ms, second pair 120 ms, a phone needs 150 ms
+        var ticked = new[] { 120.0 };
+        Check(SyncPriority.PlayoutTarget(L, new[] { 150 }, 180, ticked) == 180, "lip-sync: P = L0 when listeners need less");
+        Check(SyncPriority.PlayoutTarget(L, new[] { 260 }, 180, ticked) == 260, "lip-sync: a slow listener raises P");
+        Check(SyncPriority.PlayoutTarget(L, null, 20, ticked) == 30, "lip-sync: floor 30 ms");
+        Check(SyncPriority.PlayoutTarget(L, new[] { 900 }, 180, ticked) == 400, "lip-sync: ceiling 400 ms");
+        Check(SyncPriority.PlayoutTarget(L, null, 0, new[] { 300.0 }) == 30, "lip-sync: other local outputs don't raise P");
+        Check(SyncPriority.PlayoutTarget(T, new[] { 150 }, 180, new[] { 300.0 }) == 315, "together: slowest ticked output (+ cushion) wins");
+        Check(SyncPriority.PlayoutTarget(T, new[] { 260 }, 180, ticked) == 260, "together: slowest listener wins");
+        Check(SyncPriority.PlayoutTarget(T, null, 0, new double[0]) == 40, "together: floor 40 ms");
+
+        // per-output delay
+        Check(SyncPriority.LocalDelayMs(L, 260, 180, 120) == 45, "lip-sync: L0 - latency - cushion (180 - 120 - 15)");
+        Check(SyncPriority.LocalDelayMs(L, 400, 180, 120) == 45, "lip-sync: P doesn't delay the laptop's outputs");
+        Check(SyncPriority.LocalDelayMs(L, 260, 180, 250) == 0, "lip-sync: slower than the source: no delay");
+        Check(SyncPriority.LocalDelayMs(T, 260, 180, 120) == 125, "together: P - latency - cushion (260 - 120 - 15)");
+        Check(SyncPriority.LocalDelayMs(T, 100, 180, 300) == 0, "together: never negative");
+        double heard = OutputTiming.CushionMs + SyncPriority.LocalDelayMs(L, 260, 180, 120) + 120;
+        Check(Math.Abs(heard - 180) <= 0.5, "lip-sync: the second pair is heard with the source ear (" + heard + ")");
+        Check(SyncPriority.ReferenceMs(L, 260, 180) == 180 && SyncPriority.ReferenceMs(T, 260, 180) == 260, "reference ear time");
+
+        // the planner's floor follows the priority
+        var pl = new PlayoutPlanner { FloorMs = SyncPriority.LipSyncFloorMs };
+        Check(pl.Step(10, 0) == 30, "planner: lip-sync floor");
+        pl.FloorMs = PlayoutPlanner.MinMs;
+        Check(pl.Step(10, 1000) == 40, "planner: together floor applies at once (an increase)");
+    }
+
+    static void TestListenerPriorityNeed()
+    {
+        const string L = SyncPriority.LipSync, T = SyncPriority.Together;
+        // jitter p99 40, p95 12, buffer 30, output 197 (182 + cushion), rtt 6
+        Check(LinkClient.ComputeNeedMs(T, 40, 12, 30, 197, 6) == 40 + 10 + 197 + 3, "together: p99 + 10 + output + rtt/2");
+        Check(LinkClient.ComputeNeedMs(L, 40, 12, 30, 197, 6) == 30 + 197 + 3, "lip-sync: never below the buffer target");
+        Check(LinkClient.ComputeNeedMs(L, 40, 22, 20, 197, 6) == 22 + 5 + 197 + 3, "lip-sync: p95 + 5 + output + rtt/2");
+        Check(LinkClient.ComputeNeedMs(L, 40, 12, 20, 197, 0) < LinkClient.ComputeNeedMs(T, 40, 12, 20, 197, 0), "lip-sync asks for less");
+
+        var w = new JitterWindow(10000, 10, 0.95);
+        var rj = new Random(5);
+        long t = 0;
+        // 2 ms floor + exponential tail (mean 5): p95 = 2 + 5 ln 20 = 17 ms, p99 = 25 ms
+        for (int i = 0; i < 1500; i++) { w.AddJitter(2 - 5 * Math.Log(1 - rj.NextDouble()), t); t += 10; }
+        Check(w.Value >= 12 && w.Value <= 22, "p95 window (" + w.Value.ToString("0.0") + " ms, true 17)");
+        for (int i = 0; i < 1100; i++) { w.AddJitter(1, t); t += 10; }
+        Check(w.Value < 5, "after 10 s of calm network the p95 comes down (" + w.Value.ToString("0.0") + ")");
+
+        var jb = new JitterBuffer();
+        jb.Mode = BufferMode.Steady;
+        jb.Reset(0);
+        jb.FloorMs = LinkClient.LipSyncBufferFloorMs;
+        for (long now = 0; now < 200000; now += 1000) jb.Tick(now);
+        Check(jb.TargetMs == 20, "lip-sync: steady buffer shrinks to 20 ms (" + jb.TargetMs + ")");
+        jb.FloorMs = JitterBuffer.MinMs;
+        Check(jb.TargetMs == 30, "back to together: floor 30 ms at once");
+    }
+
+    static void TestPriorityLoopback()
+    {
+        int port = FreePort();
+        var host = new PhoneLink(port, "ABCD2345", IPAddress.Loopback);
+        host.Start();
+        LinkClient client = null;
+        try
+        {
+            host.SetMirroring(true, 48000);
+            Check(host.Priority == SyncPriority.LipSync, "host defaults to lip-sync");
+            host.LocalNeedMs = 20;
+            Check(host.UpdatePlayout(host.NowMs) == 30, "lip-sync host: P floor 30");
+            var w = WsClient.Open(port, "k=ABCD2345&client=android&name=P");
+            string hello = NextOfType(w, "hello", 10);
+            Check(hello != null && hello.Contains("\"priority\":\"lipsync\""), "hello carries the priority");
+            host.Priority = SyncPriority.Together;
+            host.UpdatePlayout(host.NowMs + 10);
+            string po = NextOfType(w, "playout", 40);
+            Check(po != null && po.Contains("\"priority\":\"together\"") && po.Contains("\"ms\":40"), "switching announces playout with the priority (" + po + ")");
+            w.Dispose();
+            Check(PhoneLink.PlayoutMessage(210, "lipsync") == "{\"type\":\"playout\",\"ms\":210,\"priority\":\"lipsync\"}", "playout message format");
+
+            host.Priority = SyncPriority.LipSync;
+            host.UpdatePlayout(host.NowMs + 20);
+            LinkTarget t; string why;
+            LinkAddress.TryParse("127.0.0.1:" + port + "/?k=abcd2345", out t, out why);
+            client = new LinkClient(t, null, "L");
+            client.Start();
+            Check(WaitFor(() => client.State == ListenState.Playing, 5000), "listener connects");
+            Check(WaitFor(() => client.Priority == SyncPriority.LipSync, 2000) && client.Buffer.FloorMs == 20, "listener follows lip-sync (buffer floor 20 ms)");
+            host.Priority = SyncPriority.Together;
+            host.UpdatePlayout(host.NowMs + 30);
+            Check(WaitFor(() => client.Priority == SyncPriority.Together, 2000) && client.Buffer.FloorMs == 30, "listener follows together");
+        }
+        finally { if (client != null) client.Dispose(); host.Stop(); }
+    }
+
     // ------------------------------------------------------------------ v3.2 UDP
     static byte[] WsBody(int rate, uint seq, short fill)
     {
@@ -2183,6 +2291,8 @@ There is 1 interface on the system:
         Check(row("wifi").Status == CheckStatus.Warn && row("wifi").Value.StartsWith("2.4 GHz · ch 6"), "2.4 GHz flagged (" + row("wifi").Value + ")");
         Check(row("bluetooth").Status == CheckStatus.Good && row("bluetooth").Value == "2 connected", "two Bluetooth pairs");
         Check(row("cal:a").Status == CheckStatus.Warn && row("cal:a").ActionId == "calibrate:a" && row("cal:b").Status == CheckStatus.Good, "uncalibrated Bluetooth pair -> calibrate");
+        Check(row("cal:b").Detail.StartsWith("These earbuds add 182 ms. If they have a game or low-latency mode") && !row("cal:b").Detail.Contains("LDAC"), "v3.3 low-latency hint above 150 ms (Windows: no codec line)");
+        Check(SetupCheck.LowLatencyHint(150) == null && SetupCheck.LowLatencyHint(0) == null && SetupCheck.LowLatencyHint(151) != null, "hint only above 150 ms, only when calibrated");
         Check(row("cal:c") == null, "unticked outputs not listed");
         Check(row("battery").Status == CheckStatus.Warn && row("power").Status == CheckStatus.Warn, "battery saver and efficiency mode flagged");
         Check(row("listeners").Status == CheckStatus.Warn && row("listeners").Detail.StartsWith("Redmi 230 ms"), "slow listener named");
@@ -2202,6 +2312,16 @@ There is 1 interface on the system:
         var unknown = SetupCheck.Build(new CheckInput());
         Check(unknown.Find(r => r.Id == "firewall").Status == CheckStatus.Unknown && unknown.Find(r => r.Id == "wifi").Status == CheckStatus.Unknown, "nothing known yet: unknown, not alarming");
         Check(SetupCheck.BestSoundGuide.Length == 5 && SetupCheck.BestSoundGuide[4].Contains("LDAC"), "best-sound guide");
+
+        // v3.3 lip-sync: the source output is listed (it is the reference ear) but not counted as extra earbuds
+        var ls = new CheckInput { LipSync = true };
+        ls.Outputs.Add(new CheckOutput { Id = "s", Name = "Headphones (TWS)", Bluetooth = true, Enabled = true, Source = true, Calibrated = true, LatencyMs = 205 });
+        ls.Listeners.Add(new CheckListener { Name = "Redmi", NeedMs = 230 });
+        var lr = SetupCheck.Build(ls);
+        var srow = lr.Find(r => r.Id == "cal:s");
+        Check(srow != null && srow.Title.Contains("source") && srow.Detail.StartsWith("These earbuds add 205 ms"), "source row with the hint");
+        Check(lr.Find(r => r.Id == "bluetooth").Value == "0 connected", "source not counted as a second pair");
+        Check(lr.Find(r => r.Id == "listeners").Detail.Contains("play later than this laptop"), "lip-sync: slow listeners play later, the laptop doesn't wait");
     }
 
     static void TestPowerModes()

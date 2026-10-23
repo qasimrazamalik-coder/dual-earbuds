@@ -180,6 +180,10 @@ namespace DualEarbuds
         readonly ClockSync sync = new ClockSync();
         // v3.2: what this laptop needs for the common deadline (jitter p99 over 30 s + output latency + 10)
         readonly JitterWindow needJitter = new JitterWindow(30000, PhoneLink.PacketMs);
+        // v3.3 lip-sync: a tighter need (jitter p95 over 10 s + output latency + 5) and a 20 ms buffer floor
+        readonly JitterWindow needJitter95 = new JitterWindow(10000, PhoneLink.PacketMs, 0.95);
+        public const int LipSyncBufferFloorMs = 20;
+        volatile string priority = SyncPriority.Together;   // a host that doesn't say: v3.2 rules
         readonly LatenessTracker lateness = new LatenessTracker(PhoneLink.PacketMs);
         readonly PacketClock packetClock = new PacketClock();
         public readonly JitterBuffer Buffer = new JitterBuffer();
@@ -222,6 +226,7 @@ namespace DualEarbuds
         public double RttMs { get { return sync.BestRtt; } }
         public int Rate { get { return rate; } }
         public int PlayoutMs { get { return playoutMs; } }
+        public string Priority { get { return priority; } }
         public int HostVolume { get { return hostVolume; } }
         public long Packets { get { return Interlocked.Read(ref packets); } }
         public long Concealed { get { return Interlocked.Read(ref concealed); } }
@@ -447,6 +452,7 @@ namespace DualEarbuds
                     hostKind = MiniJson.GetString(d, "host", "windows") == "android" ? "android" : "windows";
                     int po = MiniJson.GetInt(d, "playoutMs", PhoneLink.DefaultPlayoutMs);
                     playoutMs = Math.Max(30, Math.Min(1000, po));
+                    SetPriority(MiniJson.GetString(d, "priority", null));
                     remoteAllowed = MiniJson.GetBool(d, "remote", false);
                     ReadSource(d);
                     hostSharing = MiniJson.GetInt(d, "rate", 0) > 0;
@@ -488,6 +494,8 @@ namespace DualEarbuds
                     break;
                 case "playout":
                     int pm = MiniJson.GetInt(d, "ms", -1);
+                    string pp = MiniJson.GetString(d, "priority", null);
+                    if (pp != null) SetPriority(pp);
                     if (pm > 0) { playoutMs = Math.Max(30, Math.Min(1000, pm)); Raise(); }
                     break;
                 case "talk":
@@ -502,6 +510,14 @@ namespace DualEarbuds
                     Raise();
                     break;
             }
+        }
+
+        // hello always sets it (missing = v3.2 host = together); playout only when it carries the field.
+        void SetPriority(string wire)
+        {
+            string p = SyncPriority.FromWire(wire);
+            priority = p;
+            Buffer.FloorMs = SyncPriority.IsLipSync(p) ? LipSyncBufferFloorMs : JitterBuffer.MinMs;
         }
 
         void ReadSource(Dictionary<string, object> d)
@@ -533,17 +549,18 @@ namespace DualEarbuds
         }
 
         public double JitterP99 { get { return needJitter.P99; } }
+        public double JitterP95 { get { return needJitter95.Value; } }
 
-        // v3.2 needMs = jitter p99 (30 s) + output latency + 10; never below the buffer the smart buffer
-        // keeps (the listener never steers its queue below that), plus half the round trip (the path itself).
-        public int NeedMs
+        // v3.2 needMs = jitter p99 (30 s) + output latency + 10 ("together");
+        // v3.3 lip-sync needMs = jitter p95 (10 s) + output latency + 5.
+        // Either way never below the buffer the smart buffer keeps (the listener never steers its queue below
+        // that), plus half the round trip (the path itself).
+        public int NeedMs { get { return ComputeNeedMs(priority, needJitter.P99, needJitter95.Value, Buffer.TargetMs, OutputLatencyMs, sync.BestRtt); } }
+
+        public static int ComputeNeedMs(string priority, double jitterP99, double jitterP95, int bufferTargetMs, double outputLatencyMs, double rttMs)
         {
-            get
-            {
-                double net = Math.Max(needJitter.P99 + 10, Buffer.TargetMs);
-                double rtt = sync.BestRtt;
-                return (int)Math.Ceiling(net + OutputLatencyMs + (rtt > 0 ? rtt / 2 : 0));
-            }
+            double net = SyncPriority.IsLipSync(priority) ? Math.Max(jitterP95 + 5, bufferTargetMs) : Math.Max(jitterP99 + 10, bufferTargetMs);
+            return (int)Math.Ceiling(net + outputLatencyMs + (rttMs > 0 ? rttMs / 2 : 0));
         }
 
         // How far the outputs are from the deadline right now (+ = late), the worst one; NaN when not synced.
@@ -652,7 +669,9 @@ namespace DualEarbuds
             }
             long nowL = (long)NowMs;
             Buffer.OnPacket(nowL);
-            needJitter.AddJitter(lateness.OnPacket(seq, nowL));
+            double lateMs = lateness.OnPacket(seq, nowL);
+            needJitter.AddJitter(lateMs);
+            needJitter95.AddJitter(lateMs, nowL);
             if (missing > 0)
             {
                 Interlocked.Add(ref lost, missing);
