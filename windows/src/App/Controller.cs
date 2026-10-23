@@ -537,12 +537,17 @@ namespace DualEarbuds
         {
             get
             {
-                if (Demo) return DemoPlayoutMs;
+                if (Demo)
+                {
+                    // screenshots: the real rule over the demo listeners, so the readout matches the rows
+                    var needs = new List<int>();
+                    foreach (var ph in Phones) if (ph.Synced && ph.NeedMs > 0) needs.Add(ph.NeedMs);
+                    return PlayoutPlanner.Choose(needs, LocalNeedMs, SyncPriority.FloorMs(Priority));
+                }
                 var p = Phone;
                 return p != null ? p.PlayoutMs : PlayoutPlanner.Choose(null, LocalNeedMs, SyncPriority.FloorMs(Priority));
             }
         }
-        public int DemoPlayoutMs = 236;
 
         // When the laptop's own outputs are heard, in ms after capture: L0 in lip-sync, P otherwise.
         public double LocalReferenceMs { get { return SyncPriority.ReferenceMs(Priority, PlayoutMs, SourceLatencyMs); } }
@@ -1184,7 +1189,7 @@ namespace DualEarbuds
                 live = true;
                 if (c == null) return "LISTENING  48 kHz  ·  P 120 ms  ·  UDP  ·  sync +2 ms";
                 double off = c.OffsetMs;
-                return "LISTENING  " + (c.Rate / 1000.0).ToString("0.#", inv) + " kHz  ·  P " + c.PlayoutMs.ToString(inv) + " ms  ·  " + c.Transport.ToUpperInvariant() +
+                return "LISTENING  " + (c.Rate / 1000.0).ToString("0.#", inv) + " kHz  ·  " + (SyncPriority.IsLipSync(c.Priority) ? "LIP-SYNC  ·  " : "") + "P " + c.PlayoutMs.ToString(inv) + " ms  ·  " + c.Transport.ToUpperInvariant() +
                        (double.IsNaN(off) ? "" : "  ·  sync " + Kit.Signed(off));
             }
             if (!Running) return WantRunning ? "WAITING FOR SOUND" : "STOPPED";
@@ -1665,8 +1670,10 @@ namespace DualEarbuds
             s.Recent.Add(new RecentHost { HostPort = "192.168.1.31:8790", Key = "M4TQ7ZPA", Name = "Sara's laptop" });
             s.Recent.Add(new RecentHost { HostPort = "192.168.1.50:8790", Key = "K2LPQ6RT", Name = "Office PC" });
             s.Profiles.Add(new HearingProfile { Name = "Ammi", LeftDb = new double[] { 0, 0, 0, 2, 5, 7.5, 9 }, RightDb = new double[] { 0, 0, 0, 1.5, 4, 6, 8 } });
+            // the source pair (182 ms, shows the low-latency hint) is the lip-sync reference; the second pair
+            // is faster and waits 27 ms for it
             c.Outputs[0].LatencyMs = 182;
-            c.Outputs[1].LatencyMs = 214;
+            c.Outputs[1].LatencyMs = 140;
             c.Outputs[1].ListenTicked = true;
             c.Outputs[0].ListenTicked = true;
             c.WantRunning = running;

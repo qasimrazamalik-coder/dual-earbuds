@@ -439,7 +439,9 @@ namespace DualEarbuds
             root.Children.Add(src.Root);
 
             // outputs
-            root.Children.Add(Kit.Section("Outputs", out outCount, null));
+            var outSec = Kit.Section("Outputs", out outCount, null);
+            outSec.Name = "anchor_outputs";
+            root.Children.Add(outSec);
             root.Children.Add(outputs.Root);
 
             // listeners
