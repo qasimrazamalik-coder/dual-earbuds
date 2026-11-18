@@ -113,9 +113,8 @@ namespace DualEarbuds
 
         public ListenerOutput(string id, string name, OutputStream s) { DeviceId = id; Name = name; Stream = s; }
 
-        // The host raised P: re-converge quickly (SyncTrim.Converge) instead of only trimming the rate.
-        public void PlayoutRaised() { playoutJumped = true; }
-        public bool Converging { get { return trim.Converging; } }
+        // The host changed P: snap to the new deadline in one step (protocol v3.4) instead of trimming for seconds.
+        public void PlayoutChanged() { playoutJumped = true; }
 
         public int NewUnderruns()
         {
@@ -146,7 +145,7 @@ namespace DualEarbuds
                 double minQueue = jitterTargetMs;
                 if (error > 0 && queuedMs - error < minQueue) error = Math.Max(0, queuedMs - minQueue);
                 LastErrorMs = error;
-                if (playoutJumped) { playoutJumped = false; trim.Converge(); }
+                if (playoutJumped) { playoutJumped = false; trim.SnapNext(); }
                 double ratio;
                 int adj = trim.Decide(error, rate, out ratio);
                 if (adj != 0) s.Adjust(-adj);
@@ -518,12 +517,12 @@ namespace DualEarbuds
             }
         }
 
-        // A higher P: every output has to move later by the difference; tell them to re-converge at once.
+        // P moved: every output has to move by the difference; they snap to the new deadline at once (v3.4).
         void SetPlayout(int ms)
         {
             int old = playoutMs;
             playoutMs = ms;
-            if (ms > old) foreach (var o in outputs) o.PlayoutRaised();
+            if (ms != old) foreach (var o in outputs) o.PlayoutChanged();
         }
 
         // hello always sets it (missing = v3.2 host = together); playout only when it carries the field.

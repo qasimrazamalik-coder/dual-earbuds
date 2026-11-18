@@ -64,21 +64,17 @@ namespace DualEarbuds
         public void Reset() { has = false; }
     }
 
-    // Keeps one output on schedule (protocol v3.1): within +-5 ms do nothing, up to +-40 ms trim the
-    // playback rate by at most +-0.5 %, beyond that skip or insert at once.
-    // After P went up (Converge), the ear has to move later by the increase: then anything over 20 ms is skipped /
-    // inserted at once and smaller errors are trimmed at up to 1 %, so it is back within 5 ms in under 2 s
-    // (rate-trimming alone at 0.5 % needs about 6 s for 30 ms).
+    // Keeps one output on schedule (protocol v3.1, limits from v3.4): within +-5 ms do nothing, up to +-20 ms trim
+    // the playback rate by at most +-0.5 %, beyond that skip or insert at once (was +-40 ms: a 40 ms error took 8 s
+    // to trim away). When P changes (SnapNext), the next packet's error beyond 5 ms is corrected in one step, so the
+    // ear is on the new deadline in under 2 s.
     public class SyncTrim
     {
-        public const double DeadbandMs = 5, ResumeMs = 2, SnapMs = 40, MaxTrim = 0.005, CorrectOverMs = 2000;
-        public const double ConvergeSnapMs = 20, ConvergeMaxTrim = 0.01, ConvergeOverMs = 500;
-        public const int ConvergeCalls = 300;   // at most ~3 s of 10 ms packets
-        bool trimming;
-        int converge;
+        public const double DeadbandMs = 5, ResumeMs = 2, SnapMs = 20, MaxTrim = 0.005, CorrectOverMs = 2000;
+        bool trimming, snapNext;
 
-        public void Converge() { converge = ConvergeCalls; }
-        public bool Converging { get { return converge > 0; } }
+        public void SnapNext() { snapNext = true; }
+        public bool SnapPending { get { return snapNext; } }
 
         // errorMs > 0: this output plays later than it should (too much queued).
         // Returns the frames to skip (>0) or insert (<0) right now; rate gets the resampler ratio
@@ -87,16 +83,9 @@ namespace DualEarbuds
         {
             rate = 1.0;
             double a = Math.Abs(errorMs);
-            if (converge > 0)
-            {
-                converge--;
-                if (a > ConvergeSnapMs) { trimming = false; return (int)Math.Round(errorMs * sampleRate / 1000.0); }
-                if (a <= DeadbandMs) { converge = 0; trimming = false; return 0; }
-                trimming = true;
-                rate = 1.0 + Math.Max(-ConvergeMaxTrim, Math.Min(ConvergeMaxTrim, errorMs / ConvergeOverMs));
-                return 0;
-            }
-            if (a > SnapMs)
+            double limit = snapNext ? DeadbandMs : SnapMs;
+            snapNext = false;
+            if (a > limit)
             {
                 trimming = false;
                 return (int)Math.Round(errorMs * sampleRate / 1000.0);

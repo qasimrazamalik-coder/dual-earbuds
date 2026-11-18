@@ -111,7 +111,7 @@ static class EngineTests
         Run("MCP: client configs, token file, settings", () => TestMcpConfig(tmp));
         Run("Latency fix (a): the jitter window really slides", TestJitterSliding);
         Run("Latency fix (b): WebSocket -> UDP switch-over loses nothing", TestTransportMerge);
-        Run("Latency fix (c): re-converge in < 2 s after P goes up", TestConverge);
+        Run("Latency fix (c): re-converge in < 2 s after P changes (v3.4)", TestConverge);
         Run("Latency fix (d): web player converges and slides too", TestWebPlayerFixes);
 
         Console.WriteLine();
@@ -1273,12 +1273,13 @@ static class EngineTests
         double r;
         Check(t.Decide(3, 48000, out r) == 0 && r == 1.0, "inside +-5 ms: nothing");
         Check(t.Decide(20, 48000, out r) == 0 && r > 1.0 && r <= 1.005, "20 ms late: speed up a little");
-        Check(t.Decide(-30, 48000, out r) == 0 && r < 1.0 && r >= 0.995, "30 ms early: slow down");
+        Check(t.Decide(-18, 48000, out r) == 0 && r < 1.0 && r >= 0.995, "18 ms early: slow down (v3.4 trims up to 20 ms)");
         Check(t.Decide(4, 48000, out r) == 0 && r != 1.0, "keeps trimming until within 2 ms");
         Check(t.Decide(1, 48000, out r) == 0 && r == 1.0, "stops trimming");
         Check(t.Decide(100, 48000, out r) == 4800, "100 ms late: skip 100 ms");
         Check(t.Decide(-50, 48000, out r) == -2400, "50 ms early: insert 50 ms");
-        Check(Math.Abs(t.Decide(39, 48000, out r)) == 0 && r == 1.005, "rate trim capped at 0.5 %");
+        Check(Math.Abs(t.Decide(19, 48000, out r)) == 0 && r == 1.005, "rate trim capped at 0.5 %");
+        Check(t.Decide(30, 48000, out r) == 1440, "30 ms late: skipped at once (v3.4: beyond 20 ms, was 40)");
     }
 
     static void TestResampler()
@@ -3216,12 +3217,12 @@ There is 1 interface on the system:
         Check(dup.Played.Count == 5 && dup.DroppedLate == 5, "a packet that comes both ways plays once");
     }
 
-    // Seconds until |error| <= 5 ms after P rises by `jump` ms (error starts at -jump: the ear is now early).
-    static double ConvergeTime(double jump, bool converge)
+    // Seconds until |error| <= 5 ms after P moves by `jump` ms (error starts at -jump: the ear is now early).
+    static double ConvergeTime(double jump, bool snap)
     {
         var t = new SyncTrim();
         double e = -jump;
-        if (converge) t.Converge();
+        if (snap) t.SnapNext();
         for (int i = 0; i < 2000; i++)
         {
             if (Math.Abs(e) <= SyncTrim.DeadbandMs) return i * 0.01;
@@ -3235,25 +3236,25 @@ There is 1 interface on the system:
 
     static void TestConverge()
     {
-        Check(ConvergeTime(30, false) > 2, "before: +30 ms took " + ConvergeTime(30, false).ToString("0.0") + " s of rate trimming");
-        foreach (var jump in new double[] { 8, 15, 21, 30, 60, 120 })
+        Check(ConvergeTime(18, false) > 2, "without a snap, +18 ms is trimmed at 0.5 % for " + ConvergeTime(18, false).ToString("0.0") + " s");
+        foreach (var jump in new double[] { 6, 8, 15, 21, 30, 60, 120, -12, -30 })
         {
             double s = ConvergeTime(jump, true);
-            Check(s < 2, "P +" + jump + " ms: back within 5 ms in " + s.ToString("0.00") + " s");
+            Check(s < 2, "P " + (jump > 0 ? "+" : "") + jump + " ms: back within 5 ms in " + s.ToString("0.00") + " s");
         }
         var t = new SyncTrim();
         double rate;
-        Check(t.Decide(25, 48000, out rate) == 0 && rate > 1 && rate <= 1 + SyncTrim.MaxTrim, "steady state unchanged: 25 ms is still rate-trimmed (no audible skip)");
-        t.Converge();
-        Check(t.Decide(25, 48000, out rate) == 1200 && !t.Trimming, "after a P increase: 25 ms is skipped at once (1200 frames)");
-        Check(t.Decide(12, 48000, out rate) == 0 && rate > 1 + SyncTrim.MaxTrim && rate <= 1 + SyncTrim.ConvergeMaxTrim, "smaller errors trimmed at up to 1 %");
-        Check(t.Decide(3, 48000, out rate) == 0 && !t.Converging && rate == 1, "within 5 ms: converging ends");
+        Check(t.Decide(15, 48000, out rate) == 0 && rate > 1 && rate <= 1 + SyncTrim.MaxTrim, "steady state: 15 ms is rate-trimmed (no audible skip)");
+        Check(t.Decide(25, 48000, out rate) == 1200 && !t.Trimming, "beyond 20 ms: skipped at once (v3.4, was 40 ms)");
+        t.SnapNext();
+        Check(t.SnapPending && t.Decide(8, 48000, out rate) == 384 && !t.SnapPending, "after a P change the next packet snaps 8 ms in one step");
+        Check(t.Decide(8, 48000, out rate) == 0 && rate > 1, "then back to trimming");
     }
 
     static void TestWebPlayerFixes()
     {
         string h = WebPlayer.Html;
-        Check(h.Contains("SYNC.converge") && h.Contains("0.02") && h.Contains("0.01"), "web player: converge mode after a P increase (20 ms snap, 1 % trim)");
+        Check(h.Contains("SYNC.snapNext") && h.Contains("SYNC.snapNext?0.005:0.02"), "web player: 20 ms skip limit, snap to the new deadline when P changes (v3.4)");
         Check(h.Contains("LATE.win") && h.Contains("LATE.t"), "web player: lateness window is time-based (30 s), not a packet count");
         Check(h.Contains("(d<=0&&d>-1000)return"), "web player: duplicates dropped by seq");
     }

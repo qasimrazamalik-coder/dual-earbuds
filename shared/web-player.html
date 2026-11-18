@@ -104,10 +104,10 @@ function plcCrossfade(L,R,frames,rate){
 }
 // Clock sync (protocol v3.1): offset = h - (c + now)/2 from the lowest-RTT of the last 8 sync replies;
 // packet seq is due at host time h(seq) + playoutMs. Small errors trim playbackRate by at most 0.5 %,
-// beyond 40 ms the playhead jumps. After P goes up (converge, at most 3 s) beyond 20 ms it jumps and smaller errors
-// trim by up to 1 %, so the phone is back on the deadline in under 2 s. Without sync (old host) the Buffer slider rules.
-const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN,priority:'together',converge:false,convergeUntil:0};
-function setPlayout(ms){const v=Math.max(30,Math.min(1000,ms));if(v>SYNC.playout){SYNC.converge=true;SYNC.convergeUntil=performance.now()+3000;}SYNC.playout=v;}
+// beyond 20 ms the playhead jumps (v3.4; was 40 ms), and when P changes the next packet snaps to the new deadline
+// (anything beyond 5 ms), so the phone is back on time in under 2 s. Without sync (old host) the Buffer slider rules.
+const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN,priority:'together',snapNext:false};
+function setPlayout(ms){const v=Math.max(30,Math.min(1000,ms));if(v!==SYNC.playout)SYNC.snapNext=true;SYNC.playout=v;}
 // Protocol v3.2 needMs: how late packets arrive versus a steady 10 ms schedule (p99 over 30 s) + output
 // latency + 10 (v3.3 lip-sync: p95 over 10 s + 5). The host sets the common deadline (playout) from every listener's need and announces it.
 // A true sliding window: every value keeps its arrival time and ages out after 30 s, also when no packets come.
@@ -150,13 +150,9 @@ function schedule(b,frames,rate,seq){
   if(due>=now+0.03){
     const err=playhead-due;               // > 0: we would play late
     SYNC.err=err;
-    const conv=SYNC.converge&&performance.now()<SYNC.convergeUntil;
-    if(!conv)SYNC.converge=false;
-    if(playhead<now+0.02||Math.abs(err)>(conv?0.02:0.04)){playhead=due;SYNC.trimming=false;}
-    else if(conv){
-      if(Math.abs(err)<=0.005){SYNC.converge=false;SYNC.trimming=false;}
-      else{SYNC.trimming=true;pr=1+Math.max(-0.01,Math.min(0.01,err/0.5));}
-    }
+    const limit=SYNC.snapNext?0.005:0.02;
+    SYNC.snapNext=false;
+    if(playhead<now+0.02||Math.abs(err)>limit){playhead=due;SYNC.trimming=false;}
     else{
       if(!SYNC.trimming&&Math.abs(err)>0.005)SYNC.trimming=true;
       else if(SYNC.trimming&&Math.abs(err)<0.002)SYNC.trimming=false;
