@@ -46,4 +46,13 @@ class ReadoutTest {
         assertEquals("WS", Readout.transport(l(1, transport = "ws")))
         assertEquals("Browser", Readout.transport(l(1, client = "web", transport = "ws")))
     }
+
+    @Test
+    fun spokenScopeForScreenReaders() {
+        assertEquals("Redmi, 12 milliseconds late", Readout.spoken("Redmi", 12))
+        assertEquals("Pixel, 3 milliseconds early", Readout.spoken("Pixel", -3))
+        assertEquals("This phone, in sync", Readout.spoken("This phone", 2))
+        assertEquals("Redmi, sync unknown", Readout.spoken("Redmi", null))
+        assertEquals("60 milliseconds late", Readout.spoken(null, 60))
+    }
 }

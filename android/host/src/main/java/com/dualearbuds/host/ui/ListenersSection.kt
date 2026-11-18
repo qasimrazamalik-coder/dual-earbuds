@@ -98,7 +98,7 @@ private fun ListenerRow(l: ListenerInfo) {
             tag = Readout.transport(l),
             figures = figures(l),
             warn = SetupCheck.isPoorLink(l),
-            modifier = Modifier.clickable { open = !open }
+            modifier = Modifier.clickable(onClickLabel = if (open) "Hide controls" else "Show volume and Remove") { open = !open }
         )
         AnimatedVisibility(
             visible = open,
@@ -134,10 +134,11 @@ private fun EarRow(
             Mono(tag, color = t.muted)
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SyncScope(offsetMs)
+            SyncScope(offsetMs, name = title)
             Spacer(Modifier.width(8.dp))
             Mono(Readout.offset(offsetMs), Modifier.width(56.dp), color = t.text)
-            Mono(figures, Modifier.weight(1f), color = if (warn) t.warn else t.muted)
+            // A weak link is said in words too, never by colour alone.
+            Mono(if (warn) listOf("weak link", figures).filter { it.isNotBlank() }.joinToString(" · ") else figures, Modifier.weight(1f), color = if (warn) t.warn else t.muted)
         }
         if (subtitle.isNotBlank()) {
             Text(subtitle, style = Type.hint, color = t.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)

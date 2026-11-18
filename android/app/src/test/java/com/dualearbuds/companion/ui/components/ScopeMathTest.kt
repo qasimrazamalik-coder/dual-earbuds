@@ -43,4 +43,14 @@ class ScopeMathTest {
         assertEquals("48 kHz  ·  buf 60 ms  ·  WS", ScopeMath.readout(48_000, 120, "WS", false, null, 60))
         assertEquals("", ScopeMath.readout(0, 0, "", false, null, 0))
     }
+
+    @Test
+    fun spokenScopeForScreenReaders() {
+        assertEquals("Redmi, 12 milliseconds late", ScopeMath.spoken("Redmi", 12.4))
+        assertEquals("Pixel, 3 milliseconds early", ScopeMath.spoken("Pixel", -3.0))
+        assertEquals("This phone, in sync", ScopeMath.spoken("This phone", 1.6))
+        assertEquals("Redmi, sync unknown", ScopeMath.spoken("Redmi", null))
+        assertEquals("sync unknown", ScopeMath.spoken(" ", Double.NaN))
+        assertEquals("40 milliseconds late", ScopeMath.spoken("", 40.0))
+    }
 }

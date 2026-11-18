@@ -34,7 +34,7 @@ import com.dualearbuds.companion.ui.components.PrimaryButton
 import com.dualearbuds.companion.ui.components.QuietButton
 import com.dualearbuds.companion.ui.components.ScreenScaffold
 import com.dualearbuds.companion.ui.components.Section
-import com.dualearbuds.companion.ui.components.StatusDot
+import com.dualearbuds.companion.ui.components.StatusWord
 import com.dualearbuds.companion.ui.components.Tone
 import com.dualearbuds.companion.ui.theme.AppTheme
 import com.dualearbuds.companion.ui.theme.Mono
@@ -64,7 +64,7 @@ fun GuideScreen(onBack: () -> Unit) {
                     PanelRow(
                         b.label,
                         value = if (b == detected) "this phone" else null,
-                        trailing = { if (b == brand) StatusDot(Tone.LIVE) },
+                        trailing = { if (b == brand) StatusWord(Tone.LIVE, "Selected") },
                         onClick = {
                             brandName = b.name
                             hint = null
