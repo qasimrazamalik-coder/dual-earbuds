@@ -547,7 +547,10 @@ class PlaybackService : Service() {
             PlaybackController.update { it.copy(playoutMs = ms) }
         }
 
-        override fun onPriority(priority: SyncPriority) = engine.setPriority(priority)
+        override fun onPriority(priority: SyncPriority) {
+            engine.setPriority(priority)
+            PlaybackController.update { if (it.priority == priority) it else it.copy(priority = priority) }
+        }
 
         override fun onSource(source: String, app: String) {
             sourceApp = if (source == "app") app else ""
