@@ -411,7 +411,7 @@ namespace DualEarbuds
         static string Signed(double v)
         {
             int r = (int)Math.Round(v);
-            return (r > 0 ? "+" : r < 0 ? "-" : "+-") + Math.Abs(r).ToString(Inv) + " ms";
+            return (r > 0 ? "+" : r < 0 ? "-" : "\u00B1") + Math.Abs(r).ToString(Inv) + " ms";
         }
 
         // 4-10 short lines from the current state, each with words that make it come up for the right questions.
