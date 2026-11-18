@@ -33,9 +33,18 @@ class Assistant(val chunks: List<HelpChunk>, synonyms: Map<String, List<String>>
     fun queryTerms(question: String): List<String> =
         Tokenizer.terms(synonyms.expand(Tokenizer.words(question))).distinct()
 
+    /** [queryTerms] weighted: the user's own words 1, words only added by synonyms [SYNONYM_WEIGHT]. */
+    fun weightedTerms(question: String): Map<String, Double> {
+        val words = Tokenizer.words(question)
+        val own = Tokenizer.terms(words).toSet()
+        val out = LinkedHashMap<String, Double>()
+        Tokenizer.terms(synonyms.expand(words)).forEach { t -> out[t] = if (t in own) 1.0 else SYNONYM_WEIGHT }
+        return out
+    }
+
     /** Every chunk ranked for [question], best first (ties keep file order). */
     fun search(question: String): List<Hit> {
-        val terms = queryTerms(question)
+        val terms = weightedTerms(question)
         if (terms.isEmpty() || chunks.isEmpty()) return emptyList()
         val s = index.scores(terms)
         return chunks.indices.sortedWith(compareByDescending<Int> { s[it] }.thenBy { it }).map { Hit(chunks[it], s[it]) }
@@ -44,7 +53,7 @@ class Assistant(val chunks: List<HelpChunk>, synonyms: Map<String, List<String>>
     /** Facts that match [question], best first, at most [MAX_FACTS_SHOWN]. */
     fun matchFacts(question: String, facts: List<LiveFact>): List<LiveFact> {
         if (facts.isEmpty()) return emptyList()
-        val terms = queryTerms(question)
+        val terms = weightedTerms(question)
         if (terms.isEmpty()) return emptyList()
         val s = Bm25(facts.map { IndexDoc("", it.text, it.keywords) }).scores(terms)
         return facts.indices.filter { s[it] >= FACT_FLOOR }
@@ -88,6 +97,7 @@ class Assistant(val chunks: List<HelpChunk>, synonyms: Map<String, List<String>>
          */
         const val SCORE_FLOOR = 2.0
         const val FACT_FLOOR = 0.3
+        const val SYNONYM_WEIGHT = 0.6
         const val MAX_FACTS_SHOWN = 4
         const val START_FILE = "getting-started.md"
         const val NOT_FOUND = "I don't know that one yet. These topics are the closest:"

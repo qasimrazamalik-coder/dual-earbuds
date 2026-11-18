@@ -77,7 +77,7 @@ Most music and video apps can be shared; apps that block capture (some streaming
 ## Why can't my phone find the laptop?
 The phone cannot reach the laptop when they are on different networks or public Wi-Fi blocks devices.
 1. Put both on the same Wi-Fi, or use this phone's hotspot.
-2. Check that Phone link is on in the Windows app.
+2. Check that Let devices listen is on in the Windows app.
 
 ## What does Wrong PIN mean?
 The room has a PIN and the one typed does not match. Ask the host for it; it is never in the link.
@@ -231,7 +231,7 @@ class AssistantTest {
             "firewall blocks UDP" to "Why does the audio use WebSocket instead of UDP?",
             "scan the QR code to join" to "How do I join with a QR code or a link?",
             "laptop se connect nahi ho raha" to "Why can't my phone find the laptop?",
-            "share my phone's sound with a friend" to "How do I share this phone's sound with another phone?",
+            "how do I share my phone's sound to another phone" to "How do I share this phone's sound with another phone?",
             "what does P mean playout" to "What is P, the playout delay?",
             "earbuds are slow, 200 ms latency" to "Why does the app say my earbuds are slow?"
         )

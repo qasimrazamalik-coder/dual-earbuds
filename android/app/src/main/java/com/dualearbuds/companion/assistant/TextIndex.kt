@@ -36,11 +36,11 @@ object Tokenizer {
         return out
     }
 
-    /** Index terms: words without stop words and single letters ("what's" → what, s), stemmed. */
+    /** Index terms: words without stop words and stray single letters ("what's" → what, s; "p", the playout deadline, stays), stemmed. */
     fun terms(text: String): List<String> = terms(words(text))
 
     fun terms(words: List<String>): List<String> =
-        words.filter { it !in STOP_WORDS && (it.length > 1 || it[0].isDigit()) }.map { stem(it) }
+        words.filter { it !in STOP_WORDS && (it.length > 1 || it[0].isDigit() || it == "p") }.map { stem(it) }
 
     /**
      * Strips one of `ing`, `ed`, `es`, `s`, `ly` when at least 3 letters stay, then folds a trailing `e` (again
@@ -97,28 +97,38 @@ class Synonyms(map: Map<String, List<String>>) {
 data class IndexDoc(val title: String, val body: String, val keywords: String = "")
 
 /**
- * BM25 (k1 1.2, b 0.75) over a weighted bag of fields: title 2×, body 1×, keywords 1.5×
- * (term frequency and length both count the weights).
+ * BM25 (k1 1.2, b 0.75) over three weighted fields — title 2×, body 1×, keywords 1.5× — in the BM25F way: each
+ * field's term frequency is length-normalised against that field's average, weighted, summed, then saturated
+ * once. A word in a short title therefore counts for more than the same word somewhere in a long body.
  */
 class Bm25(docs: List<IndexDoc>) {
-    private val tf: List<Map<String, Double>>
-    private val len: DoubleArray
+    private class Field(val tf: Map<String, Int>, val len: Int)
+
+    private val fields: List<Array<Field>>
     private val df = HashMap<String, Int>()
-    private val avgLen: Double
+    private val avgLen = DoubleArray(3)
     val size: Int = docs.size
 
     init {
-        tf = docs.map { d ->
-            val m = HashMap<String, Double>()
-            fun add(text: String, w: Double) = Tokenizer.terms(text).forEach { t -> m[t] = (m[t] ?: 0.0) + w }
-            add(d.title, TITLE_WEIGHT)
-            add(d.body, BODY_WEIGHT)
-            add(d.keywords, KEYWORD_WEIGHT)
-            m
+        fields = docs.map { d ->
+            // Keywords are a set: "late, awaz late" must not count "late" twice.
+            arrayOf(field(d.title), field(d.body), field(d.keywords, distinct = true))
         }
-        len = DoubleArray(docs.size) { i -> tf[i].values.sum() }
-        tf.forEach { m -> m.keys.forEach { t -> df[t] = (df[t] ?: 0) + 1 } }
-        avgLen = if (docs.isEmpty()) 1.0 else (len.sum() / docs.size).coerceAtLeast(1.0)
+        fields.forEach { fs ->
+            val seen = HashSet<String>()
+            fs.forEach { seen += it.tf.keys }
+            seen.forEach { t -> df[t] = (df[t] ?: 0) + 1 }
+        }
+        for (f in 0 until 3) {
+            avgLen[f] = if (docs.isEmpty()) 1.0 else (fields.sumOf { it[f].len }.toDouble() / docs.size).coerceAtLeast(1.0)
+        }
+    }
+
+    private fun field(text: String, distinct: Boolean = false): Field {
+        val terms = Tokenizer.terms(text).let { if (distinct) it.distinct() else it }
+        val m = HashMap<String, Int>()
+        terms.forEach { t -> m[t] = (m[t] ?: 0) + 1 }
+        return Field(m, terms.size)
     }
 
     fun idf(term: String): Double {
@@ -127,15 +137,20 @@ class Bm25(docs: List<IndexDoc>) {
     }
 
     /** Score of every document for the (already tokenised) query terms; each distinct term counts once. */
-    fun scores(queryTerms: Collection<String>): DoubleArray {
-        val terms = queryTerms.toSet()
+    fun scores(queryTerms: Collection<String>): DoubleArray = scores(queryTerms.associateWith { 1.0 })
+
+    /** Like [scores] with a weight per query term (synonym expansions count less than the user's own words). */
+    fun scores(weightedTerms: Map<String, Double>): DoubleArray {
         return DoubleArray(size) { i ->
             var s = 0.0
-            val m = tf[i]
-            val norm = K1 * (1 - B + B * len[i] / avgLen)
-            for (t in terms) {
-                val f = m[t] ?: continue
-                s += idf(t) * f * (K1 + 1) / (f + norm)
+            val fs = fields[i]
+            for ((t, w) in weightedTerms) {
+                var tf = 0.0
+                for (f in 0 until 3) {
+                    val c = fs[f].tf[t] ?: continue
+                    tf += WEIGHTS[f] * c / (1 - B + B * fs[f].len / avgLen[f])
+                }
+                if (tf > 0) s += w * idf(t) * tf * (K1 + 1) / (tf + K1)
             }
             s
         }
@@ -147,5 +162,6 @@ class Bm25(docs: List<IndexDoc>) {
         const val TITLE_WEIGHT = 2.0
         const val BODY_WEIGHT = 1.0
         const val KEYWORD_WEIGHT = 1.5
+        private val WEIGHTS = doubleArrayOf(TITLE_WEIGHT, BODY_WEIGHT, KEYWORD_WEIGHT)
     }
 }

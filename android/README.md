@@ -1,8 +1,8 @@
 # Dual Earbuds — Android companion
 
 Plays your laptop's sound on a **second pair of Bluetooth earbuds connected to your phone**.
-The Windows app (Dual Earbuds Pro) streams the sound over Wi-Fi using the phone link protocol v2
-(`../PROTOCOL.md`). This app receives it and keeps playing with the screen off.
+The Windows app streams the sound over Wi-Fi using the link protocol
+(`../docs/protocol.md`). This app receives it and keeps playing with the screen off.
 
 - Package / applicationId: `com.dualearbuds.companion`
 - minSdk 26 · targetSdk/compileSdk 35 · Kotlin 2.0.20 · AGP 8.5.2 · Gradle 8.9 · JDK 17
@@ -76,7 +76,7 @@ adb install -r app\build\outputs\apk\debug\app-debug.apk
 
 ## Using it
 
-1. On the laptop: open Dual Earbuds, turn on **Phone link**. It shows a QR code and a link like
+1. On the laptop: open Dual Earbuds, open **Listeners** and turn on **Let devices listen**. It shows a QR code and a link like
    `http://192.168.1.20:8790/?k=ABCD2345`.
 2. Pair the **second** earbuds with the phone (normal Bluetooth pairing).
 3. In the app: **Scan QR** (or **Paste** the link) → it checks the link with `GET /info` → press **START**.

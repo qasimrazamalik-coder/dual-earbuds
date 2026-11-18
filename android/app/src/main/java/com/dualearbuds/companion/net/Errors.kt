@@ -25,7 +25,7 @@ object Errors {
         } else {
             UserError(
                 ErrorKind.NOT_FOUND,
-                "Nothing answered at ${target.display}. Check that Dual Earbuds is sharing on the laptop (Phone link on) or the other phone (Share this phone), and that both are on the same Wi-Fi. On public Wi-Fi (cafe, hotel, campus), devices are often blocked from reaching each other — use this phone's hotspot and connect the laptop to it instead."
+                "Nothing answered at ${target.display}. Check that Dual Earbuds is sharing on the laptop (Listeners → Let devices listen on) or the other phone (Share this phone), and that both are on the same Wi-Fi. On public Wi-Fi (cafe, hotel, campus), devices are often blocked from reaching each other — use this phone's hotspot and connect the laptop to it instead."
             )
         }
 
