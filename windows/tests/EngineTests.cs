@@ -2,6 +2,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -93,6 +94,10 @@ static class EngineTests
         Run("Power mode names", TestPowerModes);
         Run("Bursty Wi-Fi: 200 ms gaps then bursts, buffer mode", () => TestBursty(false));
         Run("Bursty Wi-Fi: 200 ms gaps then bursts, synced to the deadline", () => TestBursty(true));
+        Run("Assistant: help parser, tokenizer, stemmer, synonyms", TestHelpParsing);
+        Run("Assistant: retrieval on a fixture help set (English + Roman Urdu)", TestAssistantRetrieval);
+        Run("Assistant: live facts + extractive answer", TestAssistantFacts);
+        Run("Assistant: the real docs/help content parses", TestRealHelp);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -2424,5 +2429,199 @@ There is 1 interface on the system:
             Check(c.Transport == "ws" && c.UdpPackets == 0, "no udp field -> WebSocket audio");
         }
         finally { done = true; if (c != null) c.Dispose(); srv.Stop(); }
+    }
+
+    // ------------------------------------------------------------------ assistant (docs/assistant-and-mcp.md)
+    static List<KeyValuePair<string, string>> HelpFixture()
+    {
+        var f = new List<KeyValuePair<string, string>>();
+        f.Add(new KeyValuePair<string, string>("sound.md",
+            "# Sound and delay\n<!-- keywords: sound, audio, delay -->\n\n" +
+            "## Why is the sound late on my earbuds?\nBluetooth earbuds add 150 to 250 ms. Calibrate each pair so Dual Earbuds lines them up.\n1. Open Setup check.\n2. Press Calibrate.\n\n" +
+            "## Why are the phones behind the laptop?\nPhones play at P, the shared deadline. In lip-sync the laptop's own earbuds do not wait, so phones can be behind them.\n<!-- keywords: listeners behind, phone late -->\n\n" +
+            "## Why does the sound crackle or stutter?\nCrackling usually means the laptop is on battery saver or the Wi-Fi is busy. Turn battery saver off and plug in the charger.\n"));
+        f.Add(new KeyValuePair<string, string>("sharing.md",
+            "# Sharing with phones\n<!-- keywords: phone, share, qr, link -->\n\n" +
+            "## How do I share the sound with a phone?\nOpen Listeners and scan the QR code with the phone's camera.\n1. Same Wi-Fi as the laptop.\n2. Scan the QR code.\n\n" +
+            "## Can one phone share its sound to another phone?\nYes. On the first phone choose Share this phone, then join it from the second phone.\n<!-- keywords: phone to phone, share phone, android host -->\n\n" +
+            "## How many listeners can join?\nUp to 8 listeners, or 16 with Party mode on.\n<!-- keywords: party mode, how many, limit, full -->\n\n" +
+            "## How do I set a room PIN?\nTurn on Party mode, then Require a PIN on Listeners. The PIN is never in the link or QR code.\n<!-- keywords: pin, password, room -->\n"));
+        f.Add(new KeyValuePair<string, string>("trouble.md",
+            "# Troubleshooting\n<!-- keywords: problem, fix -->\n\n" +
+            "## The phone joined but there is no sound. What do I check?\nCheck that the laptop is sharing and that the phone's volume is up. Then open Setup check.\n\n" +
+            "## Dual Earbuds is not working at all. What do I do?\nPress Start sharing, then Copy diagnostics on Settings and look at the last error.\n<!-- keywords: not working, broken, crash, error -->\n\n" +
+            "## Windows Firewall blocks UDP. Does that matter?\nWithout UDP phones get WebSocket audio, which needs more delay. Setup check can add the firewall rule.\n<!-- keywords: firewall, udp, blocked -->\n"));
+        f.Add(new KeyValuePair<string, string>("sync.md",
+            "# Sync\n\n" +
+            "## What is sync priority (lip-sync or together)?\nLip-sync keeps video in step on the laptop; Everyone together makes every ear wait for the slowest.\n<!-- keywords: lip sync, lipsync, together, video -->\n\n" +
+            "## How do I calibrate my earbuds?\nHold one earbud against the laptop's microphone and press Calibrate. 8 clicks play.\n<!-- keywords: calibrate, calibration, measure, latency -->\n"));
+        f.Add(new KeyValuePair<string, string>("network.md",
+            "# Wi-Fi\n<!-- keywords: wifi, wi-fi, router -->\n\n" +
+            "## Should I use 2.4 GHz or 5 GHz Wi-Fi?\nUse 5 GHz: it is faster and less busy, so phones need less delay.\n<!-- keywords: band, 2.4, 5, ghz -->\n"));
+        f.Add(new KeyValuePair<string, string>("ai-assistants.md",
+            "# AI assistants\n<!-- keywords: claude, chatgpt, codex, cursor, mcp -->\n\n" +
+            "## How do I connect Claude or another AI assistant?\nTurn on Settings > AI assistants and copy the config for your assistant.\n"));
+        f.Add(new KeyValuePair<string, string>("updates.md",
+            "# Updates\n\n## How do I update the app?\nSettings > Updates > Check now, then Install update.\n<!-- keywords: update, new version, upgrade -->\n"));
+        f.Add(new KeyValuePair<string, string>("_synonyms.txt",
+            "# test synonyms\nawaz: sound, audio\nder: delay, late\nlate: delay\nchal nahi raha: not working\nnahi: no, not\nphone se phone: phone to phone, share phone\nbehind: late\n"));
+        return f;
+    }
+
+    static void TestHelpParsing()
+    {
+        var secs = HelpParser.Parse("x.md", "# Topic A\n<!-- keywords: alpha, beta -->\n\nintro ignored\n## First?\nAnswer one.\n1. Step one\n2) Step two\n- Bullet\n\nPlatform notes: **Windows:** w.\n<!-- keywords: gamma -->\n## Second\nAnswer two.\n");
+        Check(secs.Count == 2, "two ## sections");
+        Check(secs[0].Topic == "Topic A" && secs[0].Title == "First?" && secs[1].Title == "Second", "topic and titles");
+        Check(secs[0].Keywords.Contains("alpha") && secs[0].Keywords.Contains("gamma") && !secs[1].Keywords.Contains("gamma") && secs[1].Keywords.Contains("beta"),
+              "file keywords on every section, section keywords on its own");
+        Check(!secs[0].Body.Contains("keywords") && !secs[0].Body.Contains("intro"), "comments and text before the first ## left out");
+        string a; List<string> steps, notes;
+        Assistant.Split(secs[0].Body, out a, out steps, out notes);
+        Check(a == "Answer one." && steps.Count == 3 && steps[1] == "Step two" && steps[2] == "Bullet", "answer paragraph + steps");
+        Check(notes.Count == 1 && notes[0] == "Platform notes: Windows: w.", "notes, markdown emphasis removed");
+        Check(HelpParser.KeywordsOf("<!-- keywords: a, b -->") == "a, b" && HelpParser.KeywordsOf("<!-- note -->") == null, "keywords comment");
+
+        Check(TextTok.Stem("phones") == TextTok.Stem("phone"), "phones = phone");
+        Check(TextTok.Stem("sharing") == TextTok.Stem("share") && TextTok.Stem("shared") == TextTok.Stem("share"), "sharing = shared = share");
+        Check(TextTok.Stem("batteries") == TextTok.Stem("battery"), "batteries = battery");
+        Check(TextTok.Stem("stopped") == TextTok.Stem("stop") && TextTok.Stem("calling") == "call", "stopped = stop, calling = call");
+        Check(TextTok.Stem("earbuds") == "earbud" && TextTok.Stem("delayed") == "delay" && TextTok.Stem("quickly") == "quick", "earbuds, delayed, quickly");
+        Check(TextTok.Stem("bus") == "bus" && TextTok.Stem("2.4") == "2.4", "short words and numbers untouched");
+        var toks = TextTok.Tokenize("Why is the SOUND late on my phone's earbuds?");
+        Check(toks.Count == 4 && toks[0] == "sound" && toks.Contains("earbud") && !toks.Contains("the") && !toks.Contains("s"), "tokenize: lowercase, stop words and stray letters out (" + string.Join(",", toks.ToArray()) + ")");
+        Check(TextTok.Tokenize("awaz late aa rahi hai").Count == 2, "Roman Urdu filler dropped");
+        Check(TextTok.Tokenize("no sound, not working").Contains("no") && TextTok.Tokenize("not working").Contains("not"), "no / not are kept");
+
+        var syn = Synonyms.Parse("# c\nawaz: sound, audio\nchal nahi raha: not working\nbad line\n");
+        Check(syn.Count == 2, "synonyms parsed (comments and bad lines skipped)");
+        var q = syn.Expand("awaz chal nahi raha");
+        Check(q.ContainsKey("awaz") && q["awaz"] == 1.0 && q.ContainsKey("sound") && Math.Abs(q["sound"] - Synonyms.ExpandWeight) < 1e-9, "word synonym expands at 0.8");
+        Check(q.ContainsKey("work") && q.ContainsKey("not"), "phrase synonym expands");
+        Check(!syn.Expand("chal raha").ContainsKey("work"), "a phrase needs all its words in order");
+    }
+
+    static readonly string[][] AskCases =
+    {
+        new[] { "Why is the sound late on my earbuds?", "Why is the sound late on my earbuds?" },
+        new[] { "awaz late aa rahi hai", "Why is the sound late on my earbuds?" },
+        new[] { "phone se phone pe awaz nahi", "Can one phone share its sound to another phone?" },
+        new[] { "how do I join with the qr code", "How do I share the sound with a phone?" },
+        new[] { "phone joined but no sound", "The phone joined but there is no sound. What do I check?" },
+        new[] { "how to calibrate", "How do I calibrate my earbuds?" },
+        new[] { "the phones are behind the laptop", "Why are the phones behind the laptop?" },
+        new[] { "what is lip sync", "What is sync priority (lip-sync or together)?" },
+        new[] { "sound crackles when on battery", "Why does the sound crackle or stutter?" },
+        new[] { "2.4 ghz or 5 ghz wifi", "Should I use 2.4 GHz or 5 GHz Wi-Fi?" },
+        new[] { "firewall blocking udp", "Windows Firewall blocks UDP. Does that matter?" },
+        new[] { "how many phones can join", "How many listeners can join?" },
+        new[] { "set a pin for the room", "How do I set a room PIN?" },
+        new[] { "connect claude to dual earbuds", "How do I connect Claude or another AI assistant?" },
+        new[] { "install the new version", "How do I update the app?" },
+        new[] { "app chal nahi raha", "Dual Earbuds is not working at all. What do I do?" },
+    };
+
+    static void TestAssistantRetrieval()
+    {
+        var a = new Assistant(HelpFixture());
+        Check(a.Files.Count == 7 && a.Sections.Count == 15 && a.SynonymCount == 7, "fixture: 7 topics, 15 sections, synonyms loaded (" + a.Files.Count + "/" + a.Sections.Count + "/" + a.SynonymCount + ")");
+        foreach (var c in AskCases)
+        {
+            var ans = a.Ask(c[0], null);
+            string got = ans.Found ? ans.Best.Title : "(no answer)";
+            var ranked = a.Search(c[0]);
+            Check(ans.Found && got == c[1], "\"" + c[0] + "\" -> " + got + " (score " + ranked[0].Score.ToString("0.00", CultureInfo.InvariantCulture) + ")");
+        }
+        var none = a.Ask("What is the capital of France?", null);
+        Check(!none.Found && none.Closest.Count == 3 && none.Related.Count == 0, "no answer below the score floor, 3 closest topics");
+        Check(none.ToText().StartsWith(AssistantAnswer.NoAnswer), "no-answer text");
+        var empty = a.Ask("", null);
+        Check(!empty.Found, "empty question: no answer");
+        var hit = a.Ask("why is the sound late", null);
+        Check(hit.Related.Count == 2 && !hit.Related.Contains(hit.Best) && hit.Sources.Count >= 1 && hit.Sources[0] == hit.Best, "related = next two chunks, sources start with the best");
+        Check(new Assistant(null).Ask("anything", null).Found == false, "no help content: no answer, no crash");
+        var shown = a.Show(hit.Related[0], null);
+        Check(shown.Found && shown.Best == hit.Related[0] && !shown.Related.Contains(shown.Best), "tapping a related link shows it");
+    }
+
+    static SessionSnapshot DemoSnapshot()
+    {
+        var s = new SessionSnapshot { Sharing = true, Source = "Headphones (TWS)", Priority = SyncPriority.LipSync, PlayoutMs = 238, NetworkCategory = "Private", LocalNeedMs = 182, LocalNeedName = "Headphones (TWS)" };
+        s.Outputs.Add(new OutputSnap { Id = "tws", Name = "Headphones (TWS)", On = true, Source = true, Calibrated = true, LatencyMs = 182, State = "Sound source" });
+        s.Outputs.Add(new OutputSnap { Id = "evo", Name = "Headphones (Evo Z-Buds)", On = true, Calibrated = false, LatencyMs = 160, SyncErrMs = 3, State = "Playing" });
+        s.Outputs.Add(new OutputSnap { Id = "spk", Name = "Speaker", On = false });
+        s.Listeners.Add(new ListenerSnap { Id = "1", Name = "Redmi Note 12", Earbuds = "Evo Z-Buds", NeedMs = 230, SyncErrMs = 2, Transport = "udp", Synced = true });
+        s.Wifi = new WifiInfo { Connected = true, Band = "2.4 GHz", SignalPercent = 60 };
+        s.Firewall = new FirewallStatus { Known = true, Tcp = true, Udp = false };
+        s.Power = new PowerState { BatterySaver = true };
+        s.LastError = "Windows won't open Speaker.";
+        return s;
+    }
+
+    static void TestAssistantFacts()
+    {
+        var s = DemoSnapshot();
+        var facts = LiveFacts.Build(s);
+        Check(facts.Count >= 4 && facts.Count <= 10, "4-10 fact lines (" + facts.Count + ")");
+        bool pLine = false, earLine = false, listenerLine = false, wifi = false, fw = false, saver = false, err = false, offOut = false;
+        foreach (var f in facts)
+        {
+            if (f.Text.StartsWith("P is 238 ms because Redmi Note 12 (Evo Z-Buds) needs 230 ms")) pLine = true;
+            if (f.Text.Contains("Evo Z-Buds): not calibrated, about 160 ms estimated, sync +3 ms")) earLine = true;
+            if (f.Text.StartsWith("Redmi Note 12 needs 230 ms, sync +2 ms, audio over UDP")) listenerLine = true;
+            if (f.Text.Contains("2.4 GHz")) wifi = true;
+            if (f.Text.Contains("blocks UDP")) fw = true;
+            if (f.Text.Contains("Battery saver is on")) saver = true;
+            if (f.Text.Contains("Windows won't open Speaker")) err = true;
+            if (f.Text.StartsWith("Speaker")) offOut = true;
+        }
+        Check(pLine, "P explained by the listener that needs the most");
+        Check(earLine && listenerLine, "each output and listener: latency / need / sync / transport");
+        Check(wifi && fw && saver && err, "Wi-Fi band, firewall, battery saver, last error");
+        Check(!offOut, "outputs that are off are not listed");
+        var s2 = DemoSnapshot();
+        s2.Listeners.Clear();
+        Check(LiveFacts.PlayoutReason(s2).StartsWith("the sound source Headphones (TWS) takes 182 ms"), "without listeners, lip-sync P comes from the source");
+        s2.LocalNeedMs = 10;
+        Check(LiveFacts.PlayoutReason(s2).Contains("lowest"), "at the floor");
+
+        var a = new Assistant(HelpFixture());
+        var ans = a.Ask("Why is the sound late?", s);
+        Check(ans.Found && ans.Best.File == "sound.md", "late -> sound.md");
+        Check(ans.Facts.Count > 0 && ans.Facts.Count <= Assistant.MaxFacts, "Right now facts shown (" + ans.Facts.Count + ")");
+        bool hasP = false;
+        foreach (var f in ans.Facts) if (f.Text.StartsWith("P is 238 ms")) hasP = true;
+        Check(hasP, "\"Why is the sound late?\" brings up the P line");
+        var crackle = a.Ask("sound crackles", s);
+        bool hasSaver = false;
+        foreach (var f in crackle.Facts) if (f.Text.Contains("Battery saver")) hasSaver = true;
+        Check(hasSaver, "crackle -> battery saver fact");
+        var fact0 = a.Ask("firewall udp", s);
+        bool hasFw = false;
+        foreach (var f in fact0.Facts) if (f.Text.Contains("Firewall")) hasFw = true;
+        Check(hasFw, "firewall question -> firewall fact");
+        string text = ans.ToText();
+        Check(text.StartsWith("Why is the sound late on my earbuds?") && text.Contains("1. Open Setup check.") && text.Contains("Right now:") && text.Contains("Related: ") && text.Contains("Source: sound.md"),
+              "text answer: answer, steps, Right now, Related, Source");
+        Check(a.Ask("What is the capital of France?", s).Facts.Count == 0, "unrelated question -> no facts");
+    }
+
+    static void TestRealHelp()
+    {
+        string dir = Path.Combine("docs", "help");
+        if (!Directory.Exists(dir)) { Check(true, "docs/help not here (skipped)"); return; }
+        var files = new List<KeyValuePair<string, string>>();
+        foreach (var p in Directory.GetFiles(dir))
+        {
+            string n = Path.GetFileName(p);
+            if (n.EndsWith(".md") || n == Assistant.SynonymsFile) files.Add(new KeyValuePair<string, string>(n, File.ReadAllText(p, Encoding.UTF8)));
+        }
+        var a = new Assistant(files);
+        Check(a.Files.Count > 0 && a.Sections.Count > 0, "help files parse into sections (" + a.Files.Count + " files, " + a.Sections.Count + " sections)");
+        bool titled = true, bodies = true;
+        foreach (var f in a.Files) if (string.IsNullOrEmpty(a.TopicOf(f))) titled = false;
+        foreach (var s in a.Sections) if (s.Title.Length == 0 || s.Body.Length == 0) bodies = false;
+        Check(titled && bodies, "every file has a title, every section a question and an answer");
+        Check(a.Ask("how do I share with a phone", null).Found, "a basic question finds an answer in the real help");
     }
 }
