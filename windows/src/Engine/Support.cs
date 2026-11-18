@@ -176,6 +176,12 @@ namespace DualEarbuds
         public Dictionary<string, double> LatencyByName = new Dictionary<string, double>();   // calibrated output latency
         public List<HearingProfile> Profiles = new List<HearingProfile>();
 
+        // assistant + AI assistants (docs/assistant-and-mcp.md); all off by default
+        public bool LocalModel = false;       // "Use a local AI model" (Ollama on 127.0.0.1)
+        public string LocalModelName = "";
+        public bool McpOn = false;            // "Allow AI assistants to control Dual Earbuds"
+        public bool GuideShown = false;       // the first-run guide was shown (existing installs count as shown)
+
         // listener mode
         public List<RecentHost> Recent = new List<RecentHost>();
         public List<string> ListenOutputs = new List<string>();
@@ -223,6 +229,7 @@ namespace DualEarbuds
                 if (File.Exists(path))
                 {
                     s.FirstRun = false;
+                    s.GuideShown = true;   // an install from before the guide existed: don't show it unasked
                     foreach (var line in File.ReadAllLines(path))
                     {
                         var p = line.Split('\t');
@@ -264,6 +271,10 @@ namespace DualEarbuds
                             case "dialogue": if (OneOf(v, DialogueValues)) s.Dialogue = v; break;
                             case "buffer": if (OneOf(v, BufferValues)) s.Buffer = v; break;
                             case "priority": s.Priority = SyncPriority.Normalize(v); break;
+                            case "localmodel": s.LocalModel = v == "1"; break;
+                            case "model": s.LocalModelName = Clean(v); break;
+                            case "mcp": s.McpOn = v == "1"; break;
+                            case "guide": s.GuideShown = v == "1"; break;
                             case "bufferms":
                                 int bm;
                                 if (int.TryParse(v, NumberStyles.Integer, CultureInfo.InvariantCulture, out bm)) s.BufferMs = JitterBuffer.Clamp(bm);
@@ -353,6 +364,10 @@ namespace DualEarbuds
                 lines.Add("dialogue\t" + Dialogue);
                 lines.Add("buffer\t" + Buffer);
                 lines.Add("bufferms\t" + BufferMs.ToString(CultureInfo.InvariantCulture));
+                lines.Add("localmodel\t" + B(LocalModel));
+                lines.Add("model\t" + Clean(LocalModelName));
+                lines.Add("mcp\t" + B(McpOn));
+                lines.Add("guide\t" + B(GuideShown));
                 foreach (var kv in LatencyByName)
                     lines.Add("latency2\t" + Clean(kv.Key) + "\t" + kv.Value.ToString("0.#", CultureInfo.InvariantCulture));
                 foreach (var hp in Profiles) lines.Add("profile\t" + hp.Serialize());

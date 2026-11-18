@@ -43,7 +43,7 @@ details li{margin:6px 0;line-height:1.45}
 </div>
 <div class='card pin' id='pinCard'>
   <h2>Enter the room PIN</h2>
-  <p>The host asked for a PIN. It's shown on the laptop's Phones page.</p>
+  <p>The host asked for a PIN. It's shown on the host's Listeners page.</p>
   <input id='pin' type='tel' inputmode='numeric' pattern='[0-9]*' maxlength='6' autocomplete='off' aria-label='Room PIN'>
   <div class='err' id='pinErr'></div>
   <button id='pinGo' class='big'>Join</button>
@@ -104,24 +104,29 @@ function plcCrossfade(L,R,frames,rate){
 }
 // Clock sync (protocol v3.1): offset = h - (c + now)/2 from the lowest-RTT of the last 8 sync replies;
 // packet seq is due at host time h(seq) + playoutMs. Small errors trim playbackRate by at most 0.5 %,
-// beyond 40 ms the playhead jumps. Without sync (old host) the Buffer slider rules as before.
-const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN,priority:'together'};
+// beyond 20 ms the playhead jumps (v3.4; was 40 ms), and when P changes the next packet snaps to the new deadline
+// (anything beyond 5 ms), so the phone is back on time in under 2 s. Without sync (old host) the Buffer slider rules.
+const SYNC={samples:[],offset:0,ok:false,seq0:-1,h0:0,playout:120,quick:0,timer:null,rate:1,trimming:false,err:NaN,priority:'together',snapNext:false};
+function setPlayout(ms){const v=Math.max(30,Math.min(1000,ms));if(v!==SYNC.playout)SYNC.snapNext=true;SYNC.playout=v;}
 // Protocol v3.2 needMs: how late packets arrive versus a steady 10 ms schedule (p99 over 30 s) + output
 // latency + 10 (v3.3 lip-sync: p95 over 10 s + 5). The host sets the common deadline (playout) from every listener's need and announces it.
-const LATE={base:null,seq0:0,vals:[],max:3000};
+// A true sliding window: every value keeps its arrival time and ages out after 30 s, also when no packets come.
+const LATE={base:null,seq0:0,vals:[],t:[],win:30000};
+function lateAge(now){while(LATE.t.length&&now-LATE.t[0]>LATE.win){LATE.t.shift();LATE.vals.shift();}}
 function noteLate(seq,now){
   if(LATE.base===null){LATE.base=now;LATE.seq0=seq;return;}
   const d=(seq-LATE.seq0)|0;
   if(d<-1000||d>1000000){LATE.base=now;LATE.seq0=seq;return;}
   let late=now-(LATE.base+d*10);
   if(late<0){LATE.base+=late;late=0;}
-  LATE.vals.push(late);if(LATE.vals.length>LATE.max)LATE.vals.shift();
+  LATE.vals.push(late);LATE.t.push(now);if(LATE.vals.length>6000){LATE.vals.shift();LATE.t.shift();}
+  lateAge(now);
 }
-function lateQ(q,n){const v=n<LATE.vals.length?LATE.vals.slice(LATE.vals.length-n):LATE.vals.slice();if(!v.length)return 0;v.sort((x,y)=>x-y);return v[Math.min(v.length-1,Math.floor(v.length*q))];}
-function lateP99(){return lateQ(0.99,LATE.max);}
+function lateQ(q,ms){const now=performance.now();lateAge(now);const v=[];for(let i=0;i<LATE.t.length;i++)if(now-LATE.t[i]<=ms)v.push(LATE.vals[i]);if(!v.length)return 0;v.sort((x,y)=>x-y);return v[Math.max(0,Math.min(v.length-1,Math.ceil(v.length*q)-1))];}
+function lateP99(){return lateQ(0.99,LATE.win);}
 // v3.3: a lip-sync host asks for less: p95 over the last 10 s + 5, floor 20 ms. Hosts that don't say: v3.2.
 function setPriority(p){SYNC.priority=p==='lipsync'?'lipsync':'together';}
-function needMs(){const out=ctx?(ctx.outputLatency||ctx.baseLatency||0)*1000:0;const net=SYNC.priority==='lipsync'?Math.max(lateQ(0.95,1000)+5,20):Math.max(lateP99()+10,30);return Math.ceil(net+out+15);}
+function needMs(){const out=ctx?(ctx.outputLatency||ctx.baseLatency||0)*1000:0;const net=SYNC.priority==='lipsync'?Math.max(lateQ(0.95,10000)+5,20):Math.max(lateP99()+10,30);return Math.ceil(net+out+15);}
 function syncSend(){if(ws&&ws.readyState===1)ws.send(JSON.stringify({type:'sync',c:performance.now()}));}
 function syncTick(){syncSend();SYNC.quick++;clearTimeout(SYNC.timer);if(running)SYNC.timer=setTimeout(syncTick,SYNC.quick<5?200:2000);}
 function onSync(m){
@@ -145,7 +150,9 @@ function schedule(b,frames,rate,seq){
   if(due>=now+0.03){
     const err=playhead-due;               // > 0: we would play late
     SYNC.err=err;
-    if(playhead<now+0.02||Math.abs(err)>0.04){playhead=due;SYNC.trimming=false;}
+    const limit=SYNC.snapNext?0.005:0.02;
+    SYNC.snapNext=false;
+    if(playhead<now+0.02||Math.abs(err)>limit){playhead=due;SYNC.trimming=false;}
     else{
       if(!SYNC.trimming&&Math.abs(err)>0.005)SYNC.trimming=true;
       else if(SYNC.trimming&&Math.abs(err)<0.002)SYNC.trimming=false;
@@ -214,8 +221,8 @@ function onAudio(buf){
 }
 function onText(t){
   let m;try{m=JSON.parse(t);}catch(e){return;}
-  if(m.type==='hello'){pcName=m.pc||'';setPriority(m.priority);if(typeof m.playoutMs==='number')SYNC.playout=Math.max(30,Math.min(1000,m.playoutMs));$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
-  else if(m.type==='playout'&&typeof m.ms==='number'){if(typeof m.priority==='string')setPriority(m.priority);SYNC.playout=Math.max(30,Math.min(1000,m.ms));}
+  if(m.type==='hello'){pcName=m.pc||'';setPriority(m.priority);if(typeof m.playoutMs==='number')setPlayout(m.playoutMs);$('pc').textContent='Connected to '+pcName;setDot('on');setupMedia();if(!m.rate)$('st').textContent='Connected. Start mirroring on the laptop.';}
+  else if(m.type==='playout'&&typeof m.ms==='number'){if(typeof m.priority==='string')setPriority(m.priority);setPlayout(m.ms);}
   else if(m.type==='ping'){ws.send(JSON.stringify({type:'pong',t:m.t}));}
   else if(m.type==='sync'&&typeof m.c==='number'&&typeof m.h==='number'){onSync(m);}
   else if(m.type==='clock'&&typeof m.seq==='number'&&typeof m.h==='number'){SYNC.seq0=m.seq>>>0;SYNC.h0=m.h;}

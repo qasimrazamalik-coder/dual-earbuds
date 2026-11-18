@@ -5,6 +5,7 @@
 //   DualEarbuds.exe --make-icon F   write the multi-size app icon to F
 //   DualEarbuds.exe --uitest F      build every page offscreen with demo data and report problems to F
 //   DualEarbuds.exe --battery F     write the battery levels Windows reports to F
+//   DualEarbuds.exe --mcp           MCP stdio bridge for AI assistants (forwards to the running app; starts it if needed)
 using System;
 using System.IO;
 using System.Linq;
@@ -30,6 +31,7 @@ namespace DualEarbuds
         {
             try
             {
+                if (args.Length >= 1 && args[0] == "--mcp") return McpBridge.Run();
                 if (args.Length >= 2 && args[0] == "--screenshots") return Tool(() => Screenshots.Run(args[1]));
                 if (args.Length >= 2 && args[0] == "--make-icon") return Tool(() => { IconFactory.WriteIco(args[1]); return 0; });
                 if (args.Length >= 2 && args[0] == "--uitest") return Tool(() => Screenshots.UiTest(args[1]));
@@ -84,6 +86,7 @@ namespace DualEarbuds
                     var settings = Settings.Load();
                     Theme.Apply(app.Resources, settings.Theme);
                     var ctl = new Controller(settings);
+                    new McpHost(ctl);   // AI assistants (off until Settings > AI assistants allows them)
                     var win = new MainWindow(ctl);
                     ctl.Initialize();
 

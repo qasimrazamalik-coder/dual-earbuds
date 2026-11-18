@@ -753,7 +753,7 @@ namespace DualEarbuds
             string[] s3 = {
                 "Connect the device to the same Wi-Fi as this laptop, or to its hotspot.",
                 "Scan the QR code with the Dual Earbuds app (keeps playing with the screen off) or the camera, or open the link in any browser.",
-                "Press Start on the device. It joins the shared deadline by itself; calibrate laptop earbuds on Home for exact sync." };
+                "Press Join in the Dual Earbuds app (Start listening in a browser). It joins the shared deadline by itself; calibrate laptop earbuds on Home for exact sync." };
             for (int i = 0; i < s3.Length; i++)
             {
                 var row = new Grid { Margin = new Thickness(16, 10, 16, 10) };
@@ -930,7 +930,7 @@ namespace DualEarbuds
         readonly StackPanel release;
         readonly CheckBox autoUpd;
 
-        public SettingsPage(Controller ctl, Action<string> onTheme, Action onHotkeyChanged, Action onReset, Action exitApp)
+        public SettingsPage(Controller ctl, Action<string> onTheme, Action onHotkeyChanged, Action onReset, Action exitApp, Action showGuide)
         {
             this.ctl = ctl;
             this.exitApp = exitApp;
@@ -1037,6 +1037,42 @@ namespace DualEarbuds
             upd.Add(Kit.Row("Check once a day", "Nothing is downloaded or installed until you press Install.", autoUpd));
             root.Children.Add(upd.Root);
 
+            // AI assistants (MCP, docs/assistant-and-mcp.md): off by default, loopback + token only
+            var aiSec = Kit.Section("AI assistants");
+            aiSec.Name = "anchor_ai";
+            root.Children.Add(aiSec);
+            var ai = new RowPanel();
+            var mcpSw = Ui.Switch("", s.McpOn);
+            mcpSw.Checked += (o, e) => { ctl.SetMcp(true); RefreshAi(); };
+            mcpSw.Unchecked += (o, e) => { ctl.SetMcp(false); RefreshAi(); };
+            ai.Add(Kit.Row("Allow AI assistants to control Dual Earbuds", "Claude, ChatGPT, Codex, Cursor and others on this laptop can check status and change settings. Only from this laptop, with a token; never the room PIN.", mcpSw));
+            var rotate = Kit.Secondary("Rotate", null);
+            rotate.Click += (o, e) => { ctl.RotateMcpToken(); Flash(rotate, "Rotated", "Rotate"); };
+            ai.Add(Kit.Row("Access token", "Kept in mcp-token in the settings folder. A new token disconnects assistants that use the HTTP address until you paste it again.", rotate));
+            var copyRow = new StackPanel { Margin = new Thickness(16, 10, 16, 12) };
+            copyRow.Children.Add(Ui.Text("Copy setup", 14, FontWeights.Normal, "Text"));
+            copyRow.Children.Add(Kit.Hint("Puts ready-to-paste settings for your assistant on the clipboard. The help topic AI assistants explains each one."));
+            var copies = new WrapPanel { Margin = new Thickness(-4, 6, 0, 0) };
+            string[] names = { "Claude Desktop", "Claude Code", "Codex CLI", "Cursor", "VS Code", "HTTP: URL + token" };
+            foreach (var n in names)
+            {
+                string which = n;
+                var b = Kit.Secondary(n, null);
+                b.Margin = new Thickness(4);
+                b.Click += (o, e) => CopySetup(which, b);
+                copies.Children.Add(b);
+            }
+            copyRow.Children.Add(copies);
+            ai.Add(copyRow);
+            var recentBox = new StackPanel { Margin = new Thickness(16, 10, 16, 12) };
+            recentBox.Children.Add(Ui.Text("Recent assistant actions", 14, FontWeights.Normal, "Text"));
+            aiRecent = new StackPanel { Margin = new Thickness(0, 4, 0, 0) };
+            recentBox.Children.Add(aiRecent);
+            ai.Add(recentBox);
+            root.Children.Add(ai.Root);
+            ctl.AssistantActed += msg => RefreshAi();
+            RefreshAi();
+
             root.Children.Add(Kit.Section("Help and data"));
             var data = new RowPanel();
             var copyDiag = Kit.Secondary("Copy", null);
@@ -1051,6 +1087,7 @@ namespace DualEarbuds
                 t.Tick += (o2, e2) => { t.Stop(); copyDiag.Content = "Copy"; };
                 t.Start();
             };
+            data.Add(Kit.Row("First-run guide", "The three setup steps: connect earbuds, choose outputs and calibrate, share with phones.", Kit.Secondary("Show again", (o, e) => showGuide())));
             data.Add(Kit.Row("Diagnostics", "Version, Windows build, network, outputs, listeners and the last 200 log lines. Never your link key or PIN.", copyDiag));
             var open = Kit.Secondary("Open folder", (o, e) => PageKit.OpenFolder(AppInfo.DataDir));
             data.Add(Kit.Row("Settings and logs", AppInfo.DataDir, open));
@@ -1061,6 +1098,61 @@ namespace DualEarbuds
             });
             data.Add(Kit.Row("Reset all settings", "Calibrations, hearing profiles and recent devices are kept.", reset));
             root.Children.Add(data.Root);
+        }
+
+        StackPanel aiRecent;
+        public const int RecentShown = 8;
+
+        void RefreshAi()
+        {
+            if (aiRecent == null) return;
+            aiRecent.Children.Clear();
+            var list = ctl.AssistantActions;
+            if (list.Count == 0)
+            {
+                aiRecent.Children.Add(Kit.Hint(ctl.Settings.McpOn ? "None yet. Each action also shows for 3 s next to the tray icon." : "None. Turn on the switch above to allow assistants."));
+                return;
+            }
+            for (int i = 0; i < list.Count && i < RecentShown; i++)
+            {
+                var t = Ui.Mono(list[i], 11.5, "Text");
+                t.TextTrimming = TextTrimming.CharacterEllipsis;
+                t.TextWrapping = TextWrapping.NoWrap;
+                t.Margin = new Thickness(0, 2, 0, 2);
+                t.ToolTip = list[i];
+                aiRecent.Children.Add(t);
+            }
+            if (list.Count > RecentShown) aiRecent.Children.Add(Kit.Hint("and " + (list.Count - RecentShown) + " earlier (the last " + Controller.MaxAssistantActions + " are kept until the app closes)."));
+        }
+
+        void CopySetup(string which, Button b)
+        {
+            string exe;
+            try { exe = System.Reflection.Assembly.GetEntryAssembly().Location; }
+            catch { exe = "DualEarbuds.exe"; }
+            string text;
+            switch (which)
+            {
+                case "Claude Desktop": text = McpConfig.ClaudeDesktop(exe); break;
+                case "Claude Code": text = McpConfig.ClaudeCode(exe); break;
+                case "Codex CLI": text = McpConfig.CodexCli(exe); break;
+                case "Cursor": text = McpConfig.Cursor(exe); break;
+                case "VS Code": text = McpConfig.VsCode(exe); break;
+                default:
+                    if (!ctl.Settings.McpOn || !McpToken.IsValid(ctl.Mcp.Token)) { Flash(b, "Turn it on first", which); return; }
+                    text = McpConfig.Http(ctl.Settings.PhonePort, ctl.Mcp.Token);
+                    break;
+            }
+            try { Clipboard.SetText(text); Flash(b, "Copied", which); }
+            catch { Flash(b, "Couldn't copy", which); }
+        }
+
+        static void Flash(Button b, string text, string back)
+        {
+            b.Content = text;
+            var t = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromSeconds(2) };
+            t.Tick += (o2, e2) => { t.Stop(); b.Content = back; };
+            t.Start();
         }
 
         static void SetBoot(bool on)
@@ -1246,7 +1338,7 @@ namespace DualEarbuds
             head.Children.Add(Ui.Logo(40));
             var t = new StackPanel { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
             t.Children.Add(Ui.Text("Dual Earbuds", 15, FontWeights.SemiBold, "Text"));
-            t.Children.Add(Ui.Mono(AppInfo.Version + "  ·  protocol 3.2  ·  MIT", 12, "Muted"));
+            t.Children.Add(Ui.Mono(AppInfo.Version + "  ·  protocol 3.3  ·  MIT", 12, "Muted"));
             head.Children.Add(t);
             top.Add(head);
             top.Root.Margin = new Thickness(0, 20, 0, 0);
