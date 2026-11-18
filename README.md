@@ -39,7 +39,7 @@ own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its
 
 | Home | Phones & Party mode |
 |---|---|
-| ![Dual Earbuds Windows app home screen mirroring sound to two earbuds](docs/images/home-dark.png) | ![Phones page with QR code to connect phones over Wi-Fi](docs/images/phones-dark.png) |
+| ![Dual Earbuds Windows app home screen mirroring sound to two earbuds](docs/images/home-dark.png) | ![Listeners page with QR code to connect phones over Wi-Fi](docs/images/phones-dark.png) |
 | **Settings** | **Light theme** |
 | ![Settings with updates and network options](docs/images/settings-dark.png) | ![Light theme](docs/images/home-light.png) |
 | **Party mode with room PIN** | **Smart features** |
