@@ -55,7 +55,7 @@ import com.dualearbuds.companion.net.LinkParser
 import com.dualearbuds.companion.net.LinkTarget
 import com.dualearbuds.companion.net.Net
 import com.dualearbuds.companion.net.ParseResult
-import com.dualearbuds.companion.net.SeqGate
+import com.dualearbuds.companion.net.TransportMerge
 import com.dualearbuds.companion.net.StreamConnection
 import com.dualearbuds.companion.net.UdpAudioReceiver
 import com.dualearbuds.companion.net.UdpPolicy
@@ -181,11 +181,11 @@ class PlaybackService : Service() {
     @Volatile
     private var lastSeq = -1L
 
-    /** v3.2 UDP audio: receiver for the current session, when/if to fall back, and the dedupe gate. */
+    /** v3.2 UDP audio: receiver for the current session, when/if to fall back, and the in-order dedupe merge. */
     @Volatile
     private var udp: UdpAudioReceiver? = null
     private val udpPolicy = UdpPolicy()
-    private val gate = SeqGate()
+    private val merge = TransportMerge<Pair<Int, ShortArray>>()
     private var udpJob: Job? = null
 
     /** needMs the host last heard from us (v3.2), null before the first report on this link. */
@@ -497,7 +497,7 @@ class PlaybackService : Service() {
         override fun onOpened() {
             lastSeq = -1L
             sentNeedMs = null
-            gate.reset()
+            merge.reset()
             engine.resetCounters() // `underruns` counts since connect
             PlaybackController.update {
                 it.copy(
@@ -578,26 +578,31 @@ class PlaybackService : Service() {
 
         override fun onUdpOffer(port: Int, token: String) = startUdp(port, token)
 
-        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) = deliver(rate, seq, samples)
+        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) = deliver(rate, seq, samples, fromUdp = false)
     }
 
-    /** One audio packet from either transport: deduped and kept in order by [gate], then counted and played. */
-    private fun deliver(rate: Int, seq: Long, samples: ShortArray) {
+    /**
+     * One audio packet from either transport: deduped and kept in order by [merge] (which also bridges the
+     * WebSocket → UDP switch without dropping in-flight packets), then counted and played.
+     */
+    private fun deliver(rate: Int, seq: Long, samples: ShortArray, fromUdp: Boolean) {
         if (rate !in 8000..192000) return
-        gate.offer(seq) {
-            val prev = lastSeq
-            if (prev >= 0) {
-                val expected = (prev + 1) and 0xFFFFFFFFL
-                if (seq != expected) {
-                    val gap = (seq - expected) and 0xFFFFFFFFL
-                    if (gap in 1L..5000L) lost.addAndGet(gap)
-                }
+        merge.offer(seq, fromUdp, SystemClock.elapsedRealtime(), rate to samples) { s, (r, pcm) -> play(r, s, pcm) }
+    }
+
+    private fun play(rate: Int, seq: Long, samples: ShortArray) {
+        val prev = lastSeq
+        if (prev >= 0) {
+            val expected = (prev + 1) and 0xFFFFFFFFL
+            if (seq != expected) {
+                val gap = (seq - expected) and 0xFFFFFFFFL
+                if (gap in 1L..5000L) lost.addAndGet(gap)
             }
-            lastSeq = seq
-            packets.incrementAndGet()
-            mirroring = true
-            engine.push(rate, seq, samples)
         }
+        lastSeq = seq
+        packets.incrementAndGet()
+        mirroring = true
+        engine.push(rate, seq, samples)
     }
 
     private val udpListener = object : UdpAudioReceiver.Listener {
@@ -606,7 +611,7 @@ class PlaybackService : Service() {
             connection?.touch()
         }
 
-        override fun onBlock(block: UdpWire.Block) = deliver(block.rate, block.seq, block.samples)
+        override fun onBlock(block: UdpWire.Block) = deliver(block.rate, block.seq, block.samples, fromUdp = true)
 
         override fun onError(reason: String) {
             AppLog.w("UDP unusable: $reason")

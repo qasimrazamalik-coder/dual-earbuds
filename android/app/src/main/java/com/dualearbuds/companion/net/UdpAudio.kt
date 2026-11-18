@@ -161,6 +161,95 @@ class SeqGate(private val restartBack: Long = 200) {
     }
 }
 
+/**
+ * Merges the two audio transports into one in-order stream (protocol v3.2). When the host switches a listener
+ * from WebSocket to UDP, UDP overtakes the TCP stream: the first datagrams carry seq N while WebSocket packets
+ * N−6…N−1 are still in flight. A plain [SeqGate] would then drop those as "old" — an audible gap of up to ~60 ms.
+ *
+ * So while the WebSocket delivered audio in the last [holdMs], a UDP packet that would leave a gap is held back
+ * (at most [maxHeld], at most [holdMs]) and WebSocket packets keep filling in until they reach it; then the held
+ * UDP packets follow in order. Duplicates (the UDP redundancy copy, or both transports) are dropped by seq.
+ * In steady state (UDP only) nothing is ever held, so this adds no delay.
+ */
+class TransportMerge<T>(private val holdMs: Long = 250, private val maxHeld: Int = 50) {
+    private class Held<T>(val seq: Long, val payload: T)
+
+    private val gate = SeqGate()
+    private var last = -1L
+    private var lastWsAt = Long.MIN_VALUE / 2
+    private val held = ArrayList<Held<T>>()
+    private var heldSince = 0L
+
+    /** Packets held right now (for tests and diagnostics). */
+    val heldCount: Int
+        @Synchronized get() = held.size
+
+    @Synchronized
+    fun reset() {
+        gate.reset()
+        last = -1L
+        lastWsAt = Long.MIN_VALUE / 2
+        held.clear()
+    }
+
+    /**
+     * Offers one packet from UDP ([fromUdp]) or the WebSocket at [nowMs]; [deliver] runs (in seq order, under this
+     * object's lock) for every packet released. Returns how many were delivered.
+     */
+    @Synchronized
+    fun offer(seq: Long, fromUdp: Boolean, nowMs: Long, payload: T, deliver: (Long, T) -> Unit): Int {
+        val s = seq and 0xFFFFFFFFL
+        var count = 0
+        if (fromUdp) {
+            val wsRecent = nowMs - lastWsAt <= holdMs
+            if ((wsRecent || held.isNotEmpty()) && last >= 0 && diff(s, last) > 1) {
+                if (held.none { it.seq == s }) {
+                    if (held.isEmpty()) heldSince = nowMs
+                    held += Held(s, payload)
+                }
+                val force = held.size > maxHeld || nowMs - heldSince > holdMs || !wsRecent
+                return drain(force, deliver)
+            }
+        } else {
+            lastWsAt = nowMs
+        }
+        if (one(s, payload, deliver)) count++
+        count += drain(force = held.isNotEmpty() && nowMs - heldSince > holdMs, deliver = deliver)
+        return count
+    }
+
+    /** Releases held packets that are now next in line (all of them when [force]). */
+    private fun drain(force: Boolean, deliver: (Long, T) -> Unit): Int {
+        var count = 0
+        while (held.isNotEmpty()) {
+            held.sortBy { if (last < 0) it.seq else diff(it.seq, last) }
+            val first = held[0]
+            val d = if (last < 0) 1 else diff(first.seq, last)
+            if (d <= 0) {
+                held.removeAt(0) // already delivered
+                continue
+            }
+            if (d > 1 && !force) break
+            held.removeAt(0)
+            if (one(first.seq, first.payload, deliver)) count++
+        }
+        return count
+    }
+
+    private fun one(seq: Long, payload: T, deliver: (Long, T) -> Unit): Boolean =
+        gate.offer(seq) {
+            last = seq
+            deliver(seq, payload)
+        }
+
+    /** Signed distance a − b on the uint32 sequence circle. */
+    private fun diff(a: Long, b: Long): Long {
+        var d = (a - b) and 0xFFFFFFFFL
+        if (d >= 0x80000000L) d -= 0x100000000L
+        return d
+    }
+}
+
 /** What the UDP policy wants sent on the WebSocket. */
 enum class UdpSignal { NONE, SEND_OK_FALSE, SEND_OK_TRUE }
 
