@@ -109,6 +109,10 @@ static class EngineTests
         Run("MCP: POST /mcp on the link port, end to end", () => TestMcpHttp(tmp));
         Run("MCP: stdio bridge framing round trip", TestMcpStdio);
         Run("MCP: client configs, token file, settings", () => TestMcpConfig(tmp));
+        Run("Latency fix (a): the jitter window really slides", TestJitterSliding);
+        Run("Latency fix (b): WebSocket -> UDP switch-over loses nothing", TestTransportMerge);
+        Run("Latency fix (c): re-converge in < 2 s after P goes up", TestConverge);
+        Run("Latency fix (d): web player converges and slides too", TestWebPlayerFixes);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -3113,5 +3117,144 @@ There is 1 interface on the system:
         var old = Settings.Load(sp);
         Check(!old.McpOn && !old.LocalModel && old.GuideShown, "an older settings file: assistants off, guide counted as shown");
         Check(!new Settings().McpOn && !new Settings().GuideShown, "a new install: AI assistants off, guide not shown yet");
+    }
+
+    static void TestJitterSliding()
+    {
+        var w = new JitterWindow(30000, 10);
+        for (int i = 0; i < 50; i++) w.AddJitter(120, i * 10);           // a bad half second at t = 0
+        for (int i = 50; i < 2900; i++) w.AddJitter(2, i * 10);          // then calm until t = 29 s
+        Check(w.P99 >= 100, "the spike still counts at 29 s (" + w.P99.ToString("0.0") + ")");
+        for (int i = 2900; i < 3100; i++) w.AddJitter(2, i * 10);        // to t = 31 s
+        Check(w.P99 < 5, "at 31 s the spike has aged out (" + w.P99.ToString("0.0") + ")");
+        var q = new JitterWindow(30000, 10);
+        for (int i = 0; i < 300; i++) q.AddJitter(80, i * 10);
+        Check(q.ValueAt(3000) >= 79, "p99 right after a burst");
+        Check(q.ValueAt(40000) == 0 && q.Samples == 0, "no packets for 40 s: nothing old is reported (the old window kept it forever)");
+        var e = new JitterWindow(10000, 10, 0.95);
+        for (int i = 0; i < 100; i++) e.AddJitter(i, 1000 + i);
+        double p95 = e.ValueAt(1100);
+        Check(p95 == 94, "exact nearest-rank p95 of 0..99 = 94 (" + p95 + ")");
+        var cap = new JitterWindow(1000, 10);
+        for (int i = 0; i < 100000; i++) cap.AddJitter(1, i);            // far more than fits: fixed memory
+        Check(cap.Samples <= 1000 / 10 * 2 + 64, "memory bounded (" + cap.Samples + " samples)");
+        cap.Reset();
+        Check(cap.Samples == 0 && cap.P99 == 0, "reset");
+    }
+
+    // Plays packets through TransportMerge the way LinkClient.OnPacket does (seq gaps are concealed, late ones dropped).
+    class MergeSim
+    {
+        public readonly TransportMerge M = new TransportMerge();
+        public bool Have;
+        public uint Last;
+        public int Concealed, DroppedLate;
+        public List<uint> Played = new List<uint>();
+        readonly byte[] pcm = new byte[480 * 4];
+
+        void Play(uint seq)
+        {
+            int miss = SeqGap.Missing(Have, Last, seq);
+            if (miss < 0) { DroppedLate++; return; }
+            Concealed += Math.Min(miss, SeqGap.MaxConceal);
+            Have = true;
+            Last = seq;
+            Played.Add(seq);
+        }
+
+        public void Arrive(bool udp, uint seq, long now, bool useMerge)
+        {
+            if (!useMerge) { Play(seq); return; }
+            if (!udp) M.NoteWs(now);
+            if (M.Held >= TransportMerge.MaxHeld) Drain(now);
+            if (M.Offer(udp, Have, Last, seq, pcm, 0, 480, 48000, now)) { Drain(now); return; }
+            Play(seq);
+            Drain(now);
+        }
+
+        public void Drain(long now)
+        {
+            TransportMerge.Packet p;
+            while ((p = M.Next(Have, Last, now)) != null) Play(p.Seq);
+        }
+    }
+
+    // WebSocket packets 1..N; the host switches to UDP at seq 41. The WebSocket's last 6 packets (35..40) are still
+    // queued in TCP and arrive 35 ms late, after UDP 41..43 that took the fast path.
+    static MergeSim SwitchOver(bool useMerge, bool wsTailLost)
+    {
+        var sim = new MergeSim();
+        var events = new List<KeyValuePair<long, KeyValuePair<bool, uint>>>();
+        for (uint s = 1; s <= 34; s++) events.Add(new KeyValuePair<long, KeyValuePair<bool, uint>>(s * 10, new KeyValuePair<bool, uint>(false, s)));
+        if (!wsTailLost) for (uint s = 35; s <= 40; s++) events.Add(new KeyValuePair<long, KeyValuePair<bool, uint>>(s * 10 + 35, new KeyValuePair<bool, uint>(false, s)));
+        for (uint s = 41; s <= 80; s++) events.Add(new KeyValuePair<long, KeyValuePair<bool, uint>>(s * 10 - 60, new KeyValuePair<bool, uint>(true, s)));
+        events.Sort((a, b) => a.Key != b.Key ? a.Key.CompareTo(b.Key) : (a.Value.Key == b.Value.Key ? 0 : a.Value.Key ? 1 : -1));
+        foreach (var e in events) sim.Arrive(e.Value.Key, e.Value.Value, e.Key, useMerge);
+        sim.Drain(10000);
+        return sim;
+    }
+
+    static void TestTransportMerge()
+    {
+        var old = SwitchOver(false, false);
+        Check(old.Concealed == 6 && old.DroppedLate == 6, "without the merge: 6 concealed + 6 real packets dropped (the known issue)");
+        var fixedSim = SwitchOver(true, false);
+        bool inOrder = fixedSim.Played.Count == 80;
+        for (int i = 0; i < fixedSim.Played.Count && inOrder; i++) if (fixedSim.Played[i] != (uint)(i + 1)) inOrder = false;
+        Check(fixedSim.Concealed == 0 && fixedSim.DroppedLate == 0 && inOrder, "with the merge: all 80 played once, in order, nothing concealed");
+        Check(fixedSim.M.HeldTotal >= 3 && fixedSim.M.Held == 0, "UDP packets waited for the WebSocket (" + fixedSim.M.HeldTotal + " held), none left");
+        var lost = SwitchOver(true, true);
+        Check(lost.Concealed == 6 && lost.Played.Count == 74 && lost.Played[lost.Played.Count - 1] == 80, "WebSocket tail really lost: held until 60 ms after its last packet, then concealed as before");
+        // steady UDP (no WebSocket audio lately): a gap is concealed at once, nothing is held
+        var steady = new MergeSim();
+        for (uint s = 1; s <= 10; s++) steady.Arrive(true, s, 1000 + s * 10, true);
+        steady.Arrive(true, 13, 1130, true);
+        Check(steady.M.HeldTotal == 0 && steady.Concealed == 2, "steady UDP: real loss is concealed immediately");
+        // duplicates across the two paths are dropped by seq
+        var dup = new MergeSim();
+        for (uint s = 1; s <= 5; s++) { dup.Arrive(false, s, s * 10, true); dup.Arrive(true, s, s * 10 + 1, true); }
+        Check(dup.Played.Count == 5 && dup.DroppedLate == 5, "a packet that comes both ways plays once");
+    }
+
+    // Seconds until |error| <= 5 ms after P rises by `jump` ms (error starts at -jump: the ear is now early).
+    static double ConvergeTime(double jump, bool converge)
+    {
+        var t = new SyncTrim();
+        double e = -jump;
+        if (converge) t.Converge();
+        for (int i = 0; i < 2000; i++)
+        {
+            if (Math.Abs(e) <= SyncTrim.DeadbandMs) return i * 0.01;
+            double rate;
+            int adj = t.Decide(e, 48000, out rate);
+            if (adj != 0) e -= adj * 1000.0 / 48000;     // inserted silence (adj < 0) moves the ear later
+            e -= (rate - 1) * 10;                         // a 10 ms packet consumed at `rate` (> 1 = faster) catches up (rate-1)*10 ms
+        }
+        return 99;
+    }
+
+    static void TestConverge()
+    {
+        Check(ConvergeTime(30, false) > 2, "before: +30 ms took " + ConvergeTime(30, false).ToString("0.0") + " s of rate trimming");
+        foreach (var jump in new double[] { 8, 15, 21, 30, 60, 120 })
+        {
+            double s = ConvergeTime(jump, true);
+            Check(s < 2, "P +" + jump + " ms: back within 5 ms in " + s.ToString("0.00") + " s");
+        }
+        var t = new SyncTrim();
+        double rate;
+        Check(t.Decide(25, 48000, out rate) == 0 && rate > 1 && rate <= 1 + SyncTrim.MaxTrim, "steady state unchanged: 25 ms is still rate-trimmed (no audible skip)");
+        t.Converge();
+        Check(t.Decide(25, 48000, out rate) == 1200 && !t.Trimming, "after a P increase: 25 ms is skipped at once (1200 frames)");
+        Check(t.Decide(12, 48000, out rate) == 0 && rate > 1 + SyncTrim.MaxTrim && rate <= 1 + SyncTrim.ConvergeMaxTrim, "smaller errors trimmed at up to 1 %");
+        Check(t.Decide(3, 48000, out rate) == 0 && !t.Converging && rate == 1, "within 5 ms: converging ends");
+    }
+
+    static void TestWebPlayerFixes()
+    {
+        string h = WebPlayer.Html;
+        Check(h.Contains("SYNC.converge") && h.Contains("0.02") && h.Contains("0.01"), "web player: converge mode after a P increase (20 ms snap, 1 % trim)");
+        Check(h.Contains("LATE.win") && h.Contains("LATE.t"), "web player: lateness window is time-based (30 s), not a packet count");
+        Check(h.Contains("(d<=0&&d>-1000)return"), "web player: duplicates dropped by seq");
     }
 }

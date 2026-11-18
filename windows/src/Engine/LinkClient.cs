@@ -105,12 +105,17 @@ namespace DualEarbuds
         public volatile float Volume = 1f;      // this output's own volume
         public double OutputLatencyMs;          // device buffer -> heard: calibrated, or estimated (OutputTiming)
         readonly SyncTrim trim = new SyncTrim();
+        volatile bool playoutJumped;
         readonly StereoResampler rs = new StereoResampler();
         float[] work = new float[4096];
         int lastBufferMs = -1, seenUnderruns;
         public double LastErrorMs;
 
         public ListenerOutput(string id, string name, OutputStream s) { DeviceId = id; Name = name; Stream = s; }
+
+        // The host raised P: re-converge quickly (SyncTrim.Converge) instead of only trimming the rate.
+        public void PlayoutRaised() { playoutJumped = true; }
+        public bool Converging { get { return trim.Converging; } }
 
         public int NewUnderruns()
         {
@@ -141,6 +146,7 @@ namespace DualEarbuds
                 double minQueue = jitterTargetMs;
                 if (error > 0 && queuedMs - error < minQueue) error = Math.Max(0, queuedMs - minQueue);
                 LastErrorMs = error;
+                if (playoutJumped) { playoutJumped = false; trim.Converge(); }
                 double ratio;
                 int adj = trim.Decide(error, rate, out ratio);
                 if (adj != 0) s.Adjust(-adj);
@@ -451,7 +457,7 @@ namespace DualEarbuds
                     hostName = MiniJson.GetString(d, "pc", "") ?? "";
                     hostKind = MiniJson.GetString(d, "host", "windows") == "android" ? "android" : "windows";
                     int po = MiniJson.GetInt(d, "playoutMs", PhoneLink.DefaultPlayoutMs);
-                    playoutMs = Math.Max(30, Math.Min(1000, po));
+                    SetPlayout(Math.Max(30, Math.Min(1000, po)));
                     SetPriority(MiniJson.GetString(d, "priority", null));
                     remoteAllowed = MiniJson.GetBool(d, "remote", false);
                     ReadSource(d);
@@ -496,7 +502,7 @@ namespace DualEarbuds
                     int pm = MiniJson.GetInt(d, "ms", -1);
                     string pp = MiniJson.GetString(d, "priority", null);
                     if (pp != null) SetPriority(pp);
-                    if (pm > 0) { playoutMs = Math.Max(30, Math.Min(1000, pm)); Raise(); }
+                    if (pm > 0) { SetPlayout(Math.Max(30, Math.Min(1000, pm))); Raise(); }
                     break;
                 case "talk":
                     talking = MiniJson.GetBool(d, "on", false);
@@ -510,6 +516,14 @@ namespace DualEarbuds
                     Raise();
                     break;
             }
+        }
+
+        // A higher P: every output has to move later by the difference; tell them to re-converge at once.
+        void SetPlayout(int ms)
+        {
+            int old = playoutMs;
+            playoutMs = ms;
+            if (ms > old) foreach (var o in outputs) o.PlayoutRaised();
         }
 
         // hello always sets it (missing = v3.2 host = together); playout only when it carries the field.
@@ -548,14 +562,14 @@ namespace DualEarbuds
             }
         }
 
-        public double JitterP99 { get { return needJitter.P99; } }
-        public double JitterP95 { get { return needJitter95.Value; } }
+        public double JitterP99 { get { return needJitter.ValueAt((long)NowMs); } }
+        public double JitterP95 { get { return needJitter95.ValueAt((long)NowMs); } }
 
         // v3.2 needMs = jitter p99 (30 s) + output latency + 10 ("together");
         // v3.3 lip-sync needMs = jitter p95 (10 s) + output latency + 5.
         // Either way never below the buffer the smart buffer keeps (the listener never steers its queue below
         // that), plus half the round trip (the path itself).
-        public int NeedMs { get { return ComputeNeedMs(priority, needJitter.P99, needJitter95.Value, Buffer.TargetMs, OutputLatencyMs, sync.BestRtt); } }
+        public int NeedMs { get { return ComputeNeedMs(priority, JitterP99, JitterP95, Buffer.TargetMs, OutputLatencyMs, sync.BestRtt); } }
 
         public static int ComputeNeedMs(string priority, double jitterP99, double jitterP95, int bufferTargetMs, double outputLatencyMs, double rttMs)
         {
@@ -625,6 +639,7 @@ namespace DualEarbuds
                     if (u > 0 && hostSharing) { Interlocked.Add(ref underruns, u); Buffer.OnUnderrun(now); }
                 }
                 Buffer.Tick(now);
+                lock (audioLk) DrainMerge(now);   // held packets never wait longer than TransportMerge.HoldMs + 100 ms
                 if (now - lastStatus >= StatusEveryMs) { lastStatus = now; SendStatus(); }
             }
         }
@@ -639,7 +654,27 @@ namespace DualEarbuds
             if (r < 8000 || r > 384000) return;
             udpHealth.OnWsAudio((long)NowMs);
             Interlocked.Increment(ref wsPackets);
-            lock (audioLk) OnPacket(b, 8, (len - 8) / 4, r, seq);
+            lock (audioLk) Arrive(false, b, 8, (len - 8) / 4, r, seq);
+        }
+
+        // WebSocket -> UDP switch-over: UDP packets that overtake the WebSocket's last ones wait for them (TransportMerge).
+        readonly TransportMerge merge = new TransportMerge();
+        public long HeldForMerge { get { lock (audioLk) return merge.HeldTotal; } }
+
+        void Arrive(bool udp, byte[] b, int pcmAt, int frames, int r, uint seq)
+        {
+            long now = (long)NowMs;
+            if (!udp) merge.NoteWs(now);
+            if (merge.Held >= TransportMerge.MaxHeld) DrainMerge(now);
+            if (merge.Offer(udp, haveSeq && !rejoined, lastSeq, seq, b, pcmAt, frames, r, now)) { DrainMerge(now); return; }
+            OnPacket(b, pcmAt, frames, r, seq);
+            DrainMerge(now);
+        }
+
+        void DrainMerge(long now)
+        {
+            TransportMerge.Packet p;
+            while ((p = merge.Next(haveSeq, lastSeq, now)) != null) OnPacket(p.Data, 0, p.Frames, p.Rate, p.Seq);
         }
 
         // Both paths (UDP and WebSocket) end here, one at a time; duplicates are dropped by sequence number.
@@ -670,7 +705,7 @@ namespace DualEarbuds
             long nowL = (long)NowMs;
             Buffer.OnPacket(nowL);
             double lateMs = lateness.OnPacket(seq, nowL);
-            needJitter.AddJitter(lateMs);
+            needJitter.AddJitter(lateMs, nowL);
             needJitter95.AddJitter(lateMs, nowL);
             if (missing > 0)
             {
@@ -807,9 +842,9 @@ namespace DualEarbuds
                         if (hasPrev && haveSeq && unchecked((int)(prev.Seq - lastSeq)) >= 1 && unchecked((int)(prev.Seq - lastSeq)) < 1000)
                         {
                             Interlocked.Increment(ref udpRecovered);
-                            OnPacket(buf, prev.PcmOffset, prev.Frames, prev.Rate, prev.Seq);
+                            Arrive(true, buf, prev.PcmOffset, prev.Frames, prev.Rate, prev.Seq);
                         }
-                        OnPacket(buf, cur.PcmOffset, cur.Frames, cur.Rate, cur.Seq);
+                        Arrive(true, buf, cur.PcmOffset, cur.Frames, cur.Rate, cur.Seq);
                     }
                 }
             }

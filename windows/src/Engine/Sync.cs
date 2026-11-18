@@ -2,6 +2,7 @@
 // packet-loss concealment, and the cross-correlation behind auto-sync calibration. Pure logic,
 // unit-tested, allocation-free in the per-packet paths.
 using System;
+using System.Collections.Generic;
 
 namespace DualEarbuds
 {
@@ -65,10 +66,19 @@ namespace DualEarbuds
 
     // Keeps one output on schedule (protocol v3.1): within +-5 ms do nothing, up to +-40 ms trim the
     // playback rate by at most +-0.5 %, beyond that skip or insert at once.
+    // After P went up (Converge), the ear has to move later by the increase: then anything over 20 ms is skipped /
+    // inserted at once and smaller errors are trimmed at up to 1 %, so it is back within 5 ms in under 2 s
+    // (rate-trimming alone at 0.5 % needs about 6 s for 30 ms).
     public class SyncTrim
     {
         public const double DeadbandMs = 5, ResumeMs = 2, SnapMs = 40, MaxTrim = 0.005, CorrectOverMs = 2000;
+        public const double ConvergeSnapMs = 20, ConvergeMaxTrim = 0.01, ConvergeOverMs = 500;
+        public const int ConvergeCalls = 300;   // at most ~3 s of 10 ms packets
         bool trimming;
+        int converge;
+
+        public void Converge() { converge = ConvergeCalls; }
+        public bool Converging { get { return converge > 0; } }
 
         // errorMs > 0: this output plays later than it should (too much queued).
         // Returns the frames to skip (>0) or insert (<0) right now; rate gets the resampler ratio
@@ -77,6 +87,15 @@ namespace DualEarbuds
         {
             rate = 1.0;
             double a = Math.Abs(errorMs);
+            if (converge > 0)
+            {
+                converge--;
+                if (a > ConvergeSnapMs) { trimming = false; return (int)Math.Round(errorMs * sampleRate / 1000.0); }
+                if (a <= DeadbandMs) { converge = 0; trimming = false; return 0; }
+                trimming = true;
+                rate = 1.0 + Math.Max(-ConvergeMaxTrim, Math.Min(ConvergeMaxTrim, errorMs / ConvergeOverMs));
+                return 0;
+            }
             if (a > SnapMs)
             {
                 trimming = false;
@@ -89,6 +108,72 @@ namespace DualEarbuds
         }
 
         public bool Trimming { get { return trimming; } }
+    }
+
+    // When a listener's audio moves from the WebSocket to UDP, the first datagrams usually overtake the last
+    // WebSocket packets still queued in TCP: played at once, they would make those look lost (concealed, up to
+    // ~6 packets) and then dropped as late. Instead, while WebSocket audio is still arriving, a UDP packet that
+    // jumps ahead is held (at most 12 packets, and 60 ms after the WebSocket's last packet) until the WebSocket fills the gap; duplicates go by seq.
+    public class TransportMerge
+    {
+        public const int OverlapMs = 300, HoldMs = 60, MaxHeld = 12;
+
+        public class Packet
+        {
+            public uint Seq;
+            public byte[] Data;    // the packet's PCM bytes (copied)
+            public int Frames, Rate;
+            public long At;
+        }
+
+        readonly List<Packet> held = new List<Packet>();   // in seq order
+        long lastWsAt = long.MinValue / 2;
+        long heldTotal;
+
+        public int Held { get { return held.Count; } }
+        public long HeldTotal { get { return heldTotal; } }
+
+        public void NoteWs(long now) { lastWsAt = now; }
+
+        public bool WsActive(long now) { return now - lastWsAt <= OverlapMs; }
+
+        // True when this UDP packet is parked (the caller must not play it now). WebSocket packets are never held.
+        public bool Offer(bool udp, bool haveLast, uint lastSeq, uint seq, byte[] b, int pcmAt, int frames, int rate, long now)
+        {
+            if (!udp || !haveLast) return false;
+            int d = unchecked((int)(seq - lastSeq));
+            if (d <= 1 && held.Count == 0) return false;         // in order (or a duplicate): play / drop as usual
+            if (held.Count == 0 && (!WsActive(now) || d > MaxHeld + 1)) return false;
+            if (held.Count >= MaxHeld) return false;            // the caller drains (expired) first
+            foreach (var h in held) if (h.Seq == seq) return true;   // already waiting
+            var bytes = new byte[frames * 4];
+            Array.Copy(b, pcmAt, bytes, 0, bytes.Length);
+            var p = new Packet { Seq = seq, Data = bytes, Frames = frames, Rate = rate, At = now };
+            int i = held.Count;
+            while (i > 0 && unchecked((int)(held[i - 1].Seq - seq)) > 0) i--;
+            held.Insert(i, p);
+            heldTotal++;
+            return true;
+        }
+
+        // The next held packet that is due: the next in sequence (or older), or the oldest once nothing came over the
+        // WebSocket for HoldMs, or the queue is full (what the WebSocket didn't deliver is lost; the caller conceals).
+        public Packet Next(bool haveLast, uint lastSeq, long now)
+        {
+            if (held.Count == 0) return null;
+            var h = held[0];
+            int d = haveLast ? unchecked((int)(h.Seq - lastSeq)) : 1;
+            // keep waiting while the WebSocket still delivers (its backlog drains at its own pace)
+            long since = Math.Max(h.At, lastWsAt);
+            if (d <= 1 || now - since >= HoldMs || held.Count >= MaxHeld || !WsActive(now))
+            {
+                held.RemoveAt(0);
+                return h;
+            }
+            return null;
+        }
+
+        public void Clear() { held.Clear(); }
     }
 
     // Linear-interpolation resampler for small rate trims (stereo interleaved, streaming, no allocation).

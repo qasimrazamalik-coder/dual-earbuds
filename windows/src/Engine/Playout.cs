@@ -163,81 +163,136 @@ namespace DualEarbuds
         }
     }
 
-    // Inter-arrival jitter p99 over a sliding window (two staggered P-square estimators, each covering
-    // half the window), as protocol v3.2 asks for needMs: "jitter p99 over the last 30 s".
+    // Inter-arrival jitter p99 over a true sliding window, as protocol v3.2 asks for needMs: "jitter p99 over the
+    // last 30 s". Every sample keeps its arrival time; a sample older than the window no longer counts, also when no
+    // packets arrive at all (ask with ValueAt(now)). Fixed memory (a ring of time + value), no allocation per packet;
+    // the quantile is computed when asked (a few times a second), exactly, by selection over a scratch copy.
     public class JitterWindow
     {
-        readonly long halfMs;
+        readonly long windowMs;
+        readonly double quantile;
+        readonly long[] times;
+        readonly double[] vals, scratch;
+        readonly object lk = new object();
+        int start, count;
+        long lastNow = long.MinValue, lastArrival = long.MinValue;
         readonly int packetMs;
-        P2Quantile cur, prev;
-        long windowStart = long.MinValue, lastArrival = long.MinValue;
-        double maxCur, maxPrev;   // the estimator is weak with few samples: never report below what was seen recently
 
         public JitterWindow(int windowMs, int packetMs) : this(windowMs, packetMs, 0.99) { }
 
         // quantile 0.95 over 10 s is the v3.3 lip-sync need; 0.99 over 30 s the v3.2 one.
         public JitterWindow(int windowMs, int packetMs, double quantile)
         {
-            halfMs = Math.Max(1000, windowMs / 2);
-            this.packetMs = packetMs;
-            cur = new P2Quantile(quantile);
-            prev = new P2Quantile(quantile);
+            this.windowMs = Math.Max(1000, windowMs);
+            this.packetMs = Math.Max(1, packetMs);
+            this.quantile = quantile;
+            // two samples per packet at most (arrival gap + lateness), plus headroom; the oldest go first if it fills
+            int cap = (int)Math.Min(20000, this.windowMs / this.packetMs * 2 + 64);
+            times = new long[cap];
+            vals = new double[cap];
+            scratch = new double[cap];
         }
 
-        public void Reset() { cur.Reset(); prev.Reset(); windowStart = long.MinValue; lastArrival = long.MinValue; maxCur = maxPrev = 0; }
+        public long WindowMs { get { return windowMs; } }
+
+        public void Reset() { lock (lk) { start = 0; count = 0; lastNow = long.MinValue; lastArrival = long.MinValue; } }
 
         // A packet arrived at local time now (ms); expected every packetMs.
         public void OnPacket(long now)
         {
-            if (windowStart == long.MinValue) windowStart = now;
-            if (lastArrival != long.MinValue)
+            lock (lk)
             {
-                double gap = now - lastArrival;
-                if (gap >= 0 && gap < 2000) AddJitter(Math.Abs(gap - packetMs));
-            }
-            lastArrival = now;
-            if (now - windowStart >= halfMs)
-            {
-                var t = prev; prev = cur; cur = t; cur.Reset();
-                maxPrev = maxCur; maxCur = 0;
-                windowStart = now;
+                if (lastArrival != long.MinValue)
+                {
+                    double gap = now - lastArrival;
+                    if (gap >= 0 && gap < 2000) Push(Math.Abs(gap - packetMs), now);
+                }
+                lastArrival = now;
+                if (now > lastNow) lastNow = now;
             }
         }
 
-        // For a burst of packets the arrival gap says little; what matters is how late each packet is
-        // compared to a steady 10 ms schedule. Callers that know lateness can add it directly.
+        // A sample at the latest time seen (callers that know the time should pass it).
         public void AddJitter(double ms)
         {
-            cur.Add(ms);
-            if (ms > maxCur) maxCur = ms;
+            lock (lk) Push(ms, lastNow == long.MinValue ? 0 : lastNow);
         }
 
-        // Lateness with its arrival time (local ms): also moves the window, so old samples age out.
+        // Lateness with its arrival time (local ms).
         public void AddJitter(double ms, long now)
         {
-            if (windowStart == long.MinValue) windowStart = now;
-            if (now - windowStart >= halfMs)
+            lock (lk)
             {
-                var t = prev; prev = cur; cur = t; cur.Reset();
-                maxPrev = maxCur; maxCur = 0;
-                windowStart = now;
+                if (lastNow == long.MinValue || now > lastNow) lastNow = now;
+                Push(ms, now);
             }
-            AddJitter(ms);
         }
 
-        public int Samples { get { return cur.Count + prev.Count; } }
+        void Push(double v, long t)
+        {
+            int cap = vals.Length;
+            if (count == cap) { start = (start + 1) % cap; count--; }
+            int i = (start + count) % cap;
+            times[i] = t;
+            vals[i] = v;
+            count++;
+            Expire(lastNow == long.MinValue ? t : Math.Max(t, lastNow));
+        }
 
-        // The window's quantile (named for the v3.2 default; a 0.95 window returns its p95).
+        void Expire(long now)
+        {
+            int cap = vals.Length;
+            while (count > 0 && now - times[start] > windowMs) { start = (start + 1) % cap; count--; }
+        }
+
+        public int Samples { get { lock (lk) return count; } }
+
+        // The window's quantile at the latest time seen (named for the v3.2 default; a 0.95 window returns its p95).
         public double Value { get { return P99; } }
 
-        public double P99
+        public double P99 { get { lock (lk) return Quantile(lastNow); } }
+
+        // The quantile with everything older than (now - window) aged out, even if no packet came since.
+        public double ValueAt(long now)
         {
-            get
+            lock (lk)
             {
-                double a = cur.Count >= 20 ? cur.Value : (cur.Count > 0 ? maxCur : 0);
-                double b = prev.Count >= 20 ? prev.Value : (prev.Count > 0 ? maxPrev : 0);
-                return Math.Max(a, b);
+                if (lastNow == long.MinValue || now > lastNow) lastNow = now;
+                return Quantile(lastNow);
             }
+        }
+
+        double Quantile(long now)
+        {
+            if (now != long.MinValue) Expire(now);
+            if (count == 0) return 0;
+            int cap = vals.Length;
+            for (int i = 0; i < count; i++) scratch[i] = vals[(start + i) % cap];
+            int k = (int)Math.Ceiling(quantile * count) - 1;   // nearest rank
+            if (k < 0) k = 0;
+            if (k >= count) k = count - 1;
+            return Select(scratch, count, k);
+        }
+
+        // k-th smallest of a[0..n) (Hoare selection; reorders a).
+        static double Select(double[] a, int n, int k)
+        {
+            int lo = 0, hi = n - 1;
+            while (lo < hi)
+            {
+                double pivot = a[(lo + hi) >> 1];
+                int i = lo, j = hi;
+                while (i <= j)
+                {
+                    while (a[i] < pivot) i++;
+                    while (a[j] > pivot) j--;
+                    if (i <= j) { double t = a[i]; a[i] = a[j]; a[j] = t; i++; j--; }
+                }
+                if (k <= j) hi = j;
+                else if (k >= i) lo = i;
+                else return a[k];
+            }
+            return a[k];
         }
     }
 
