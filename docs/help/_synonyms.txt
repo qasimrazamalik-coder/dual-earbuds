@@ -1,0 +1,116 @@
+awaz: sound, audio
+aawaz: sound, audio
+awaaz: sound, audio
+avaz: sound, audio
+sound nahi: no sound, silent
+awaz nahi: no sound, silent
+awaz nahi aa rahi: no sound, silent
+khamosh: silent, no sound
+der: delay, late
+dair: delay, late
+peeche: behind, late, delay
+pichay: behind, late, delay
+aage peeche: out of sync, delay
+lag: delay, late, behind
+echo: out of sync, delay
+sync nahi: out of sync, sync
+hont: lip-sync, picture
+lip sync: lip-sync
+lipsync: lip-sync
+chal nahi raha: not working
+nahi chal raha: not working
+kaam nahi kar raha: not working
+kharab: not working, problem
+masla: problem, troubleshooting
+atak raha: stutter, buffering
+atakta: stutter, buffering
+toot raha: stutter, cutting out
+kat raha: cutting out, stutter
+ruk jata: stops, background
+band ho jata: stops, screen off, background
+screen band: screen off
+earphone: earbuds
+earphones: earbuds
+airpods: earbuds
+buds: earbuds
+earbud: earbuds
+headphones: earbuds, headphones
+handsfree: earbuds, wired headphones
+tws: earbuds, bluetooth earbuds
+mobile: phone
+mobail: phone
+fone: phone
+redmi: xiaomi, phone
+poco: xiaomi, phone
+realme: oppo, phone
+oneplus: oppo, phone
+iqoo: vivo, phone
+pc: laptop, windows
+computer: laptop, windows
+komputer: laptop, windows
+leptop: laptop
+lapto: laptop
+dusra laptop: laptop to laptop, listen
+dusra phone: phone to phone, share this phone
+share karna: share, start sharing
+bhejna: share, send
+sunna: listen, listener
+sunai: hearing, listen
+jorna: connect, join
+jodna: connect, join
+connect nahi: can't connect
+join nahi: can't connect
+wifi: wi-fi, network
+wi fi: wi-fi, network
+wify: wi-fi, network
+net: network, internet
+hotspot: mobile hotspot, network
+routar: router
+kamzor: weak, weak signal
+battery: battery saver, battery optimization
+betri: battery
+bateri: battery
+background mein: background
+calibraton: calibration
+calibartion: calibration
+callibrate: calibration
+naapna: calibrate, measure
+bluetooh: bluetooth
+blutooth: bluetooth
+bluetoth: bluetooth
+game mode: low-latency mode, game
+awaz kam: volume down, volume
+awaz zyada: volume up, volume
+tez: volume up, louder
+dheema: volume down, quieter
+bass: equalizer, eq, bass
+eq: equalizer
+equaliser: equalizer
+equalizar: equalizer
+dialog: dialogue boost, voices
+dialogue: dialogue boost, voices
+baatein: dialogue boost, voices
+mic: microphone, talk-over
+maik: microphone, talk-over
+bolna: talk-over, talk
+disco: party mode, silent disco
+pin code: room pin, pin
+password: room pin, key
+naya version: update, new version
+update karna: update, install update
+apdate: update
+safari: browser, iphone
+free hai: free, cost
+paisa: cost, free
+kitne ka: cost, free
+mufat: free, cost
+mehfooz: privacy, security, safe
+ai: ai assistants, mcp
+chatgpt: ai assistants, chatgpt
+claude: ai assistants, claude
+poochna: ask, question
+sawal: question, ask, faq
+madad: help, troubleshooting
+theek karna: fix, setup check
+jaanch: setup check, check
+shuru: getting started, start
