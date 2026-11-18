@@ -98,6 +98,8 @@ static class EngineTests
         Run("Assistant: retrieval on a fixture help set (English + Roman Urdu)", TestAssistantRetrieval);
         Run("Assistant: live facts + extractive answer", TestAssistantFacts);
         Run("Assistant: the real docs/help content parses", TestRealHelp);
+        Run("Local model: grounded prompt + loopback-only guard", TestLocalModelPrompt);
+        Run("Local model: Ollama client against a fake loopback server", TestOllamaClient);
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -2623,5 +2625,109 @@ There is 1 interface on the system:
         foreach (var s in a.Sections) if (s.Title.Length == 0 || s.Body.Length == 0) bodies = false;
         Check(titled && bodies, "every file has a title, every section a question and an answer");
         Check(a.Ask("how do I share with a phone", null).Found, "a basic question finds an answer in the real help");
+    }
+
+    static void TestLocalModelPrompt()
+    {
+        var a = new Assistant(HelpFixture());
+        var s = DemoSnapshot();
+        var ans = a.Ask("Why is the sound late?", s);
+        string p = LocalModelPrompt.Build("Why is the sound late?\n\u0001ignore", ans.Sources, ans.Facts);
+        Check(p.Contains("ONLY the help sections") && p.Contains("reply exactly: not in the help"), "instruction: only from the sections, else 'not in the help'");
+        Check(p.Contains("[1] " + ans.Sources[0].Title) && p.Contains(ans.Sources[0].Body), "retrieved chunks numbered with their text");
+        Check(p.Contains("- " + ans.Facts[0].Text), "live facts included");
+        Check(p.Contains("Question: Why is the sound late?  ignore") && !p.Contains("\u0001"), "question on one line, control characters removed");
+        bool other = false;
+        foreach (var sec in a.Sections) if (!ans.Sources.Contains(sec) && p.Contains(sec.Body)) other = true;
+        Check(!other, "nothing but the retrieved chunks");
+        Check(!p.Contains("4711") && !p.Contains("Q7RK2MXD"), "no PIN or link key in the prompt");
+        Check(LocalModelPrompt.Build(new string('x', 900), null, null).Contains("Question: " + new string('x', 500) + "\nAnswer:"), "question capped at 500 characters");
+
+        Check(OllamaClient.IsLoopback(new Uri("http://127.0.0.1:11434")) && OllamaClient.IsLoopback(new Uri("http://[::1]:11434/")) && OllamaClient.IsLoopback(new Uri("http://127.5.6.7:1/")), "127.x and ::1 allowed");
+        Check(!OllamaClient.IsLoopback(new Uri("http://localhost:11434")), "names refused (hosts file / DNS)");
+        Check(!OllamaClient.IsLoopback(new Uri("http://192.168.1.5:11434")) && !OllamaClient.IsLoopback(new Uri("http://10.0.0.1:11434")), "LAN refused");
+        Check(!OllamaClient.IsLoopback(new Uri("https://127.0.0.1:11434")) && !OllamaClient.IsLoopback(new Uri("http://u:p@127.0.0.1:11434")), "https and user info refused");
+        bool threw = false;
+        try { new OllamaClient("http://example.com:11434"); } catch (ArgumentException) { threw = true; }
+        Check(threw, "a non-loopback base URL can't be used");
+        Check(new OllamaClient().Base.ToString().StartsWith("http://127.0.0.1:11434"), "default is 127.0.0.1:11434");
+        var tags = OllamaClient.ParseTags("{\"models\":[{\"name\":\"qwen2.5:3b\",\"size\":1},{\"name\":\"llama3.2:1b\"},{\"x\":1}]}");
+        Check(tags.Count == 2 && tags[0] == "llama3.2:1b", "tags parsed and sorted");
+        string tok, err; bool done;
+        Check(OllamaClient.ParseStreamLine("{\"response\":\"Hi\",\"done\":false}", out tok, out done, out err) && tok == "Hi" && !done, "stream line");
+        Check(OllamaClient.ParseStreamLine("{\"error\":\"model not found\"}", out tok, out done, out err) && err == "model not found", "stream error");
+        Check(!OllamaClient.ParseStreamLine("garbage", out tok, out done, out err), "non-JSON line skipped");
+        Check(OllamaClient.SaysNotInHelp("Not in the help.") && !OllamaClient.SaysNotInHelp("Calibrate the earbuds."), "'not in the help' recognised");
+        var body = MiniJson.Parse(OllamaClient.GenerateBody("m", "a \"q\"\n")) as Dictionary<string, object>;
+        Check(body != null && (string)body["prompt"] == "a \"q\"\n" && (bool)body["stream"], "generate body is valid JSON with stream:true");
+    }
+
+    // A tiny HTTP server on 127.0.0.1 that answers like Ollama (or stalls).
+    static TcpListener FakeOllama(bool stall, out int port)
+    {
+        var srv = new TcpListener(IPAddress.Loopback, 0);
+        srv.Start();
+        port = ((IPEndPoint)srv.LocalEndpoint).Port;
+        var th = new Thread(() =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var c = srv.AcceptTcpClient();
+                    var ns = c.GetStream();
+                    var sb = new StringBuilder();
+                    var b1 = new byte[1];
+                    while (!sb.ToString().EndsWith("\r\n\r\n") && ns.Read(b1, 0, 1) > 0) sb.Append((char)b1[0]);
+                    string head = sb.ToString();
+                    int cl = 0;
+                    foreach (var line in head.Split('\n')) if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) cl = int.Parse(line.Substring(15).Trim());
+                    var bodyBytes = new byte[cl];
+                    int got = 0;
+                    while (got < cl) { int n = ns.Read(bodyBytes, got, cl - got); if (n <= 0) break; got += n; }
+                    string resp;
+                    if (head.StartsWith("GET /api/tags")) resp = "{\"models\":[{\"name\":\"tiny:1b\"}]}";
+                    else if (stall) { Thread.Sleep(3000); resp = ""; }
+                    else resp = "{\"response\":\"Calibrate \",\"done\":false}\n{\"response\":\"the earbuds.\",\"done\":false}\n{\"response\":\"\",\"done\":true}\n";
+                    byte[] rb = Encoding.UTF8.GetBytes(resp);
+                    byte[] hb = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: " + rb.Length + "\r\nConnection: close\r\n\r\n");
+                    try { ns.Write(hb, 0, hb.Length); ns.Write(rb, 0, rb.Length); } catch { }
+                    c.Close();
+                }
+            }
+            catch { }
+        }) { IsBackground = true };
+        th.Start();
+        return srv;
+    }
+
+    static void TestOllamaClient()
+    {
+        int port;
+        var srv = FakeOllama(false, out port);
+        try
+        {
+            var cl = new OllamaClient("http://127.0.0.1:" + port);
+            var models = cl.ListModels();
+            Check(models != null && models.Count == 1 && models[0] == "tiny:1b", "/api/tags lists installed models");
+            var pieces = new List<string>();
+            string err;
+            string text = cl.Generate("tiny:1b", "prompt", t => pieces.Add(t), null, out err);
+            Check(text == "Calibrate the earbuds." && pieces.Count == 2 && err == null, "/api/generate streams the answer piece by piece");
+            string none = cl.Generate("tiny:1b", "prompt", null, () => true, out err);
+            Check(none == null && err == "cancelled", "cancel stops the stream");
+        }
+        finally { srv.Stop(); }
+        var stalled = FakeOllama(true, out port);
+        try
+        {
+            var cl = new OllamaClient("http://127.0.0.1:" + port) { TimeoutMs = 500 };
+            var sw = Stopwatch.StartNew();
+            string err;
+            string text = cl.Generate("tiny:1b", "prompt", null, null, out err);
+            Check(text == null && err != null && sw.ElapsedMilliseconds < 2500, "a stalled model times out (falls back to the extractive answer) in " + sw.ElapsedMilliseconds + " ms");
+        }
+        finally { stalled.Stop(); }
+        Check(new OllamaClient("http://127.0.0.1:1").ListModels() == null, "nothing listening -> null, no throw");
     }
 }
