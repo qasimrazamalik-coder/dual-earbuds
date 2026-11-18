@@ -37,7 +37,7 @@ own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its
 
 ## Screenshots
 
-| Home | Phones & Party mode |
+| Home | Listeners & Party mode |
 |---|---|
 | ![Dual Earbuds Windows app home screen mirroring sound to two earbuds](docs/images/home-dark.png) | ![Listeners page with QR code to connect phones over Wi-Fi](docs/images/phones-dark.png) |
 | **Settings** | **Light theme** |
@@ -85,7 +85,7 @@ own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its
 
 ### Android
 1. Download **[DualEarbuds.apk](https://github.com/qasimrazamalik-coder/dual-earbuds/releases/latest/download/DualEarbuds.apk)** on the phone and install it (allow "install unknown apps" once).
-2. Pair your earbuds with the phone, scan the QR code on the laptop's **Phones** page, tap **Start**.
+2. Pair your earbuds with the phone, scan the QR code on the laptop's **Listeners** page, tap **Join**.
 
 ### Party mode
 Turn on **Party mode** on the host (laptop or phone): up to 16 listeners, each with their own volume. Guests can join from the app or straight from the browser.
