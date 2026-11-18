@@ -138,7 +138,7 @@ namespace DualEarbuds
         volatile int rate;
 
         // protocol v3.1
-        public const int DefaultPlayoutMs = 120;
+        public const int DefaultPlayoutMs = PlayoutPlanner.DefaultMs;
         public const int RemotePerSecond = 5;
         volatile string pin;                 // null = no room PIN
         volatile bool remoteControl;         // "Let listeners control playback"

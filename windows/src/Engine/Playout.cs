@@ -10,6 +10,7 @@ namespace DualEarbuds
     public class PlayoutPlanner
     {
         public const int MinMs = 40, MaxMs = 400, DecreasePerSecond = 5;
+        public const int DefaultMs = 120;   // P before any listener reports a need (PhoneLink.DefaultPlayoutMs points here)
 
         // The lowest P this planner moves to: 40 ms (v3.2 "Everyone together"), 30 ms in lip-sync (v3.3).
         public int FloorMs = MinMs;
@@ -18,7 +19,7 @@ namespace DualEarbuds
         long lastMs;
         double credit;   // ms the value may still come down (accumulated from elapsed time)
 
-        public int Current { get { return current < 0 ? PhoneLink.DefaultPlayoutMs : current; } }
+        public int Current { get { return current < 0 ? DefaultMs : current; } }
         public bool Started { get { return current >= 0; } }
 
         // P = clamp(max(listener needs, local need), 40, 400). Needs <= 0 are unknown and ignored.

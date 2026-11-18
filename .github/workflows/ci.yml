@@ -23,6 +23,12 @@ jobs:
               -resource:shared/web-player.html,web-player.html \
               windows/src/Engine/*.cs windows/tests/EngineTests.cs
           mono /tmp/tests.exe
+      - name: Installer engine subset compiles on its own
+        run: |
+          # build.ps1 compiles the installer from these engine files only; keep this list in step with it.
+          mcs -langversion:5 -nowarn:618 -t:library -out:/tmp/setup-engine.dll -r:System.Core.dll \
+              windows/src/Engine/QrCode.cs windows/src/Engine/Support.cs windows/src/Engine/Firewall.cs \
+              windows/src/Engine/Dsp.cs windows/src/Engine/Playout.cs
 
   windows:
     name: Windows app + installer
