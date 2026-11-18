@@ -118,6 +118,7 @@ namespace DualEarbuds
             AddNav(items, "phones", "Listeners", Icons.Phone, false);
             AddNav(items, "listen", "Listen", Icons.Listen, true);
             checkCount = AddNav(items, "setup-check", "Setup check", Icons.Check, true);
+            AddNav(items, "ask", "Ask", Icons.Spark, false);
             AddNav(items, "settings", "Settings", Icons.Tune, false);
             AddNav(items, "diagnostics", "Diagnostics", Icons.Pulse, true);
             AddNav(items, "about", "About", Icons.Info, false);
@@ -206,6 +207,7 @@ namespace DualEarbuds
                         () => { var h = ExitRequested; if (h != null) h(); });
                     break;
                 case "diagnostics": p = new DiagnosticsPage(Ctl); break;
+                case "ask": p = new AskPage(Ctl); break;
                 case "about": p = new AboutPage(); break;
                 default: p = new HomePage(Ctl, Navigate); break;
             }
@@ -229,6 +231,7 @@ namespace DualEarbuds
             p.Refresh();
             if (p is ListenPage) ((ListenPage)p).Shown();
             if (p is SetupCheckPage) ((SetupCheckPage)p).Shown();
+            if (p is AskPage) ((AskPage)p).Shown();
             host.Content = p.Root;
             scroller.ScrollToTop();
         }

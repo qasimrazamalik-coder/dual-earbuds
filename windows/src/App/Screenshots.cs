@@ -53,7 +53,7 @@ namespace DualEarbuds
         public static int Run(string dir)
         {
             Directory.CreateDirectory(dir);
-            string[] pages = { "home", "phones", "listen", "setup-check", "settings", "diagnostics", "about" };
+            string[] pages = { "home", "phones", "listen", "setup-check", "ask", "settings", "diagnostics", "about" };
             foreach (var theme in new[] { "dark", "light" })
             {
                 foreach (var page in pages)
@@ -175,7 +175,7 @@ namespace DualEarbuds
             int problems = 0;
             foreach (var theme in new[] { "dark", "light" })
             {
-                foreach (var page in new[] { "home", "phones", "listen", "setup-check", "settings", "diagnostics", "about" })
+                foreach (var page in new[] { "home", "phones", "listen", "setup-check", "ask", "settings", "diagnostics", "about" })
                 {
                     try
                     {
