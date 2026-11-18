@@ -137,7 +137,8 @@ namespace DualEarbuds
                     {
                         started = true;
                         stderr.WriteLine("dual-earbuds mcp: starting Dual Earbuds in the tray");
-                        try { Process.Start(new ProcessStartInfo(System.Reflection.Assembly.GetEntryAssembly().Location, "--tray") { UseShellExecute = false }); }
+                        // shell start: the app must not inherit this process's stdin/stdout pipes (the assistant waits for them to close)
+                        try { Process.Start(new ProcessStartInfo(System.Reflection.Assembly.GetEntryAssembly().Location, "--tray") { UseShellExecute = true }); }
                         catch (Exception ex) { throw new McpForwardException("Dual Earbuds couldn't be started: " + ex.Message); }
                     }
                     var sw = Stopwatch.StartNew();
