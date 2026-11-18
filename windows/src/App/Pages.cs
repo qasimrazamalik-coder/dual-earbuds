@@ -1070,7 +1070,7 @@ namespace DualEarbuds
             recentBox.Children.Add(aiRecent);
             ai.Add(recentBox);
             root.Children.Add(ai.Root);
-            ctl.AssistantActed += t => RefreshAi();
+            ctl.AssistantActed += msg => RefreshAi();
             RefreshAi();
 
             root.Children.Add(Kit.Section("Help and data"));
