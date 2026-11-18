@@ -23,6 +23,15 @@ $setup  = Get-ChildItem src\Setup\*.cs  | ForEach-Object FullName
 # The phone player page is shared with the Android app; it is embedded as the resource "web-player.html".
 $player = (Resolve-Path ..\shared\web-player.html).Path
 $appRes = @("/resource:$player,web-player.html")
+# The assistant's help content (docs/assistant-and-mcp.md): every docs\help\*.md plus _synonyms.txt, embedded as
+# "help/<file name>". The app reads whatever is there, so adding a topic needs no code change.
+$helpDir = Join-Path $PSScriptRoot '..\docs\help'
+if (Test-Path $helpDir) {
+  Get-ChildItem $helpDir -File | Where-Object { $_.Extension -eq '.md' -or $_.Name -eq '_synonyms.txt' } | Sort-Object Name | ForEach-Object {
+    $appRes += "/resource:$($_.FullName),help/$($_.Name)"
+  }
+}
+Write-Host ("Help files embedded: " + ($appRes.Count - 1))
 
 New-Item -ItemType Directory -Force bin, dist | Out-Null
 

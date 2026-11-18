@@ -1,0 +1,10 @@
+# word: alternatives (English + Roman Urdu). Placeholder; the full list ships with the help content.
+awaz: sound, audio
+aawaz: sound, audio
+der: delay, late
+late: delay
+dair: delay, late
+chal nahi raha: not working
+nahi: no, not
+phone se phone: phone to phone, share phone
+earbuds: headphones, buds
