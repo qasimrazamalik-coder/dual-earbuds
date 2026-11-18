@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -233,6 +234,18 @@ internal fun Mono(text: String, modifier: Modifier = Modifier, color: Color = to
     Text(text, modifier = modifier, style = if (large) Type.monoLarge else Type.mono, color = color, maxLines = 1)
 }
 
+/**
+ * Reserves at least 48 × 48 dp of layout for a smaller control and centres it, so its touch area meets the
+ * 48 dp accessibility minimum while the visual stays 28–36 dp.
+ */
+internal fun Modifier.minTouchTarget(): Modifier = this.layout { measurable, constraints ->
+    val min = 48.dp.roundToPx()
+    val p = measurable.measure(constraints) // keep fillMaxWidth etc.; only the reported size grows
+    val w = maxOf(p.width, min, constraints.minWidth).coerceAtMost(constraints.maxWidth)
+    val h = maxOf(p.height, min, constraints.minHeight).coerceAtMost(constraints.maxHeight)
+    layout(w, h) { p.place((w - p.width) / 2, (h - p.height) / 2) }
+}
+
 /** 6 dp status dot + word: never colour alone. */
 @Composable
 internal fun StatusDot(level: CheckLevel, word: String) {
@@ -260,7 +273,7 @@ internal fun PrimaryButton(text: String, onClick: () -> Unit, modifier: Modifier
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(36.dp),
+        modifier = modifier.minTouchTarget().height(36.dp),
         shape = ControlShape,
         contentPadding = PaddingValues(horizontal = 16.dp),
         colors = ButtonDefaults.buttonColors(containerColor = t.accent, contentColor = t.onAccent)
@@ -274,7 +287,7 @@ internal fun QuietButton(text: String, onClick: () -> Unit, modifier: Modifier =
     OutlinedButton(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(32.dp),
+        modifier = modifier.minTouchTarget().height(32.dp),
         shape = ControlShape,
         contentPadding = PaddingValues(horizontal = 12.dp),
         border = androidx.compose.foundation.BorderStroke(1.dp, t.line),
@@ -288,7 +301,7 @@ internal fun RowAction(text: String, onClick: () -> Unit, danger: Boolean = fals
     val t = tokens
     TextButton(
         onClick = onClick,
-        modifier = Modifier.height(32.dp),
+        modifier = Modifier.minTouchTarget().height(32.dp),
         shape = ControlShape,
         contentPadding = PaddingValues(horizontal = 8.dp)
     ) { Text(text, style = Type.label, color = if (danger) t.bad else t.text) }
@@ -300,6 +313,7 @@ internal fun <T> Segmented(options: List<Pair<T, String>>, selected: T, onSelect
     val t = tokens
     Row(
         modifier
+            .minTouchTarget()
             .height(28.dp)
             .border(1.dp, t.line, ControlShape)
             .padding(1.dp)
@@ -349,7 +363,7 @@ internal fun ValueSlider(
             valueRange = range,
             modifier = Modifier
                 .weight(1f)
-                .height(28.dp)
+                .height(48.dp)
                 .semantics { contentDescription = description },
             colors = SliderDefaults.colors(thumbColor = t.accent, activeTrackColor = t.accent, inactiveTrackColor = t.line),
             thumb = {
@@ -383,7 +397,7 @@ internal fun ValueSlider(
  * Good (±5 ms) uses the accent, fair (±20 ms) Warn, beyond that Bad; unknown shows no marker.
  */
 @Composable
-internal fun SyncScope(offsetMs: Int?, modifier: Modifier = Modifier) {
+internal fun SyncScope(offsetMs: Int?, modifier: Modifier = Modifier, name: String? = null) {
     val t = tokens
     val level = Readout.level(offsetMs)
     val marker = when (level) {
@@ -392,7 +406,7 @@ internal fun SyncScope(offsetMs: Int?, modifier: Modifier = Modifier) {
         SyncLevel.OFF -> t.bad
         SyncLevel.UNKNOWN -> Color.Transparent
     }
-    val label = if (offsetMs == null) "sync unknown" else "${Readout.offset(offsetMs)} from the deadline"
+    val label = Readout.spoken(name, offsetMs) // "Redmi, 12 milliseconds late"
     Canvas(
         modifier
             .width(88.dp)
@@ -448,7 +462,7 @@ internal fun KeyValue(key: String, value: String, modifier: Modifier = Modifier,
     Row(
         modifier
             .fillMaxWidth()
-            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .then(if (onClick != null) Modifier.heightIn(min = 48.dp).clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically

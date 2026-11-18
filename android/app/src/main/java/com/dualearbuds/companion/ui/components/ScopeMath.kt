@@ -45,6 +45,23 @@ object ScopeMath {
         else -> "on time"
     }
 
+    /**
+     * What a screen reader says for a sync scope: "Redmi, 12 milliseconds late", "This phone, in sync",
+     * "Pixel, 3 milliseconds early", "Redmi, sync unknown". Within ±2 ms it says "in sync".
+     */
+    fun spoken(name: String?, offsetMs: Double?): String {
+        val who = name?.trim()?.takeIf { it.isNotEmpty() }?.let { "$it, " }.orEmpty()
+        if (offsetMs == null || offsetMs.isNaN()) return "${who}sync unknown"
+        val v = Math.round(offsetMs)
+        val ms = abs(v)
+        val unit = if (ms == 1L) "millisecond" else "milliseconds"
+        return when {
+            ms <= 2 -> "${who}in sync"
+            v > 0 -> "$who$ms $unit late"
+            else -> "$who$ms $unit early"
+        }
+    }
+
     /** Sample rate as "48 kHz" / "44.1 kHz". */
     fun kHz(rate: Int): String {
         if (rate <= 0) return "—"

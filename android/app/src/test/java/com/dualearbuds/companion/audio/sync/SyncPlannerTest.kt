@@ -22,11 +22,68 @@ class SyncPlannerTest {
     }
 
     @Test
-    fun beyondFortyMsSkipsOrInserts() {
+    fun beyondTwentyMsSkipsOrInserts() {
         val p = SyncPlanner()
         assertEquals(SyncAction.Skip(2_400), p.plan(50.0, 48_000)) // 50 ms late
         assertEquals(SyncAction.Insert(4_800), p.plan(-100.0, 48_000)) // 100 ms early
-        assertTrue(p.plan(40.0, 48_000) is SyncAction.Play)
+        assertEquals(SyncAction.Skip(1_008), p.plan(21.0, 48_000))
+        assertEquals(SyncAction.Insert(1_200), p.plan(-25.0, 48_000))
+        assertTrue(p.plan(20.0, 48_000) is SyncAction.Play)
+        assertTrue(p.plan(-19.0, 48_000) is SyncAction.Play)
+    }
+
+    /**
+     * Closed loop: 10 ms packets at 48 kHz; Play(r) moves the error by 10 ms × (1 − r), Skip/Insert by their
+     * frames. Returns the time (ms) until |error| ≤ 5 ms and stays there, or −1.
+     */
+    private fun convergeMs(p: SyncPlanner, startErrorMs: Double, snap: Boolean, maxMs: Int = 20_000): Int {
+        var e = startErrorMs
+        if (snap) p.snapNext()
+        var settledAt = -1
+        var t = 0
+        while (t < maxMs) {
+            when (val a = p.plan(e, 48_000)) {
+                is SyncAction.Play -> e -= 10.0 * (1.0 - a.ratio)
+                is SyncAction.Skip -> e -= a.frames / 48.0
+                is SyncAction.Insert -> e += a.frames / 48.0
+            }
+            t += 10
+            if (kotlin.math.abs(e) <= 5.0) {
+                if (settledAt < 0) settledAt = t
+            } else {
+                settledAt = -1
+            }
+        }
+        return settledAt
+    }
+
+    @Test
+    fun playoutIncreaseReconvergesWithinTwoSeconds() {
+        // P +40 ms: this ear is suddenly 40 ms early. The old 40 ms limit trimmed it at 0.5 % for ~7 s.
+        val big = convergeMs(SyncPlanner(), -40.0, snap = true)
+        assertTrue("took $big ms", big in 0..2_000)
+        assertTrue(convergeMs(SyncPlanner(), -40.0, snap = false) in 0..2_000)
+        assertTrue(convergeMs(SyncPlanner(hardLimitMs = 40.0), -39.0, snap = false) > 6_000)
+        // P +15 ms: under the hard limit; the snap after a P change handles it at once.
+        val small = convergeMs(SyncPlanner(), -15.0, snap = true)
+        assertTrue("took $small ms", small in 0..2_000)
+        // Without a P change, a drift of 15 ms is trimmed smoothly (no skip/insert).
+        val p = SyncPlanner()
+        assertTrue(p.plan(-15.0, 48_000) is SyncAction.Play)
+    }
+
+    @Test
+    fun snapAppliesToOnePlanOnlyAndResetClearsIt() {
+        val p = SyncPlanner()
+        p.snapNext()
+        assertEquals(SyncAction.Insert(480), p.plan(-10.0, 48_000))
+        assertTrue(p.plan(-10.0, 48_000) is SyncAction.Play)
+        p.snapNext()
+        assertTrue(p.plan(-4.0, 48_000) is SyncAction.Play) // within 5 ms: nothing to snap
+        assertTrue(p.plan(-10.0, 48_000) is SyncAction.Play)
+        p.snapNext()
+        p.reset()
+        assertTrue(p.plan(-10.0, 48_000) is SyncAction.Play)
     }
 
     @Test

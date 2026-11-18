@@ -32,6 +32,19 @@ object Readout {
         else -> "0 ms"
     }
 
+    /** Screen-reader text for a sync scope: "Redmi, 12 milliseconds late", "This phone, in sync", "Pixel, sync unknown". */
+    fun spoken(name: String?, offsetMs: Int?): String {
+        val who = name?.trim()?.takeIf { it.isNotEmpty() }?.let { "$it, " }.orEmpty()
+        if (offsetMs == null) return "${who}sync unknown"
+        val ms = abs(offsetMs)
+        val unit = if (ms == 1) "millisecond" else "milliseconds"
+        return when {
+            ms <= 2 -> "${who}in sync"
+            offsetMs > 0 -> "$who$ms $unit late"
+            else -> "$who$ms $unit early"
+        }
+    }
+
     /** Every ear: the listeners plus this phone's own. */
     fun ears(listeners: List<ListenerInfo>): Int = listeners.size + 1
 

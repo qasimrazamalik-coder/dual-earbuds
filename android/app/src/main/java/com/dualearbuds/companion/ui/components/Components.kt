@@ -48,9 +48,11 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.painter.Painter
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.semantics
@@ -65,6 +67,25 @@ import com.dualearbuds.companion.ui.theme.Mono
 import kotlinx.coroutines.flow.StateFlow
 import kotlin.math.max
 import kotlin.math.pow
+
+// =====================================================================================================
+// Accessibility
+// =====================================================================================================
+
+/** Minimum touch target (Android accessibility guidance). */
+val MinTouchTarget: Dp = 48.dp
+
+/**
+ * Reserves at least 48 × 48 dp of layout for a smaller control and centres it, so its touch area (Compose
+ * extends small targets into reserved space) meets the 48 dp minimum while the visual stays 28–32 dp.
+ */
+fun Modifier.minTouchTarget(): Modifier = this.layout { measurable, constraints ->
+    val min = MinTouchTarget.roundToPx()
+    val p = measurable.measure(constraints) // keep fillMaxWidth etc.; only the reported size grows
+    val w = maxOf(p.width, min, constraints.minWidth).coerceAtMost(constraints.maxWidth)
+    val h = maxOf(p.height, min, constraints.minHeight).coerceAtMost(constraints.maxHeight)
+    layout(w, h) { p.place((w - p.width) / 2, (h - p.height) / 2) }
+}
 
 // =====================================================================================================
 // Structure: sections, panels, rows (docs/design-system.md "Structure")
@@ -270,7 +291,7 @@ fun StatusWord(tone: Tone, word: String, modifier: Modifier = Modifier) {
 @Composable
 fun StatusChip(tone: Tone, text: String, modifier: Modifier = Modifier, onClick: (() -> Unit)? = null) {
     val c = AppTheme.colors
-    val base = modifier
+    val base = (if (onClick != null) modifier.minTouchTarget() else modifier)
         .clip(MaterialTheme.shapes.small)
         .border(1.dp, c.line, MaterialTheme.shapes.small)
         .background(c.surface)
@@ -345,6 +366,7 @@ private fun ButtonBox(
 ) {
     val shape = MaterialTheme.shapes.small
     var m = modifier
+        .minTouchTarget()
         .defaultMinSize(minHeight = 32.dp)
         .clip(shape)
         .background(bg)
@@ -403,6 +425,7 @@ fun <T> Segmented(
     Row(
         modifier
             .fillMaxWidth()
+            .minTouchTarget()
             .height(28.dp)
             .clip(outer)
             .background(c.surface)
@@ -485,7 +508,7 @@ fun ThinSlider(
     Box(
         modifier
             .fillMaxWidth()
-            .height(28.dp)
+            .height(MinTouchTarget) // the 2 dp track is drawn centred; the whole 48 dp band takes touches
             .onSizeChanged { widthPx = max(1, it.width) }
             .pointerInput(enabled, valueRange) {
                 if (!enabled) return@pointerInput
@@ -630,7 +653,7 @@ fun LevelMeter(level: StateFlow<Float>, active: Boolean, modifier: Modifier = Mo
  * (positive = late). Marker colour follows [ScopeMath.grade]; beyond the scale it sits at the edge.
  */
 @Composable
-fun SyncScope(offsetMs: Double?, modifier: Modifier = Modifier, rangeMs: Double = ScopeMath.RANGE_MS) {
+fun SyncScope(offsetMs: Double?, modifier: Modifier = Modifier, rangeMs: Double = ScopeMath.RANGE_MS, label: String? = null) {
     val c = AppTheme.colors
     val grade = ScopeMath.grade(offsetMs)
     val marker = when (grade) {
@@ -640,8 +663,9 @@ fun SyncScope(offsetMs: Double?, modifier: Modifier = Modifier, rangeMs: Double 
         SyncGrade.UNKNOWN -> c.muted
     }
     val pos = ScopeMath.position(offsetMs ?: Double.NaN, rangeMs)
-    val desc = if (offsetMs == null) "Sync offset unknown" else "Sync offset ${ScopeMath.signedMs(offsetMs)} ${ScopeMath.direction(offsetMs)}"
-    Column(modifier.fillMaxWidth().semantics { contentDescription = desc }) {
+    val desc = ScopeMath.spoken(label, offsetMs)
+    // One spoken line ("Redmi, 12 milliseconds late") instead of the scale's tick labels.
+    Column(modifier.fillMaxWidth().clearAndSetSemantics { contentDescription = desc }) {
         Canvas(Modifier.fillMaxWidth().height(18.dp)) {
             val y = size.height / 2f
             val w = size.width

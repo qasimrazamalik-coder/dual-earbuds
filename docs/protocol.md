@@ -117,7 +117,7 @@ All optional; a listener or host that does not know them ignores them.
 - A synced listener plays packet `seq` at host time `h(seq) + playoutMs − outputLatency + delay`, where
   `outputLatency` is the device's measured/calibrated output latency (played that much earlier so the sound
   *leaves the earbuds* on time) and `delay` the manual Delay (always makes this listener later, as in buffer mode).
-  It speeds up/slows down by at most ±0.5 % (resampling) to stay within ±5 ms; beyond ±40 ms it skips/inserts.
+  It speeds up/slows down by at most ±0.5 % (resampling) to stay within ±5 ms; beyond ±20 ms it skips/inserts at once (v3.4; was ±40 ms), and when P changes it snaps to the new deadline in one step, so it re-converges in under 2 s.
 - Listeners that can't sync fall back to the adaptive buffer above.
 
 ### Calibration

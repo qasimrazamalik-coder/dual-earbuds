@@ -6,6 +6,44 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+/**
+ * Copies the shared help content (repo-root docs/help: every *.md topic plus _synonyms.txt) into this module's
+ * generated assets under help/, for the offline Ask screen. Never fork the help files: edit docs/help.
+ */
+abstract class CopyHelp : DefaultTask() {
+    @get:InputFiles
+    @get:PathSensitive(PathSensitivity.NAME_ONLY)
+    abstract val helpFiles: ConfigurableFileCollection
+
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+
+    @TaskAction
+    fun copy() {
+        val out = outputDir.get().asFile
+        out.deleteRecursively()
+        val dir = out.resolve("help")
+        dir.mkdirs()
+        val names = mutableListOf<String>()
+        helpFiles.files.filter { it.isFile }.sortedBy { it.name }.forEach { f ->
+            f.copyTo(dir.resolve(f.name), overwrite = true)
+            names += f.name
+        }
+        // AssetManager.list() is slow on some devices; an index file lets the app read the set in one go.
+        dir.resolve("index.txt").writeText(names.joinToString("\n", postfix = "\n"))
+    }
+}
+
+val copyHelp = tasks.register<CopyHelp>("copyHelp") {
+    helpFiles.from(
+        fileTree(layout.projectDirectory.dir("../../docs/help")) {
+            include("*.md")
+            include("_synonyms.txt")
+        }
+    )
+    outputDir.set(layout.buildDirectory.dir("generated/help/assets"))
+}
+
 android {
     namespace = "com.dualearbuds.companion"
     compileSdk = 35
@@ -73,6 +111,12 @@ android {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
         }
+    }
+}
+
+androidComponents {
+    onVariants { variant ->
+        variant.sources.assets?.addGeneratedSourceDirectory(copyHelp, CopyHelp::outputDir)
     }
 }
 
