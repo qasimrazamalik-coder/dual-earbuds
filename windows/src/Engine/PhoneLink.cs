@@ -739,6 +739,11 @@ namespace DualEarbuds
                 if (req == null) { c.Close(); return; }
                 var lines = req.Split(new[] { "\r\n" }, StringSplitOptions.None);
                 var parts = lines[0].Split(' ');
+                if (parts.Length >= 2 && (parts[1] == "/mcp" || parts[1].StartsWith("/mcp?")))
+                {
+                    HandleMcp(c, ns, parts[0], lines);
+                    return;
+                }
                 if (parts.Length < 2 || parts[0] != "GET") { Respond(ns, "405 Method Not Allowed", "text/plain", Encoding.ASCII.GetBytes("Only GET")); c.Close(); return; }
                 string target = parts[1];
                 string path = target;
@@ -833,6 +838,78 @@ namespace DualEarbuds
                 c.Close();
             }
             catch { try { c.Close(); } catch { } }
+        }
+
+        // ---------------------------------------------------------------- MCP (docs/assistant-and-mcp.md)
+        // POST /mcp: loopback + bearer token only. Anything from another address gets a bare 403 before its body is read.
+        public volatile McpEndpoint Mcp;
+
+        void HandleMcp(TcpClient c, NetworkStream ns, string method, string[] lines)
+        {
+            IPAddress remote = null;
+            try { remote = ((IPEndPoint)c.Client.RemoteEndPoint).Address; } catch { }
+            var ep = Mcp;
+            if (!McpEndpoint.IsLoopback(remote))
+            {
+                SendMcp(ns, McpEndpoint.Forbidden());
+                c.Close();
+                return;
+            }
+            var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 1; i < lines.Length; i++)
+            {
+                int ci = lines[i].IndexOf(':');
+                if (ci > 0) headers[lines[i].Substring(0, ci).Trim()] = lines[i].Substring(ci + 1).Trim();
+            }
+            string body = "";
+            string cl;
+            if (method == "POST" && headers.TryGetValue("Content-Length", out cl))
+            {
+                int len;
+                if (!int.TryParse(cl, NumberStyles.None, CultureInfo.InvariantCulture, out len) || len > McpEndpoint.MaxBodyBytes)
+                {
+                    SendMcp(ns, new McpReply { Status = 413, Reason = "Payload Too Large", ContentType = "text/plain", Body = "Too large" });
+                    c.Close();
+                    return;
+                }
+                var buf = new byte[len];
+                int got = 0;
+                var sw = Stopwatch.StartNew();
+                try
+                {
+                    while (got < len)
+                    {
+                        int left = HeaderDeadlineMs - (int)sw.ElapsedMilliseconds;
+                        if (left <= 0) { c.Close(); return; }
+                        ns.ReadTimeout = left;
+                        int n = ns.Read(buf, got, len - got);
+                        if (n <= 0) { c.Close(); return; }
+                        got += n;
+                    }
+                }
+                catch (IOException) { c.Close(); return; }
+                body = Encoding.UTF8.GetString(buf, 0, got);
+            }
+            McpReply reply = ep != null ? ep.Process(remote, method, headers, body)
+                                        : new McpReply { Status = 403, Reason = "Forbidden", ContentType = "text/plain; charset=utf-8", Body = "AI assistants are turned off in Dual Earbuds (Settings > AI assistants)." };
+            SendMcp(ns, reply);
+            c.Close();
+        }
+
+        static void SendMcp(NetworkStream ns, McpReply r)
+        {
+            byte[] body = Encoding.UTF8.GetBytes(r.Body ?? "");
+            string head = "HTTP/1.1 " + r.Status.ToString(CultureInfo.InvariantCulture) + " " + r.Reason + "\r\nContent-Type: " + r.ContentType +
+                          "\r\nContent-Length: " + body.Length + "\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\n" +
+                          (r.Challenge ? "WWW-Authenticate: Bearer\r\n" : "") + "Connection: close\r\n\r\n";
+            byte[] hb = Encoding.ASCII.GetBytes(head);
+            try
+            {
+                ns.Write(hb, 0, hb.Length);
+                if (body.Length > 0) ns.Write(body, 0, body.Length);
+                ns.Flush();
+            }
+            catch { }
         }
 
         static string Clip(string s, int max, string def)

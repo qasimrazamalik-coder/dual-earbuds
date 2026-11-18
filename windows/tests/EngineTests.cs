@@ -8,6 +8,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using DualEarbuds;
 
@@ -100,6 +101,14 @@ static class EngineTests
         Run("Assistant: the real docs/help content parses", TestRealHelp);
         Run("Local model: grounded prompt + loopback-only guard", TestLocalModelPrompt);
         Run("Local model: Ollama client against a fake loopback server", TestOllamaClient);
+        Run("MCP: JSON-RPC parsing, framing, errors, batches", TestMcpJsonRpc);
+        Run("MCP: initialize negotiation, tools/list schemas, resources", TestMcpListing);
+        Run("MCP: tools/call dispatch with a fake controller", TestMcpCalls);
+        Run("MCP: the room PIN is never in any output", TestMcpNoPin);
+        Run("MCP: HTTP auth (loopback, token, origin)", TestMcpAuth);
+        Run("MCP: POST /mcp on the link port, end to end", () => TestMcpHttp(tmp));
+        Run("MCP: stdio bridge framing round trip", TestMcpStdio);
+        Run("MCP: client configs, token file, settings", () => TestMcpConfig(tmp));
 
         Console.WriteLine();
         Console.WriteLine(string.Format("{0} passed, {1} failed", passed, failed));
@@ -2755,5 +2764,354 @@ There is 1 interface on the system:
         }
         finally { stalled.Stop(); }
         Check(new OllamaClient("http://127.0.0.1:1").ListModels() == null, "nothing listening -> null, no throw");
+    }
+
+    class FakeDevice : IDeviceControl
+    {
+        public SessionSnapshot Snap = DemoSnapshot();
+        public List<string> Calls = new List<string>();
+        public List<string> Reports = new List<string>();
+        public string Pin = "8642";
+        public SessionSnapshot Snapshot() { return Snap; }
+        public string SetOutput(string id, bool? on, int? volume, int? delayMs, string eq)
+        {
+            Calls.Add("set_output " + id + " " + (on == null ? "-" : on.Value.ToString()) + " " + (volume == null ? "-" : volume.Value.ToString()) + " " + (delayMs == null ? "-" : delayMs.Value.ToString()) + " " + (eq ?? "-"));
+            foreach (var o in Snap.Outputs) if (o.Id == id) { if (volume != null) o.Volume = volume.Value; if (on != null) o.On = on.Value; }
+            return null;
+        }
+        public string SetListenerVolume(string id, int volume) { Calls.Add("listener_volume " + id + " " + volume); return null; }
+        public string KickListener(string id) { Calls.Add("kick " + id); return null; }
+        public string StartSharing() { Calls.Add("start"); Snap.Sharing = true; return null; }
+        public string StopSharing() { Calls.Add("stop"); Snap.Sharing = false; return null; }
+        public string SetSyncPriority(string p) { Calls.Add("priority " + p); Snap.Priority = p; return null; }
+        public string SetPartyMode(bool on, bool? pin) { Calls.Add("party " + on + " " + (pin == null ? "-" : pin.Value.ToString())); Snap.Party = on; Snap.PinOn = on && pin == true; Snap.Capacity = on ? 16 : 8; return null; }
+        public string JoinLink() { return "http://192.168.1.16:8790/?k=Q7RK2MXD"; }
+        public List<CheckItem> SetupChecks() { return new List<CheckItem> { new CheckItem { Id = "fw", Title = "Firewall", Status = CheckStatus.Bad, Value = "TCP only", Detail = "UDP is blocked.", Action = "Fix" } }; }
+        public string Diagnostics() { return "Dual Earbuds diagnostics\nroom PIN 8642 (should never leak)\nPIN8642 stays"; }
+        public string[] Secrets() { return new[] { Pin }; }
+        public void Report(string client, string tool, string summary) { Reports.Add(client + "|" + tool + "|" + summary); }
+    }
+
+    static Dictionary<string, object> Rpc(McpServer srv, string json)
+    {
+        string r = srv.Handle(json);
+        return r == null ? null : MiniJson.Parse(r) as Dictionary<string, object>;
+    }
+
+    static Dictionary<string, object> Obj(Dictionary<string, object> d, string key) { object v; return d != null && d.TryGetValue(key, out v) ? v as Dictionary<string, object> : null; }
+    static List<object> Arr(Dictionary<string, object> d, string key) { object v; return d != null && d.TryGetValue(key, out v) ? v as List<object> : null; }
+    static int ErrCode(Dictionary<string, object> r) { var e = Obj(r, "error"); return e == null ? 0 : MiniJson.GetInt(e, "code", 0); }
+
+    static void TestMcpJsonRpc()
+    {
+        var srv = new McpServer(new FakeDevice(), new Assistant(HelpFixture()));
+        var r = Rpc(srv, "{not json");
+        Check(ErrCode(r) == -32700 && r.ContainsKey("id") && r["id"] == null, "parse error -32700, id null");
+        Check(ErrCode(Rpc(srv, "{\"id\":1,\"method\":\"ping\"}")) == -32600, "missing jsonrpc -> -32600");
+        Check(ErrCode(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":{\"x\":1},\"method\":\"ping\"}")) == -32600, "object id -> -32600");
+        Check(ErrCode(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"nope\"}")) == -32601, "unknown method -> -32601");
+        r = Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":\"a-1\",\"method\":\"ping\"}");
+        Check(r != null && (string)r["id"] == "a-1" && Obj(r, "result") != null && Obj(r, "result").Count == 0, "ping -> {} with the string id");
+        r = Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}");
+        Check((double)r["id"] == 7, "numeric id echoed");
+        Check(srv.Handle("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}") == null, "notification -> no reply");
+        Check(srv.Handle("{\"jsonrpc\":\"2.0\",\"id\":3,\"result\":{}}") == null, "a stray response is ignored");
+        string b = srv.Handle("[{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"},{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"},{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}]");
+        var bl = MiniJson.Parse(b) as List<object>;
+        Check(bl != null && bl.Count == 2, "batch: one reply per request");
+        Check(srv.Handle("[{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}]") == null, "batch of notifications -> nothing");
+        Check(ErrCode(Rpc(srv, "[]")) == -32600, "empty batch -> -32600");
+        var w = JsonOut.Write(new Jo { { "a", "x\"\n" }, { "n", 1.5 }, { "i", 3 }, { "nan", double.NaN }, { "l", new[] { "p", "q" } }, { "z", null }, { "t", true } });
+        Check(w == "{\"a\":\"x\\\"\\n\",\"n\":1.5,\"i\":3,\"nan\":null,\"l\":[\"p\",\"q\"],\"z\":null,\"t\":true}", "JSON writer (ordered, escaped, NaN -> null)");
+    }
+
+    static void TestMcpListing()
+    {
+        Check(McpServer.Negotiate("2025-06-18") == "2025-06-18" && McpServer.Negotiate("2025-03-26") == "2025-03-26" && McpServer.Negotiate("2024-11-05") == "2025-06-18" && McpServer.Negotiate(null) == "2025-06-18",
+              "protocolVersion: 2025-06-18 and 2025-03-26 accepted, anything else -> 2025-06-18");
+        var srv = new McpServer(new FakeDevice(), new Assistant(HelpFixture()));
+        var init = Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-03-26\",\"capabilities\":{},\"clientInfo\":{\"name\":\"claude-ai\",\"version\":\"1\"}}}"), "result");
+        Check(init != null && MiniJson.GetString(init, "protocolVersion", "") == "2025-03-26", "initialize echoes a supported version");
+        Check(Obj(Obj(init, "capabilities"), "tools") != null && Obj(Obj(init, "capabilities"), "resources") != null, "capabilities: tools + resources");
+        Check(MiniJson.GetString(Obj(init, "serverInfo"), "name", "") == "dual-earbuds" && srv.ClientName == "claude-ai", "serverInfo, client name kept for toasts");
+        init = Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"1999-01-01\"}}"), "result");
+        Check(MiniJson.GetString(init, "protocolVersion", "") == "2025-06-18", "unknown version -> latest");
+
+        var tools = Arr(Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"), "result"), "tools");
+        string[] expected = { "get_status", "list_outputs", "set_output", "list_listeners", "set_listener_volume", "kick_listener", "start_sharing", "stop_sharing",
+                              "set_sync_priority", "set_party_mode", "get_join_link", "run_setup_check", "get_diagnostics", "ask_help" };
+        Check(tools != null && tools.Count == expected.Length, "14 tools");
+        var names = new HashSet<string>();
+        bool schemasOk = true, destructiveOk = true;
+        foreach (var o in tools)
+        {
+            var t = o as Dictionary<string, object>;
+            string n = MiniJson.GetString(t, "name", "");
+            names.Add(n);
+            var sc = Obj(t, "inputSchema");
+            var props = Obj(sc, "properties");
+            if (sc == null || MiniJson.GetString(sc, "type", "") != "object" || props == null || MiniJson.GetBool(sc, "additionalProperties", true)) schemasOk = false;
+            var req = Arr(sc, "required");
+            if (req != null) foreach (var rq in req) if (!props.ContainsKey((string)rq)) schemasOk = false;
+            if (props != null) foreach (var kv in props) { var pd = kv.Value as Dictionary<string, object>; if (pd == null || MiniJson.GetString(pd, "type", "") == "") schemasOk = false; }
+            if (string.IsNullOrEmpty(MiniJson.GetString(t, "description", ""))) schemasOk = false;
+            var ann = Obj(t, "annotations");
+            bool destr = MiniJson.GetBool(ann, "destructiveHint", false);
+            if (destr != (n == "kick_listener" || n == "stop_sharing")) destructiveOk = false;
+            if (MiniJson.GetBool(ann, "openWorldHint", true)) destructiveOk = false;
+            if (n.StartsWith("get_") || n.StartsWith("list_")) { if (!MiniJson.GetBool(ann, "readOnlyHint", false)) destructiveOk = false; }
+        }
+        bool allNames = true;
+        foreach (var e in expected) if (!names.Contains(e)) allNames = false;
+        Check(allNames, "the spec's tool names");
+        Check(schemasOk, "every inputSchema: object, typed properties, required within properties, no extra properties");
+        Check(destructiveOk, "destructiveHint only on kick_listener and stop_sharing; read-only hints; closed world");
+
+        var res = Arr(Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"resources/list\"}"), "result"), "resources");
+        Check(res != null && res.Count == 1 + 7 && MiniJson.GetString((Dictionary<string, object>)res[0], "uri", "") == "dualearbuds://status", "resources: status + one per help file");
+        var rd = Arr(Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"resources/read\",\"params\":{\"uri\":\"dualearbuds://help/sound.md\"}}"), "result"), "contents");
+        Check(rd != null && MiniJson.GetString((Dictionary<string, object>)rd[0], "text", "").StartsWith("# Sound and delay"), "resources/read a help file");
+        rd = Arr(Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"resources/read\",\"params\":{\"uri\":\"dualearbuds://status\"}}"), "result"), "contents");
+        Check(rd != null && MiniJson.Parse(MiniJson.GetString((Dictionary<string, object>)rd[0], "text", "")) is Dictionary<string, object>, "resources/read status -> JSON");
+        Check(ErrCode(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"resources/read\",\"params\":{\"uri\":\"dualearbuds://help/../../secret\"}}")) == -32002, "unknown resource -> -32002");
+    }
+
+    static Dictionary<string, object> CallTool(McpServer srv, string name, string args)
+    {
+        return Obj(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"" + name + "\",\"arguments\":" + args + "}}"), "result");
+    }
+
+    static string ToolText(Dictionary<string, object> r)
+    {
+        var c = Arr(r, "content");
+        return c == null || c.Count == 0 ? "" : MiniJson.GetString((Dictionary<string, object>)c[0], "text", "");
+    }
+
+    static void TestMcpCalls()
+    {
+        var dev = new FakeDevice();
+        var srv = new McpServer(dev, new Assistant(HelpFixture()));
+        srv.ClientName = "Claude";
+        var r = CallTool(srv, "get_status", "{}");
+        Check(r != null && !MiniJson.GetBool(r, "isError", true) && ToolText(r).StartsWith("Sharing from Headphones (TWS).") && Obj(r, "structuredContent") != null, "get_status: text + structuredContent");
+        Check(MiniJson.GetInt(Obj(r, "structuredContent"), "playoutMs", 0) == 238 && Arr(Obj(r, "structuredContent"), "listeners").Count == 1, "status has P and listeners");
+        r = CallTool(srv, "set_output", "{\"id\":\"evo\",\"volume\":60}");
+        Check(!MiniJson.GetBool(r, "isError", true) && dev.Calls[dev.Calls.Count - 1] == "set_output evo - 60 - -" && ToolText(r) == "Set Headphones (Evo Z-Buds): volume 60 %.", "set_output volume 60 -> controller");
+        Check(MiniJson.GetInt(Obj(r, "structuredContent"), "volume", 0) == 60, "set_output returns the output after the change");
+        int before = dev.Calls.Count;
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"evo\",\"volume\":200}"), "isError", false), "volume 200 refused as a tool error");
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"evo\",\"volume\":50.5}"), "isError", false), "fractional volume refused");
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"nope\",\"on\":true}"), "isError", false), "unknown output id refused");
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"evo\"}"), "isError", false), "nothing to change refused");
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"evo\",\"eq\":\"loud\"}"), "isError", false), "unknown EQ refused");
+        Check(MiniJson.GetBool(CallTool(srv, "set_output", "{\"id\":\"evo\",\"on\":true,\"hack\":1}"), "isError", false), "unknown argument refused");
+        Check(dev.Calls.Count == before, "refused calls never reach the controller");
+        CallTool(srv, "set_output", "{\"id\":\"evo\",\"on\":false,\"delayMs\":40,\"eq\":\"movie\"}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "set_output evo False - 40 movie", "on / delayMs / eq passed through");
+        r = CallTool(srv, "set_listener_volume", "{\"id\":\"1\",\"volume\":60}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "listener_volume 1 60" && ToolText(r) == "Set Redmi Note 12 volume to 60 %.", "set_listener_volume");
+        r = CallTool(srv, "kick_listener", "{\"id\":\"1\"}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "kick 1" && ToolText(r) == "Removed Redmi Note 12.", "kick_listener");
+        CallTool(srv, "stop_sharing", "{}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "stop" && !dev.Snap.Sharing, "stop_sharing");
+        r = CallTool(srv, "start_sharing", "{}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "start" && ToolText(r).StartsWith("Sharing started"), "start_sharing");
+        r = CallTool(srv, "set_sync_priority", "{\"priority\":\"together\"}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "priority together" && ToolText(r).StartsWith("Sync priority: Everyone together"), "set_sync_priority");
+        Check(MiniJson.GetBool(CallTool(srv, "set_sync_priority", "{\"priority\":\"fast\"}"), "isError", false), "bad priority refused");
+        r = CallTool(srv, "set_party_mode", "{\"on\":true,\"requirePin\":true}");
+        Check(dev.Calls[dev.Calls.Count - 1] == "party True True" && ToolText(r).Contains("up to 16") && ToolText(r).Contains("Listeners page"), "set_party_mode");
+        r = CallTool(srv, "get_join_link", "{}");
+        Check(ToolText(r).StartsWith("http://192.168.1.16:8790/?k=Q7RK2MXD") && ToolText(r).Contains("meant to be shared") && MiniJson.GetBool(Obj(r, "structuredContent"), "shareable", false), "get_join_link says it is shareable");
+        r = CallTool(srv, "run_setup_check", "{}");
+        Check(ToolText(r).StartsWith("bad  Firewall (TCP only): UDP is blocked. Fix: Fix.") && MiniJson.GetInt(Obj(r, "structuredContent"), "attention", 0) == 1, "run_setup_check: status, why, fix");
+        r = CallTool(srv, "ask_help", "{\"question\":\"awaz late aa rahi hai\"}");
+        Check(ToolText(r).StartsWith("Why is the sound late on my earbuds?") && Arr(Obj(r, "structuredContent"), "sources").Count >= 1 && Arr(Obj(r, "structuredContent"), "rightNow").Count >= 1, "ask_help: extractive answer, sources, live facts");
+        Check(MiniJson.GetBool(CallTool(srv, "ask_help", "{}"), "isError", false), "ask_help needs a question");
+        Check(ErrCode(Rpc(srv, "{\"jsonrpc\":\"2.0\",\"id\":9,\"method\":\"tools/call\",\"params\":{\"name\":\"format_disk\",\"arguments\":{}}}")) == -32602, "unknown tool -> -32602");
+        bool reported = false;
+        foreach (var rep in dev.Reports) if (rep == "Claude|set_listener_volume|Set Redmi Note 12 volume to 60 %.") reported = true;
+        Check(reported && dev.Reports.Count >= 15, "every call is reported for the toast and Recent assistant actions (" + dev.Reports.Count + ")");
+    }
+
+    static void TestMcpNoPin()
+    {
+        var dev = new FakeDevice();
+        dev.Snap.Status = "Room PIN 8642 set";      // even if something upstream slipped it in
+        var srv = new McpServer(dev, new Assistant(HelpFixture()));
+        var outs = new List<string>();
+        string[] calls = { "get_status|{}", "list_outputs|{}", "list_listeners|{}", "get_join_link|{}", "run_setup_check|{}", "get_diagnostics|{}",
+                           "ask_help|{\"question\":\"room pin\"}", "set_party_mode|{\"on\":true,\"requirePin\":true}", "start_sharing|{}", "stop_sharing|{}",
+                           "set_sync_priority|{\"priority\":\"lipsync\"}", "set_output|{\"id\":\"evo\",\"volume\":80}", "set_listener_volume|{\"id\":\"1\",\"volume\":80}", "kick_listener|{\"id\":\"1\"}" };
+        foreach (var c in calls)
+        {
+            var p = c.Split(new[] { '|' }, 2);
+            outs.Add(srv.Handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"" + p[0] + "\",\"arguments\":" + p[1] + "}}"));
+        }
+        outs.Add(srv.Handle("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"resources/read\",\"params\":{\"uri\":\"dualearbuds://status\"}}"));
+        bool leak = false;
+        foreach (var o in outs) if (o == null || Regex.IsMatch(o, "(?<![0-9A-Za-z])8642(?![0-9A-Za-z])")) leak = true;
+        Check(!leak, "no tool or resource output contains the PIN (" + outs.Count + " outputs)");
+        Check(outs[5].Contains("[hidden]") && outs[5].Contains("PIN8642 stays"), "a stray PIN is replaced; other text untouched");
+        Check(outs[7].Contains("pinRequired") && outs[7].Contains("true"), "set_party_mode says a PIN is required, without it");
+    }
+
+    static void TestMcpAuth()
+    {
+        var ep = new McpEndpoint { Enabled = true, Token = McpToken.New(), Handle = body => "{\"ok\":1}" };
+        var hdr = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { { "Authorization", "Bearer " + ep.Token } };
+        var lan = IPAddress.Parse("192.168.1.5");
+        var r = ep.Process(lan, "POST", hdr, "{}");
+        Check(r.Status == 403 && r.Body == "Forbidden" && !r.Challenge, "LAN address with the right token -> bare 403");
+        ep.Enabled = false;
+        var r2 = ep.Process(lan, "POST", hdr, "{}");
+        Check(r2.Status == 403 && r2.Body == "Forbidden", "LAN gets the same 403 whether the feature is on or off");
+        Check(ep.Process(IPAddress.Parse("::ffff:10.0.0.2"), "GET", null, null).Body == "Forbidden", "mapped IPv4 LAN -> 403");
+        var off = ep.Process(IPAddress.Loopback, "POST", hdr, "{}");
+        Check(off.Status == 403 && off.Body.Contains("turned off"), "loopback while off -> 403 saying how to turn it on");
+        ep.Enabled = true;
+        var none = ep.Process(IPAddress.Loopback, "POST", new Dictionary<string, string>(), "{}");
+        Check(none.Status == 401 && none.Challenge && none.Body == "Unauthorized", "no token -> 401 + WWW-Authenticate");
+        var wrong = ep.Process(IPAddress.Loopback, "POST", new Dictionary<string, string> { { "Authorization", "Bearer " + McpToken.New() } }, "{}");
+        Check(wrong.Status == 401, "wrong token -> 401");
+        Check(ep.Process(IPAddress.Loopback, "POST", new Dictionary<string, string> { { "Authorization", ep.Token } }, "{}").Status == 401, "token without Bearer -> 401");
+        Check(ep.Process(IPAddress.Loopback, "POST", new Dictionary<string, string> { { "Authorization", "Bearer " + ep.Token.Substring(0, 63) } }, "{}").Status == 401, "truncated token -> 401");
+        var ok = ep.Process(IPAddress.Loopback, "POST", hdr, "{}");
+        Check(ok.Status == 200 && ok.Body == "{\"ok\":1}", "loopback + token -> 200");
+        Check(ep.Process(IPAddress.IPv6Loopback, "POST", hdr, "{}").Status == 200, "::1 works too");
+        var evil = new Dictionary<string, string>(hdr);
+        evil["Origin"] = "http://evil.example";
+        Check(ep.Process(IPAddress.Loopback, "POST", evil, "{}").Status == 403, "foreign Origin -> 403 (DNS rebinding)");
+        evil["Origin"] = "http://127.0.0.1:8790";
+        Check(ep.Process(IPAddress.Loopback, "POST", evil, "{}").Status == 200, "loopback Origin allowed");
+        Check(ep.Process(IPAddress.Loopback, "GET", hdr, null).Status == 405, "GET (no SSE stream) -> 405");
+        ep.Handle = body => null;
+        Check(ep.Process(IPAddress.Loopback, "POST", hdr, "{}").Status == 202, "notification -> 202 Accepted");
+        ep.Token = "";
+        Check(ep.Process(IPAddress.Loopback, "POST", new Dictionary<string, string> { { "Authorization", "Bearer " } }, "{}").Status == 403, "no token configured -> refused");
+    }
+
+    static string RawHttp(string host, int port, string request)
+    {
+        using (var tc = new TcpClient())
+        {
+            tc.Connect(IPAddress.Parse(host), port);
+            var ns = tc.GetStream();
+            var b = Encoding.UTF8.GetBytes(request);
+            ns.Write(b, 0, b.Length);
+            ns.ReadTimeout = 3000;
+            var ms = new MemoryStream();
+            var buf = new byte[4096];
+            int n;
+            try { while ((n = ns.Read(buf, 0, buf.Length)) > 0) ms.Write(buf, 0, n); } catch (IOException) { }
+            return Encoding.UTF8.GetString(ms.ToArray());
+        }
+    }
+
+    static void TestMcpHttp(string tmp)
+    {
+        int port = FreePort();
+        var link = new PhoneLink(port, "ABCD2345", IPAddress.Any);
+        link.DisableUdpForTest = true;
+        link.Start();
+        try
+        {
+            string noEp = RawHttp("127.0.0.1", port, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}");
+            Check(noEp.StartsWith("HTTP/1.1 403") && noEp.Contains("turned off"), "no endpoint yet -> 403 off");
+            var dev = new FakeDevice();
+            var srv = new McpServer(dev, new Assistant(HelpFixture()));
+            string token = McpToken.New();
+            link.Mcp = new McpEndpoint { Enabled = true, Token = token, Handle = srv.Handle };
+            var cl = new McpHttpClient(port, token);
+            string init = cl.Post("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"clientInfo\":{\"name\":\"test\"}}}");
+            var r = Obj(MiniJson.Parse(init) as Dictionary<string, object>, "result");
+            Check(r != null && MiniJson.GetString(r, "protocolVersion", "") == "2025-06-18", "initialize over HTTP");
+            Check(cl.Post("{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}") == "", "notification -> 202, empty body");
+            string call = cl.Post("{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"set_listener_volume\",\"arguments\":{\"id\":\"1\",\"volume\":60}}}");
+            Check(call.Contains("Set Redmi Note 12 volume to 60 %.") && dev.Calls.Contains("listener_volume 1 60"), "tools/call over HTTP reaches the controller");
+            bool refused = false;
+            try { new McpHttpClient(port, McpToken.New()).Post("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}"); }
+            catch (McpForwardException ex) { refused = ex.Message.Contains("token"); }
+            Check(refused, "wrong token -> refused with a readable message");
+            string raw = RawHttp("127.0.0.1", port, "POST /mcp HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n{}");
+            Check(raw.StartsWith("HTTP/1.1 401") && raw.Contains("WWW-Authenticate: Bearer"), "raw request without token -> 401");
+            string big = RawHttp("127.0.0.1", port, "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + token + "\r\nContent-Length: 99999999\r\n\r\n");
+            Check(big.StartsWith("HTTP/1.1 413"), "oversized body refused");
+            Check(RawHttp("127.0.0.1", port, "GET /info?k=ABCD2345 HTTP/1.1\r\nHost: x\r\n\r\n").StartsWith("HTTP/1.1 200"), "the link server still works beside it");
+            string lanIp = null;
+            foreach (var a in PhoneLink.LanAddresses()) { lanIp = a; break; }
+            if (lanIp != null)
+            {
+                string lan = RawHttp(lanIp, port, "POST /mcp HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer " + token + "\r\nContent-Length: 46\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}      ");
+                int bodyAt = lan.IndexOf("\r\n\r\n", StringComparison.Ordinal);
+                Check(lan.StartsWith("HTTP/1.1 403") && bodyAt > 0 && lan.Substring(bodyAt + 4) == "Forbidden", "from " + lanIp + " (LAN) with the right token -> bare 403");
+            }
+            else Check(true, "no LAN address here: LAN 403 covered by the unit test");
+        }
+        finally { link.Stop(); }
+    }
+
+    static void TestMcpStdio()
+    {
+        var srv = new McpServer(new FakeDevice(), new Assistant(HelpFixture()));
+        var input = new StringReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n\n" +
+                                     "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\r\n" +
+                                     "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"get_diagnostics\",\"arguments\":{}}}\n");
+        var output = new StringWriter();
+        var log = new StringWriter();
+        output.NewLine = "\n";
+        McpStdio.Run(input, output, log, msg => srv.Handle(msg));
+        var lines = output.ToString().Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        Check(lines.Length == 2, "two requests -> two lines; notification and blank line -> nothing");
+        bool valid = true;
+        foreach (var l in lines) { try { if (!(MiniJson.Parse(l) is Dictionary<string, object>)) valid = false; } catch { valid = false; } if (l.Contains("\r")) valid = false; }
+        Check(valid && output.ToString().EndsWith("\n"), "each line one complete JSON message, newline-terminated (diagnostics' newlines stay escaped)");
+        Check((double)(MiniJson.Parse(lines[1]) as Dictionary<string, object>)["id"] == 2, "ids preserved in order");
+        Check(log.ToString().Length == 0, "nothing on stderr when all is well");
+
+        var out2 = new StringWriter();
+        var log2 = new StringWriter();
+        McpStdio.Run(new StringReader("{\"jsonrpc\":\"2.0\",\"id\":\"x\",\"method\":\"ping\"}\n{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n"), out2, log2,
+                     msg => { throw new McpForwardException("Dual Earbuds isn't running."); });
+        var l2 = out2.ToString().Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries);
+        var e = l2.Length == 1 ? MiniJson.Parse(l2[0]) as Dictionary<string, object> : null;
+        Check(e != null && (string)e["id"] == "x" && ErrCode(e) == McpStdio.ErrorAppUnavailable && MiniJson.GetString(Obj(e, "error"), "message", "") == "Dual Earbuds isn't running.", "app unreachable -> JSON-RPC error for the request only");
+        Check(log2.ToString().Contains("isn't running"), "the problem is logged to stderr");
+        Check(McpStdio.ErrorFor("garbage", "x").Contains("-32700"), "unparsable line -> parse error");
+    }
+
+    static void TestMcpConfig(string tmp)
+    {
+        string exe = @"C:\Users\Sara O'Neil\AppData\Local\Programs\Dual Earbuds\DualEarbuds.exe";
+        var cd = MiniJson.Parse(McpConfig.ClaudeDesktop(exe)) as Dictionary<string, object>;
+        var srvCfg = Obj(Obj(cd, "mcpServers"), "dual-earbuds");
+        Check(srvCfg != null && MiniJson.GetString(srvCfg, "command", "") == exe && (string)Arr(srvCfg, "args")[0] == "--mcp", "Claude Desktop: mcpServers.dual-earbuds, full exe path, --mcp");
+        var vs = MiniJson.Parse(McpConfig.VsCode(exe)) as Dictionary<string, object>;
+        Check(MiniJson.GetString(Obj(Obj(vs, "servers"), "dual-earbuds"), "type", "") == "stdio", "VS Code: servers.dual-earbuds, type stdio");
+        Check(MiniJson.Parse(McpConfig.Cursor(exe)) is Dictionary<string, object>, "Cursor: valid JSON");
+        Check(McpConfig.ClaudeCode(exe) == "claude mcp add dual-earbuds -- \"" + exe + "\" --mcp", "Claude Code command line");
+        string codex = McpConfig.CodexCli(exe);
+        Check(codex.StartsWith("[mcp_servers.dual-earbuds]\ncommand = 'C:\\Users\\Sara ONeil\\") && codex.EndsWith("args = [\"--mcp\"]"), "Codex CLI TOML (literal string, backslashes kept)");
+        string http = McpConfig.Http(8790, "abc");
+        Check(http.StartsWith("URL: http://127.0.0.1:8790/mcp\nHeader: Authorization: Bearer abc"), "generic HTTP: URL + token");
+
+        string path = McpToken.PathOf(Path.Combine(tmp, "tok"));
+        Check(McpToken.Read(path) == null, "no token file yet");
+        string t1 = McpToken.Ensure(path);
+        Check(McpToken.IsValid(t1) && McpToken.Read(path) == t1 && McpToken.Ensure(path) == t1, "token: 64 hex chars, kept");
+        string t2 = McpToken.Rotate(path);
+        Check(t2 != t1 && McpToken.Read(path) == t2, "rotate makes a new one");
+        File.WriteAllText(path, "short");
+        Check(McpToken.Read(path) == null, "a damaged token file is ignored");
+
+        string sp = Path.Combine(tmp, "ai-settings.txt");
+        var s = new Settings { LocalModel = true, LocalModelName = "llama3.2:3b", McpOn = true, GuideShown = true };
+        s.Save(sp);
+        var l = Settings.Load(sp);
+        Check(l.LocalModel && l.LocalModelName == "llama3.2:3b" && l.McpOn && l.GuideShown, "settings: local model, model, AI assistants, guide round-trip");
+        File.WriteAllLines(sp, new[] { "theme\tdark" });
+        var old = Settings.Load(sp);
+        Check(!old.McpOn && !old.LocalModel && old.GuideShown, "an older settings file: assistants off, guide counted as shown");
+        Check(!new Settings().McpOn && !new Settings().GuideShown, "a new install: AI assistants off, guide not shown yet");
     }
 }

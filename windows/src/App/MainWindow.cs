@@ -357,6 +357,7 @@ namespace DualEarbuds
 
             CreateTray();
             ctl.StateChanged += UpdateTray;
+            ctl.AssistantActed += text => ShowTrayTip("AI assistant", text, 3000);
             ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Settings > Updates installs it.");
 
             fast = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(50) };
@@ -450,9 +451,11 @@ namespace DualEarbuds
             tray.Text = t.Length > 63 ? t.Substring(0, 63) : t;
         }
 
-        void ShowTrayTip(string title, string text)
+        void ShowTrayTip(string title, string text) { ShowTrayTip(title, text, 2500); }
+
+        void ShowTrayTip(string title, string text, int ms)
         {
-            try { tray.ShowBalloonTip(2500, title, text ?? "Dual Earbuds", WinForms.ToolTipIcon.None); } catch { }
+            try { tray.ShowBalloonTip(ms, title, text ?? "Dual Earbuds", WinForms.ToolTipIcon.None); } catch { }
         }
 
         public void ShowFromTray()

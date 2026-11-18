@@ -205,6 +205,7 @@ namespace DualEarbuds
             StartWorker();
             RefreshDevices(true);
             if (Settings.PhoneLink) StartPhone();
+            InitMcp();
             if (Settings.AutoStart) Start(true);
             else SetInfo("Press Start sharing to begin.");
             Settings.FirstRun = false;
@@ -213,6 +214,8 @@ namespace DualEarbuds
 
         public void Shutdown()
         {
+            shuttingDown = true;
+            StopMcpListener();
             lock (qlk) { workerExit = true; queue.Clear(); Monitor.Pulse(qlk); }
             if (worker != null) worker.Join(3000);
             StopListeningNow();
@@ -788,10 +791,13 @@ namespace DualEarbuds
         public void StartPhone()
         {
             if (Phone != null || Demo) return;
+            StopMcpListener();   // the loopback-only listener held the port while the link was off
             var p = new PhoneLink(Settings.PhonePort, Settings.LinkKey);
+            p.Mcp = Mcp;
             if (!p.Start())
             {
                 SetError("Could not start the phone link on port " + Settings.PhonePort + ": " + p.Error);
+                EnsureMcpListener();
                 return;
             }
             p.Party = Settings.Party;
@@ -1346,6 +1352,88 @@ namespace DualEarbuds
             Engine.Phone = null;
             if (Phone != null) { Phone.Stop(); Phone = null; }
             Phones = new List<PhoneInfo>();
+            EnsureMcpListener();
+        }
+
+        // ------------------------------------------------------------------ AI assistants (MCP, docs/assistant-and-mcp.md)
+        // POST /mcp rides on the link port. With the phone link off, a listener bound to 127.0.0.1 only keeps it
+        // reachable for assistants (it serves nothing to the network).
+        public readonly McpEndpoint Mcp = new McpEndpoint();
+        PhoneLink mcpOnly;
+        bool shuttingDown;
+        public const int MaxAssistantActions = 50;
+        public readonly List<string> AssistantActions = new List<string>();   // newest first
+        public event Action<string> AssistantActed;                           // summary for the toast
+
+        void InitMcp()
+        {
+            if (Demo) return;
+            Mcp.Token = Settings.McpOn ? McpToken.Ensure(McpToken.DefaultPath) : McpToken.Read(McpToken.DefaultPath);
+            Mcp.Enabled = Settings.McpOn;
+            EnsureMcpListener();
+        }
+
+        public void SetMcp(bool on)
+        {
+            Settings.McpOn = on;
+            dirty = true;
+            if (Demo) return;
+            if (on && !McpToken.IsValid(Mcp.Token))
+            {
+                try { Mcp.Token = McpToken.Ensure(McpToken.DefaultPath); }
+                catch (Exception ex) { Log.Warn("MCP token: " + ex.Message); }
+            }
+            Mcp.Enabled = on;
+            Log.Info("AI assistants " + (on ? "allowed" : "off"));
+            EnsureMcpListener();
+        }
+
+        // A new token: assistants have to restart (the stdio bridge reads the file on each call, so it picks it up).
+        public string RotateMcpToken()
+        {
+            if (Demo) return McpToken.New();
+            try { Mcp.Token = McpToken.Rotate(McpToken.DefaultPath); }
+            catch (Exception ex) { Log.Warn("MCP token: " + ex.Message); }
+            return Mcp.Token;
+        }
+
+        void EnsureMcpListener()
+        {
+            if (Demo || shuttingDown) return;
+            bool need = Settings.McpOn && Phone == null;
+            if (need && mcpOnly == null)
+            {
+                var l = new PhoneLink(Settings.PhonePort, LinkKey.New(), System.Net.IPAddress.Loopback);
+                l.DisableUdpForTest = true;
+                l.Mcp = Mcp;
+                if (l.Start()) mcpOnly = l;
+                else Log.Warn("AI assistants: port " + Settings.PhonePort + " is busy");
+            }
+            else if (!need) StopMcpListener();
+        }
+
+        void StopMcpListener()
+        {
+            if (mcpOnly == null) return;
+            mcpOnly.Stop();
+            mcpOnly = null;
+        }
+
+        public void NoteAssistantAction(string client, string tool, string summary)
+        {
+            string line = DateTime.Now.ToString("HH:mm:ss", System.Globalization.CultureInfo.InvariantCulture) + "  " + client + "  " + tool + (string.IsNullOrEmpty(summary) ? "" : ": " + summary);
+            AssistantActions.Insert(0, line);
+            while (AssistantActions.Count > MaxAssistantActions) AssistantActions.RemoveAt(AssistantActions.Count - 1);
+            Log.Info("Assistant: " + client + " " + tool);
+            var h = AssistantActed;
+            if (h != null) h(client + ": " + (string.IsNullOrEmpty(summary) ? tool : summary));
+        }
+
+        // An assistant changed something the pages show: rebuild them.
+        public void NotifyExternalChange()
+        {
+            UpdateStates();
+            Raise(DevicesChanged);
         }
 
         public void SetPhoneLink(bool on)
