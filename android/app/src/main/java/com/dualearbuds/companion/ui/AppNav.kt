@@ -7,6 +7,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.dualearbuds.companion.ui.screens.AboutScreen
+import com.dualearbuds.companion.ui.screens.AskScreen
 import com.dualearbuds.companion.ui.screens.BestSoundScreen
 import com.dualearbuds.companion.ui.screens.CalibrationScreen
 import com.dualearbuds.companion.ui.screens.GuideScreen
@@ -28,6 +29,7 @@ object Routes {
     const val HOST = "host"
     const val SETUP = "setup"
     const val BEST = "best"
+    const val ASK = "ask"
 }
 
 @Composable
@@ -45,7 +47,8 @@ fun AppNav() {
                 onOpenSettings = { go(Routes.SETTINGS) },
                 onOpenCalibration = { go(Routes.CALIBRATE) },
                 onShareThisPhone = { go(Routes.HOST) },
-                onOpenSetup = { go(Routes.SETUP) }
+                onOpenSetup = { go(Routes.SETUP) },
+                onOpenAsk = { go(Routes.ASK) }
             )
         }
         composable(Routes.SETTINGS) {
@@ -57,9 +60,11 @@ fun AppNav() {
                 onOpenGuide = { go(Routes.GUIDE) },
                 onOpenAbout = { go(Routes.ABOUT) },
                 onOpenSetup = { go(Routes.SETUP) },
-                onOpenBestSound = { go(Routes.BEST) }
+                onOpenBestSound = { go(Routes.BEST) },
+                onOpenAsk = { go(Routes.ASK) }
             )
         }
+        composable(Routes.ASK) { AskScreen(onBack = { back() }) }
         composable(Routes.SMART) { SmartFeaturesScreen(onBack = { back() }, onOpenHearing = { go(Routes.HEARING) }) }
         composable(Routes.CALIBRATE) { CalibrationScreen(onBack = { back() }) }
         composable(Routes.HEARING) { HearingScreen(onBack = { back() }) }

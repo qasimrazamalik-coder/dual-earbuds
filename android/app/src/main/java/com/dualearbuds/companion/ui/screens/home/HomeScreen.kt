@@ -119,7 +119,8 @@ fun HomeScreen(
     onOpenSettings: () -> Unit,
     onOpenCalibration: () -> Unit,
     onShareThisPhone: () -> Unit,
-    onOpenSetup: () -> Unit
+    onOpenSetup: () -> Unit,
+    onOpenAsk: () -> Unit
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -288,7 +289,15 @@ fun HomeScreen(
         containerColor = AppTheme.colors.bg,
         topBar = {
             TopBar(title = "Dual Earbuds", readout = readout, live = live) {
-                IconButton(onClick = onOpenSettings, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = onOpenAsk, modifier = Modifier.size(48.dp)) {
+                    Icon(
+                        painterResource(R.drawable.ic_help),
+                        contentDescription = "Ask a question",
+                        tint = AppTheme.colors.muted,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                IconButton(onClick = onOpenSettings, modifier = Modifier.size(48.dp)) {
                     Icon(
                         painterResource(R.drawable.ic_settings),
                         contentDescription = "Settings",
