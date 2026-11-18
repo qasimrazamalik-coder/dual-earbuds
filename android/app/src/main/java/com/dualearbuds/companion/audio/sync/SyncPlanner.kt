@@ -16,7 +16,9 @@ sealed interface SyncAction {
 
 /**
  * Decides how to keep synced playback on time (docs/protocol.md v3.1): within ±[deadbandMs] do nothing,
- * up to ±[hardLimitMs] trim the playback rate by at most ±[maxTrim] (0.5 %), beyond that skip or insert.
+ * up to ±[hardLimitMs] (20 ms) trim the playback rate by at most ±[maxTrim] (0.5 %), beyond that skip or insert
+ * at once. At 0.5 % a 40 ms error took 8 s to trim away; with the 20 ms limit and [snapNext] after a playout (P)
+ * change the listener is back on the deadline within one packet instead.
  *
  * `errorMs` = (when the next frame will actually be heard) − (when it should be heard).
  * Positive = late (play faster / skip), negative = early (play slower / insert).
@@ -27,21 +29,33 @@ sealed interface SyncAction {
 class SyncPlanner(
     private val deadbandMs: Double = 2.0,
     private val trimFullAtMs: Double = 5.0,
-    private val hardLimitMs: Double = 40.0,
+    private val hardLimitMs: Double = HARD_LIMIT_MS,
     private val maxTrim: Double = 0.005,
     private val smoothing: Double = 0.2
 ) {
     private var smoothed = Double.NaN
+    private var snap = false
 
     val smoothedErrorMs: Double
         get() = if (smoothed.isNaN()) 0.0 else smoothed
 
     fun reset() {
         smoothed = Double.NaN
+        snap = false
+    }
+
+    /**
+     * The deadline itself moved (P changed): the next [plan] corrects any error beyond [trimFullAtMs] by skip /
+     * insert instead of trimming, so a P step of 6–20 ms doesn't take seconds of 0.5 % trim to absorb.
+     */
+    fun snapNext() {
+        snap = true
     }
 
     fun plan(errorMs: Double, rate: Int): SyncAction {
-        if (abs(errorMs) > hardLimitMs) {
+        val limit = if (snap) trimFullAtMs else hardLimitMs
+        snap = false
+        if (abs(errorMs) > limit) {
             smoothed = Double.NaN
             val frames = msToFrames(abs(errorMs), rate)
             return if (errorMs > 0) SyncAction.Skip(frames) else SyncAction.Insert(frames)
@@ -60,6 +74,9 @@ class SyncPlanner(
     }
 
     companion object {
+        /** Beyond this error (ms) playback skips or inserts instead of trimming. */
+        const val HARD_LIMIT_MS = 20.0
+
         fun msToFrames(ms: Double, rate: Int): Int = (ms * rate / 1000.0 + 0.5).toInt()
     }
 }
