@@ -753,7 +753,7 @@ namespace DualEarbuds
             string[] s3 = {
                 "Connect the device to the same Wi-Fi as this laptop, or to its hotspot.",
                 "Scan the QR code with the Dual Earbuds app (keeps playing with the screen off) or the camera, or open the link in any browser.",
-                "Press Start on the device. It joins the shared deadline by itself; calibrate laptop earbuds on Home for exact sync." };
+                "Press Join in the Dual Earbuds app (Start listening in a browser). It joins the shared deadline by itself; calibrate laptop earbuds on Home for exact sync." };
             for (int i = 0; i < s3.Length; i++)
             {
                 var row = new Grid { Margin = new Thickness(16, 10, 16, 10) };
@@ -1246,7 +1246,7 @@ namespace DualEarbuds
             head.Children.Add(Ui.Logo(40));
             var t = new StackPanel { Margin = new Thickness(14, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
             t.Children.Add(Ui.Text("Dual Earbuds", 15, FontWeights.SemiBold, "Text"));
-            t.Children.Add(Ui.Mono(AppInfo.Version + "  ·  protocol 3.2  ·  MIT", 12, "Muted"));
+            t.Children.Add(Ui.Mono(AppInfo.Version + "  ·  protocol 3.3  ·  MIT", 12, "Muted"));
             head.Children.Add(t);
             top.Add(head);
             top.Root.Margin = new Thickness(0, 20, 0, 0);

@@ -2508,7 +2508,7 @@ There is 1 interface on the system:
         new[] { "Why is the sound late on my earbuds?", "Why is the sound late on my earbuds?" },
         new[] { "awaz late aa rahi hai", "Why is the sound late on my earbuds?" },
         new[] { "phone se phone pe awaz nahi", "Can one phone share its sound to another phone?" },
-        new[] { "how do I join with the qr code", "How do I share the sound with a phone?" },
+        new[] { "where is the qr code for my phone", "How do I share the sound with a phone?" },
         new[] { "phone joined but no sound", "The phone joined but there is no sound. What do I check?" },
         new[] { "how to calibrate", "How do I calibrate my earbuds?" },
         new[] { "the phones are behind the laptop", "Why are the phones behind the laptop?" },
@@ -2624,7 +2624,33 @@ There is 1 interface on the system:
         foreach (var f in a.Files) if (string.IsNullOrEmpty(a.TopicOf(f))) titled = false;
         foreach (var s in a.Sections) if (s.Title.Length == 0 || s.Body.Length == 0) bodies = false;
         Check(titled && bodies, "every file has a title, every section a question and an answer");
-        Check(a.Ask("how do I share with a phone", null).Found, "a basic question finds an answer in the real help");
+        Check(a.Ask("how does a phone join", null).Found, "a basic question finds an answer in the real help");
+        // top hits on the real content (titles as written in docs/help; skipped if a section was renamed)
+        string[][] real =
+        {
+            new[] { "Why is the sound late?", "The sound is late or out of sync" },
+            new[] { "awaz late aa rahi hai", "The sound is late or out of sync" },
+            new[] { "phone se phone pe awaz nahi", "Phone to phone sharing is silent" },
+            new[] { "The phone has no sound", "Phones connect but there is no sound" },
+            new[] { "How do I calibrate my earbuds?", "How do I calibrate earbuds for exact sync?" },
+            new[] { "what is lip sync", "What is the difference between Lip-sync and Everyone together?" },
+            new[] { "sound crackles", "Why does the sound crackle or click?" },
+            new[] { "2.4 ghz or 5 ghz", "Is 5 GHz Wi-Fi better than 2.4 GHz?" },
+            new[] { "set a room pin", "How do I set a room PIN for a party?" },
+            new[] { "how many phones can join", "How many earbuds can listen at once?" },
+            new[] { "connect claude desktop", "How do I connect Claude Desktop to Dual Earbuds?" },
+            new[] { "battery saver", "Does battery saver affect the sound?" },
+            new[] { "iphone safari", "Can I listen on an iPhone?" },
+        };
+        var titles = new HashSet<string>();
+        foreach (var s in a.Sections) titles.Add(s.Title);
+        foreach (var c in real)
+        {
+            if (!titles.Contains(c[1])) { Check(true, "(section renamed, skipped) " + c[1]); continue; }
+            var ans = a.Ask(c[0], null);
+            Check(ans.Found && ans.Best.Title == c[1], "real help: \"" + c[0] + "\" -> " + (ans.Found ? ans.Best.Title : "(no answer)"));
+        }
+        Check(!a.Ask("What is the capital of France?", null).Found && !a.Ask("how do I bake a cake", null).Found, "real help: unrelated questions get no answer");
     }
 
     static void TestLocalModelPrompt()

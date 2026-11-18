@@ -277,8 +277,12 @@ namespace DualEarbuds
         public const double K1 = 1.2, B = 0.75, TitleWeight = 2.0, BodyWeight = 1.0, KeywordWeight = 1.5;
         // A section that contains a synonym's whole phrase ("phone to phone") gets this on top of BM25.
         public const double PhraseBonus = 2.5;
+        // Users ask in the words of the section titles (which are questions): a section gets up to this much on top
+        // for the share of the question's known terms its title holds. Breaks ties between sections of one file,
+        // which share the file's keywords.
+        public const double TitleBonus = 3.0;
 
-        class Doc { public HelpSection S; public Dictionary<string, double> Tf = new Dictionary<string, double>(); public double Len; public string Words = " "; }
+        class Doc { public HelpSection S; public Dictionary<string, double> Tf = new Dictionary<string, double>(); public double Len; public string Words = " "; public HashSet<string> TitleTerms; }
 
         readonly List<Doc> docs = new List<Doc>();
         readonly Dictionary<string, int> df = new Dictionary<string, int>();
@@ -292,6 +296,7 @@ namespace DualEarbuds
                 AddField(d, s.Title, TitleWeight);
                 AddField(d, s.Body, BodyWeight);
                 AddField(d, s.Keywords, KeywordWeight);
+                d.TitleTerms = new HashSet<string>(TextTok.Tokenize(s.Title));
                 d.Words = " " + string.Join(" ", TextTok.Words(s.Title + " " + s.Keywords + " " + s.Body).ToArray()) + " ";
                 docs.Add(d);
                 foreach (var t in d.Tf.Keys) { int n; df.TryGetValue(t, out n); df[t] = n + 1; }
@@ -329,16 +334,20 @@ namespace DualEarbuds
         public List<ScoredSection> Search(Dictionary<string, double> query, List<string> phrases)
         {
             var res = new List<ScoredSection>();
+            double known = 0;
+            foreach (var kv in query) if (df.ContainsKey(kv.Key)) known += kv.Value;
             foreach (var d in docs)
             {
-                double score = 0;
+                double score = 0, inTitle = 0;
                 foreach (var kv in query)
                 {
                     double tf;
                     if (!d.Tf.TryGetValue(kv.Key, out tf)) continue;
                     double norm = tf * (K1 + 1) / (tf + K1 * (1 - B + B * d.Len / avgLen));
                     score += kv.Value * Idf(kv.Key) * norm;
+                    if (d.TitleTerms.Contains(kv.Key)) inTitle += kv.Value;
                 }
+                if (score > 0 && known > 0) score += TitleBonus * inTitle / known;
                 if (phrases != null && score > 0) foreach (var ph in phrases) if (d.Words.Contains(ph)) score += PhraseBonus;
                 res.Add(new ScoredSection { Section = d.S, Score = score });
             }
@@ -563,7 +572,7 @@ namespace DualEarbuds
     public class Assistant
     {
         // Below this BM25 score the best chunk is not trusted as the answer. Stated for a 40-section help set; scaled
-        // with the idf a one-section term gets, so a small help set (fewer sections, lower idf) is not held to it.
+        // down with the idf a one-section term gets, so a small help set (fewer sections, lower idf) is not held to it.
         public const double ScoreFloor = 2.2;
         public const int FloorReferenceSections = 40;
         public const int MaxFacts = 4, TopHits = 3, RelatedCount = 2;
@@ -644,7 +653,7 @@ namespace DualEarbuds
 
         static double IdfOne(int n) { return Math.Log(1 + (Math.Max(1, n) - 0.5) / 1.5); }
 
-        public double Floor { get { return ScoreFloor * IdfOne(index.Count) / IdfOne(FloorReferenceSections); } }
+        public double Floor { get { return ScoreFloor * Math.Min(1.0, IdfOne(index.Count) / IdfOne(FloorReferenceSections)); } }
 
         public List<ScoredSection> Search(string question) { return index.Search(Query(question), synonyms.Phrases(question ?? "")); }
 

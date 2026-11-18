@@ -12,7 +12,7 @@ namespace DualEarbuds
 <style>body{margin:0;font-family:system-ui,sans-serif;background:#0B1220;color:#E6EDF7;display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center;padding:24px}
 h1{font-size:22px}p{color:#8FA3BF;line-height:1.5}</style></head><body><div>
 <h1>This link is missing its key</h1>
-<p>Open the Dual Earbuds app on your laptop and scan the QR code on the Phones page,<br>or copy the full link shown there.</p>
+<p>Open the Dual Earbuds app on your laptop and scan the QR code on the Listeners page,<br>or copy the full link shown there.</p>
 </div></body></html>";
 
         // The player page lives in shared/web-player.html (the same page every host serves) and is embedded
