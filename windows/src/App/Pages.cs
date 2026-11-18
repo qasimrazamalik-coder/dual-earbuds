@@ -930,7 +930,7 @@ namespace DualEarbuds
         readonly StackPanel release;
         readonly CheckBox autoUpd;
 
-        public SettingsPage(Controller ctl, Action<string> onTheme, Action onHotkeyChanged, Action onReset, Action exitApp)
+        public SettingsPage(Controller ctl, Action<string> onTheme, Action onHotkeyChanged, Action onReset, Action exitApp, Action showGuide)
         {
             this.ctl = ctl;
             this.exitApp = exitApp;
@@ -1087,6 +1087,7 @@ namespace DualEarbuds
                 t.Tick += (o2, e2) => { t.Stop(); copyDiag.Content = "Copy"; };
                 t.Start();
             };
+            data.Add(Kit.Row("First-run guide", "The three setup steps: connect earbuds, choose outputs and calibrate, share with phones.", Kit.Secondary("Show again", (o, e) => showGuide())));
             data.Add(Kit.Row("Diagnostics", "Version, Windows build, network, outputs, listeners and the last 200 log lines. Never your link key or PIN.", copyDiag));
             var open = Kit.Secondary("Open folder", (o, e) => PageKit.OpenFolder(AppInfo.DataDir));
             data.Add(Kit.Row("Settings and logs", AppInfo.DataDir, open));

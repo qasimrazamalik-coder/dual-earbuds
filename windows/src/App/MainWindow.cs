@@ -204,7 +204,8 @@ namespace DualEarbuds
                         m => { var h = ThemeRequested; if (h != null) h(m); },
                         () => { var h = HotkeyChanged; if (h != null) h(); },
                         () => { var h = ResetRequested; if (h != null) h(); },
-                        () => { var h = ExitRequested; if (h != null) h(); });
+                        () => { var h = ExitRequested; if (h != null) h(); },
+                        ShowGuide);
                     break;
                 case "diagnostics": p = new DiagnosticsPage(Ctl); break;
                 case "ask": p = new AskPage(Ctl); break;
@@ -234,6 +235,28 @@ namespace DualEarbuds
             if (p is AskPage) ((AskPage)p).Shown();
             host.Content = p.Root;
             scroller.ScrollToTop();
+        }
+
+        // The first-run guide, over the page area (the header bar and window buttons stay usable).
+        FirstRunGuide guide;
+        public bool GuideOpen { get { return guide != null; } }
+
+        public void ShowGuide()
+        {
+            if (guide != null) return;
+            guide = new FirstRunGuide(Navigate);
+            guide.Closed += HideGuide;
+            Grid.SetRow(guide, 1);
+            Grid.SetColumnSpan(guide, 2);
+            Children.Add(guide);
+        }
+
+        public void HideGuide()
+        {
+            if (guide == null) return;
+            Children.Remove(guide);
+            guide = null;
+            if (!Ctl.Settings.GuideShown) { Ctl.Settings.GuideShown = true; Ctl.MarkDirty(); }
         }
 
         // Screenshots: scroll so that the element tagged with this name is at the top.
@@ -356,6 +379,8 @@ namespace DualEarbuds
             };
 
             CreateTray();
+            // shown once on a new install (an existing settings file counts as seen)
+            if (!ctl.Settings.GuideShown) Loaded += (s, e) => View.ShowGuide();
             ctl.StateChanged += UpdateTray;
             ctl.AssistantActed += text => ShowTrayTip("AI assistant", text, 3000);
             ctl.UpdateFound += v => ShowTrayTip("Dual Earbuds " + v + " is available", "Settings > Updates installs it.");

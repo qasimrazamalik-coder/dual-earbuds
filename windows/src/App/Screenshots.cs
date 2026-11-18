@@ -83,7 +83,7 @@ namespace DualEarbuds
             return 0;
         }
 
-        static readonly string[] Extras = { "phones-pin", "listen-to-device", "settings-appearance", "settings-smart", "home-outputs", "home-together" };
+        static readonly string[] Extras = { "phones-pin", "listen-to-device", "settings-appearance", "settings-smart", "home-outputs", "home-together", "settings-ai", "first-run-guide" };
 
         // The newer screens with the demo data they need.
         static MainView BuildExtra(string shot, string theme)
@@ -118,6 +118,18 @@ namespace DualEarbuds
                     v.Navigate("home");
                     Layout(v);
                     v.ScrollTo("anchor_outputs");
+                    break;
+                case "settings-ai":
+                    c.Settings.McpOn = true;
+                    c.NoteAssistantAction("Claude", "set_listener_volume", "Set Redmi Note 12 volume to 60 %.");
+                    c.NoteAssistantAction("Claude", "get_status", "Sharing from Headphones (TWS).");
+                    v.Navigate("settings");
+                    Layout(v);
+                    v.ScrollTo("anchor_ai");
+                    break;
+                case "first-run-guide":
+                    v.Navigate("home");
+                    v.ShowGuide();
                     break;
                 case "home-together":
                     c.SetPriority(SyncPriority.Together);
