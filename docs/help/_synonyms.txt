@@ -1,0 +1,5 @@
+# word: alt1, alt2
+awaz: sound, audio
+der: delay, late
+late: delay
+chal nahi raha: not working
