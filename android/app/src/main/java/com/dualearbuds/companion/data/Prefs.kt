@@ -25,6 +25,7 @@ object Prefs {
     private const val K_SAMSUNG_TIP_HIDDEN = "samsung_tip_hidden"
     private const val K_RECENT_HOSTS = "recent_hosts"
     private const val K_BRAND_DONE = "brand_steps_done"
+    private const val K_GUIDE_SEEN = "first_run_guide_seen"
 
     const val DEFAULT_VOLUME = 100
     const val MAX_VOLUME = 150
@@ -103,6 +104,11 @@ object Prefs {
     var brandStepsDone: Boolean
         get() = sp.getBoolean(K_BRAND_DONE, false)
         set(value) = sp.edit().putBoolean(K_BRAND_DONE, value).apply()
+
+    /** The first-run guide was shown (or skipped). It stays re-openable from Settings. */
+    var firstRunGuideSeen: Boolean
+        get() = sp.getBoolean(K_GUIDE_SEEN, false)
+        set(value) = sp.edit().putBoolean(K_GUIDE_SEEN, value).apply()
 
     /** Encoded with [RecentHosts.encode]. */
     var recentHosts: String

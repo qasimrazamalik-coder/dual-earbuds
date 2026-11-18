@@ -130,6 +130,7 @@ private fun AppPickerDialog(onPick: (InstalledApp) -> Unit, onDismiss: () -> Uni
                             Row(
                                 Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = 48.dp)
                                     .clickable { onPick(a) }
                                     .padding(vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically

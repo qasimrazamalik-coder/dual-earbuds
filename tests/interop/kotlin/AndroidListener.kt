@@ -1,6 +1,6 @@
 // Interop harness: the Android listener on a plain JVM.
 //
-// Runs UNCHANGED: net/StreamConnection (WebSocket session, message parsing), net/UdpAudio (UdpWire, SeqGate,
+// Runs UNCHANGED: net/StreamConnection (WebSocket session, message parsing), net/UdpAudio (UdpWire, SeqGate, TransportMerge,
 // UdpPolicy, UdpAudioReceiver), net/InfoClient, net/LinkParser (LinkTarget), audio/JitterBuffer + controllers,
 // audio/PacketConcealer, audio/sync/* (ClockSync, DeadlineNeed, SyncPlanner, RateTrimmer, LatencySmoother).
 // OkHttp, org.json and SystemClock are thin shims (tests/interop/kotlin/shims).
@@ -26,7 +26,7 @@ import com.dualearbuds.companion.net.HostKind
 import com.dualearbuds.companion.net.InfoClient
 import com.dualearbuds.companion.net.InfoResult
 import com.dualearbuds.companion.net.LinkTarget
-import com.dualearbuds.companion.net.SeqGate
+import com.dualearbuds.companion.net.TransportMerge
 import com.dualearbuds.companion.net.StreamConnection
 import com.dualearbuds.companion.net.UdpAudioReceiver
 import com.dualearbuds.companion.net.UdpPolicy
@@ -239,7 +239,7 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
     private var syncJob: Job? = null
     private var udp: UdpAudioReceiver? = null
     val udpPolicy = UdpPolicy()
-    private val gate = SeqGate()
+    private val merge = TransportMerge<Pair<Int, ShortArray>>()
     private var udpJob: Job? = null
     @Volatile private var lastSeq = -1L
     private var sentNeedMs: Int? = null
@@ -292,7 +292,7 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
         override fun onOpened() {
             lastSeq = -1L
             sentNeedMs = null
-            gate.reset()
+            merge.reset()
             engine.resetCounters()
             sendStatus()
             startSyncLoop()
@@ -308,13 +308,17 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
         override fun onClock(seq: Long, h: Double) = engine.onClock(seq, h)
         override fun onKick(reason: String) { kickReason = reason; connection?.close() }
         override fun onUdpOffer(port: Int, token: String) = startUdp(port, token)
-        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) { wsPackets.incrementAndGet(); deliver(rate, seq, samples) }
+        override fun onPacket(rate: Int, seq: Long, samples: ShortArray) { wsPackets.incrementAndGet(); deliver(rate, seq, samples, fromUdp = false) }
     }
 
-    /** PlaybackService.deliver. */
-    private fun deliver(rate: Int, seq: Long, samples: ShortArray) {
+    /** PlaybackService.deliver + play. */
+    private fun deliver(rate: Int, seq: Long, samples: ShortArray, fromUdp: Boolean) {
         if (rate !in 8000..192000) return
-        gate.offer(seq) {
+        merge.offer(seq, fromUdp, SystemClock.elapsedRealtime(), rate to samples) { s, (r, pcm) -> play(r, s, pcm) }
+    }
+
+    private fun play(rate: Int, seq: Long, samples: ShortArray) {
+        run {
             val prev = lastSeq
             if (prev >= 0) {
                 val expected = (prev + 1) and 0xFFFFFFFFL
@@ -344,7 +348,7 @@ class ListenerSim(private val target: LinkTarget, private val r: Report, private
         }
         override fun onBlock(block: UdpWire.Block) {
             if (dropThis) { dropCur = maxOf(dropCur, block.seq); return } // blocks come oldest first: the last is cur
-            deliver(block.rate, block.seq, block.samples)
+            deliver(block.rate, block.seq, block.samples, fromUdp = true)
         }
         override fun onError(reason: String) { r.info("UDP unusable: $reason") }
     }

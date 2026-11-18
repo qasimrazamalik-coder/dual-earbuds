@@ -26,6 +26,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -54,7 +56,7 @@ fun TopBar(
             verticalAlignment = Alignment.CenterVertically
         ) {
             if (onBack != null) {
-                IconButton(onClick = onBack, modifier = Modifier.size(40.dp)) {
+                IconButton(onClick = onBack, modifier = Modifier.size(MinTouchTarget)) {
                     Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = c.text, modifier = Modifier.size(20.dp))
                 }
                 Spacer(Modifier.width(4.dp))
@@ -64,7 +66,7 @@ fun TopBar(
             Row(Modifier.weight(1f), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                 if (!readout.isNullOrBlank()) {
                     if (live) {
-                        StatusDot(Tone.LIVE)
+                        StatusDot(Tone.LIVE, Modifier.semantics { contentDescription = "Live" })
                         Spacer(Modifier.width(6.dp))
                     }
                     Text(

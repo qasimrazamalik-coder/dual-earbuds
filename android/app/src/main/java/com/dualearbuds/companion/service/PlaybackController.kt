@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.core.content.ContextCompat
 import com.dualearbuds.companion.audio.BufferMode
 import com.dualearbuds.companion.audio.sync.LatencySource
+import com.dualearbuds.companion.audio.sync.SyncPriority
 import com.dualearbuds.companion.data.Prefs
 import com.dualearbuds.companion.dsp.EqPreset
 import com.dualearbuds.companion.dsp.SoundClass
@@ -64,6 +65,8 @@ data class PlayerState(
     val needMs: Int? = null,
     val usedLatencyMs: Double? = null,
     val latencySource: LatencySource? = null,
+    /** v3.3 host sync priority, null until the host's hello / playout says (shown by the Ask screen). */
+    val priority: SyncPriority? = null,
     /** v3.2: how audio arrives right now: "UDP", "WS", or "" while not connected. */
     val transport: String = "",
     /** Battery saver is on / this app's background work is restricted (read when playback starts and on change). */

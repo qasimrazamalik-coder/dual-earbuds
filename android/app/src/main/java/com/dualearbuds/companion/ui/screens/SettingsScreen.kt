@@ -50,7 +50,9 @@ fun SettingsScreen(
     onOpenGuide: () -> Unit,
     onOpenAbout: () -> Unit,
     onOpenSetup: () -> Unit,
-    onOpenBestSound: () -> Unit
+    onOpenBestSound: () -> Unit,
+    onOpenAsk: () -> Unit,
+    onOpenWelcome: () -> Unit
 ) {
     val context = LocalContext.current
     val theme by AppSettings.theme.collectAsStateWithLifecycle()
@@ -105,6 +107,16 @@ fun SettingsScreen(
 
         Section("Help") {
             Panel {
+                PanelRow(
+                    "Ask",
+                    subtitle = "Type a question; answers come from the built-in help and live numbers, offline",
+                    leading = painterResource(R.drawable.ic_help),
+                    chevron = true,
+                    onClick = onOpenAsk
+                )
+                PanelDivider()
+                PanelRow("Getting started", subtitle = "The three first steps again: pair, join or share, calibrate", chevron = true, onClick = onOpenWelcome)
+                PanelDivider()
                 PanelRow(
                     "Copy diagnostics",
                     subtitle = "Versions, buffer and sync numbers, last 200 log lines. Never the link key or PIN.",

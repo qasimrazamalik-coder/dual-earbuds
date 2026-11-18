@@ -208,7 +208,7 @@ private fun SyncRow(player: PlayerState) {
                 }
             )
         }
-        SyncScope(offset)
+        SyncScope(offset, label = "This phone")
         if (!player.synced) Hint("Plays on the adaptive buffer until the host's clock is known.")
     }
 }

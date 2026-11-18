@@ -167,7 +167,14 @@ class AudioEngine {
 
     fun onClock(seq: Long, h: Double) = lock.withLock { clock.onClock(seq, h, nowMs()) }
 
-    fun setPlayoutMs(ms: Double) = lock.withLock { clock.playoutMs = ms }
+    fun setPlayoutMs(ms: Double) = lock.withLock {
+        if (abs(ms - clock.playoutMs) >= 1.0) playoutJumped = true
+        clock.playoutMs = ms
+    }
+
+    /** P changed: the audio thread re-converges at once (skip / insert) instead of trimming for seconds. */
+    @Volatile
+    private var playoutJumped = false
 
     /** v3.3 host sync priority: picks the needMs formula and the adaptive buffer's floor. */
     fun setPriority(priority: SyncPriority) = lock.withLock { jitter.priority = priority }
@@ -399,6 +406,10 @@ class AudioEngine {
                     if (target != null && heardAt != null) {
                         val err = heardAt - target
                         syncErrorMs = err
+                        if (playoutJumped) {
+                            playoutJumped = false
+                            planner.snapNext()
+                        }
                         if (abs(err) < MAX_SANE_ERROR_MS) {
                             when (val action = planner.plan(err, track.rate)) {
                                 is SyncAction.Skip -> {
