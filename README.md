@@ -32,6 +32,8 @@ own outputs, and other phones and laptops over Wi-Fi or a hotspot, each with its
 | **Joining** | Automatic discovery on the same network, QR code, or a pasted link; optional room PIN |
 | **Source** | Whole device or a single app (Windows 10 build 20348+/11, Android capture rules apply) |
 | **On-device processing** | Optional smart EQ, dialogue boost, night mode, adaptive buffer, hearing profiles, mic noise suppression for talk-over |
+| **Built-in help** | **Ask** page in both apps: answers from 150+ help topics plus live facts about your session ("phones are late because…"), understands Roman Urdu, works offline; optional local AI model via Ollama on Windows |
+| **AI assistants (MCP)** | Let Claude, ChatGPT, Codex, Cursor and others check status, change volumes, start sharing or run Setup check — off by default, local only, token-protected, every action shown ([setup](docs/help/ai-assistants.md)) |
 | **Privacy** | Local network only, per-link secret key, guessing lockout, no account, no cloud |
 | **Footprint** | Windows app under 1 MB on .NET Framework 4.8 (built into Windows); signed APK with in-app updates |
 
