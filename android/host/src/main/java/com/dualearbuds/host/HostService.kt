@@ -335,14 +335,15 @@ class HostService : Service() {
                 }
             }
         }
+        val pacer = CapturePacer(SystemClock.elapsedRealtime())
         val packetizer = Packetizer(PlaybackCapture.SAMPLE_RATE) { pkt, capturedAt ->
             capturedPackets.incrementAndGet()
             capturedPeak.accumulateAndGet(peakOf(pkt)) { a, b -> maxOf(a, b) }
-            deliver(pkt, capturedAt)
+            // Backlog that filler silence already stood in for is dropped, so gaps never add latency.
+            if (pacer.admitReal(SystemClock.elapsedRealtime())) deliver(pkt, capturedAt)
         }
         val buf = ByteArray(packetizer.packetBytes)
         val silence = ByteArray(packetizer.packetBytes)
-        val pacer = CapturePacer(SystemClock.elapsedRealtime())
         try {
             while (capturing) {
                 // Never block: some phones' playback capture delivers nothing at all (see CapturePacer).
