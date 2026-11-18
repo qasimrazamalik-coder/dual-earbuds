@@ -51,7 +51,8 @@ fun SettingsScreen(
     onOpenAbout: () -> Unit,
     onOpenSetup: () -> Unit,
     onOpenBestSound: () -> Unit,
-    onOpenAsk: () -> Unit
+    onOpenAsk: () -> Unit,
+    onOpenWelcome: () -> Unit
 ) {
     val context = LocalContext.current
     val theme by AppSettings.theme.collectAsStateWithLifecycle()
@@ -113,6 +114,8 @@ fun SettingsScreen(
                     chevron = true,
                     onClick = onOpenAsk
                 )
+                PanelDivider()
+                PanelRow("Getting started", subtitle = "The three first steps again: pair, join or share, calibrate", chevron = true, onClick = onOpenWelcome)
                 PanelDivider()
                 PanelRow(
                     "Copy diagnostics",

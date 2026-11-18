@@ -2,6 +2,8 @@ package com.dualearbuds.companion.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import com.dualearbuds.companion.data.Prefs
 import com.dualearbuds.companion.data.SoundSettings
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -15,6 +17,7 @@ import com.dualearbuds.companion.ui.screens.HearingScreen
 import com.dualearbuds.companion.ui.screens.SettingsScreen
 import com.dualearbuds.companion.ui.screens.SetupCheckScreen
 import com.dualearbuds.companion.ui.screens.SmartFeaturesScreen
+import com.dualearbuds.companion.ui.screens.WelcomeScreen
 import com.dualearbuds.companion.ui.screens.home.HomeScreen
 import com.dualearbuds.host.HostScreen
 
@@ -30,6 +33,8 @@ object Routes {
     const val SETUP = "setup"
     const val BEST = "best"
     const val ASK = "ask"
+    const val WELCOME = "welcome"
+    const val WELCOME_AGAIN = "welcome_again"
 }
 
 @Composable
@@ -40,7 +45,41 @@ fun AppNav() {
         if (!nav.popBackStack()) nav.navigate(Routes.HOME)
     }
 
-    NavHost(navController = nav, startDestination = Routes.HOME) {
+    // First-run guide once on a fresh install (not for people who already joined a host before this version).
+    val start = remember { if (!Prefs.firstRunGuideSeen && Prefs.lastLink.isBlank()) Routes.WELCOME else Routes.HOME }
+    /** Leaves the first-run guide for Home (replacing it), then opens [route] on top if given. */
+    fun leaveWelcome(route: String?) {
+        nav.navigate(Routes.HOME) {
+            popUpTo(Routes.WELCOME) { inclusive = true }
+            launchSingleTop = true
+        }
+        if (route != null) go(route)
+    }
+
+    NavHost(navController = nav, startDestination = start) {
+        composable(Routes.WELCOME) {
+            WelcomeScreen(
+                onDone = { leaveWelcome(null) },
+                onBack = null,
+                onJoin = { leaveWelcome(null) },
+                onShareThisPhone = { leaveWelcome(Routes.HOST) },
+                onCalibrate = { leaveWelcome(Routes.CALIBRATE) }
+            )
+        }
+        composable(Routes.WELCOME_AGAIN) {
+            WelcomeScreen(
+                onDone = { back() },
+                onBack = { back() },
+                onJoin = {
+                    nav.navigate(Routes.HOME) {
+                        popUpTo(Routes.HOME) { inclusive = false }
+                        launchSingleTop = true
+                    }
+                },
+                onShareThisPhone = { go(Routes.HOST) },
+                onCalibrate = { go(Routes.CALIBRATE) }
+            )
+        }
         composable(Routes.HOME) {
             HomeScreen(
                 onOpenGuide = { go(Routes.GUIDE) },
@@ -61,7 +100,8 @@ fun AppNav() {
                 onOpenAbout = { go(Routes.ABOUT) },
                 onOpenSetup = { go(Routes.SETUP) },
                 onOpenBestSound = { go(Routes.BEST) },
-                onOpenAsk = { go(Routes.ASK) }
+                onOpenAsk = { go(Routes.ASK) },
+                onOpenWelcome = { go(Routes.WELCOME_AGAIN) }
             )
         }
         composable(Routes.ASK) { AskScreen(onBack = { back() }) }
